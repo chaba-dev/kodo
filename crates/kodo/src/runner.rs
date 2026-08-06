@@ -1,3 +1,8 @@
+//! Typed local tools built around a single registered [`Workspace`].
+//!
+//! Every result is bounded before crossing the daemon protocol. Filesystem mutations are
+//! serialized, while read-only blocking work is concurrency-limited off the async runtime.
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -38,12 +43,15 @@ pub enum RunnerError {
 }
 
 #[derive(Clone, Debug)]
+/// Executes the protocol tool surface within one workspace and one process registry.
 pub struct Runner {
     workspace: Workspace,
     max_output_bytes: usize,
     max_results: usize,
     processes: ProcessManager,
+    // Keep patch validation and application atomic with respect to other runner patch requests.
     mutation_lock: Arc<Mutex<()>>,
+    // Git and filesystem calls are blocking; cap them to protect runtime and host resources.
     blocking_tools: Arc<Semaphore>,
 }
 
@@ -92,6 +100,7 @@ impl Runner {
                     .await
                     .map_err(|error| RunnerError::Task(error.to_string()))?;
                 tokio::task::spawn_blocking(move || {
+                    // Hold the permit for the complete blocking operation, including child reaping.
                     let _permit = permit;
                     runner.execute_blocking(request)
                 })
@@ -223,6 +232,8 @@ impl Runner {
                 }
 
                 let Ok(content) = self.workspace.read_to_string(&path) else {
+                    // Search is best-effort across repository files; binary and unreadable files
+                    // should not prevent useful matches from other files.
                     continue;
                 };
 
@@ -323,6 +334,8 @@ impl Runner {
                 "--".to_owned(),
             ]
         };
+        // Disable user-configured diff drivers: inspection must not execute external diff commands
+        // or text converters.
         let tracked = self.git(
             tracked_args
                 .into_iter()
@@ -389,7 +402,9 @@ impl Runner {
             .mutation_lock
             .lock()
             .expect("workspace mutation lock poisoned");
+        // Derive and confine every affected path before asking Git to mutate the worktree.
         let paths = self.patch_paths(patch)?;
+        // Preflight under the same mutation lock so a successful check describes the state applied.
         let check = self.git_with_input(["apply", "--check"], patch)?;
         successful_patch(check)?;
         let applied = self.git_with_input(["apply"], patch)?;
@@ -612,6 +627,8 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> Result<(Vec<u8>, bool), 
     let mut buffer = [0; 8 * 1024];
     let mut truncated = false;
     loop {
+        // Continue draining after reaching the retention limit so a verbose child cannot block on
+        // a full pipe while its parent waits for it to exit.
         let read = reader.read(&mut buffer)?;
         if read == 0 {
             return Ok((output, truncated));

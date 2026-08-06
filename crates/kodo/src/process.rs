@@ -1,3 +1,8 @@
+//! Supervised shell-command lifecycle and replayable, bounded output retention.
+//!
+//! Each command receives a dedicated process group so stop, timeout, normal shell exit, and daemon
+//! teardown all clean up descendants rather than only the immediate shell process.
+
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
@@ -31,6 +36,7 @@ pub enum ProcessError {
 }
 
 #[derive(Clone)]
+/// Owns active and recently completed commands for polling by opaque process ID.
 pub struct ProcessManager {
     entries: Arc<Mutex<HashMap<Uuid, ProcessEntry>>>,
     max_pending_output_bytes: usize,
@@ -56,6 +62,7 @@ struct ProcessState {
 }
 
 struct OutputBuffer {
+    // Polling is replayable: chunks remain until bounded retention evicts the oldest entries.
     chunks: VecDeque<CommandOutput>,
     bytes: usize,
     next_sequence: u64,
@@ -113,6 +120,7 @@ impl ProcessManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
+            // A separate group lets lifecycle actions cover grandchildren spawned by the shell.
             .process_group(0)
             .spawn()
             .map_err(ProcessError::Start)?;
@@ -259,6 +267,7 @@ async fn supervise(supervisor: Supervisor) {
     );
     let group = process_group.as_ref().and_then(|guard| guard.group);
 
+    // Prefer a completed wait over a simultaneous stop/timeout to preserve the real exit status.
     let outcome = if timeout.is_zero() {
         tokio::select! {
             biased;
@@ -303,6 +312,7 @@ async fn supervise(supervisor: Supervisor) {
     if let Some(process_group) = process_group.as_mut() {
         process_group.disarm();
     }
+    // Retain terminal state briefly so clients can reconnect and perform a final poll.
     tokio::time::sleep(PROCESS_RETENTION).await;
     entries.lock().await.remove(&process_id);
 }
@@ -355,6 +365,8 @@ async fn cleanup_process_group(process_group: Option<Pid>) {
 }
 
 async fn finish_reader(mut reader: tokio::task::JoinHandle<()>) -> bool {
+    // Descendants can inherit the pipes even after the shell exits; do not let them hold terminal
+    // status reporting open indefinitely.
     if tokio::time::timeout(Duration::from_millis(25), &mut reader)
         .await
         .is_err()

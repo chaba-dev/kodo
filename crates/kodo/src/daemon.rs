@@ -1,3 +1,8 @@
+//! Concurrent newline-delimited JSON transport for the local runner.
+//!
+//! Dispatch is bounded and request IDs are idempotent: retries share one response slot, preventing
+//! duplicate mutations while allowing completed responses to be replayed.
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -30,7 +35,9 @@ struct ResponseCache {
 }
 
 struct ResponseSlot {
+    // The fingerprint prevents a caller from reusing an id for different tool input.
     fingerprint: [u8; 32],
+    // Holding this lock elects exactly one execution for concurrent retries of the same request.
     response: Mutex<Option<String>>,
 }
 
@@ -89,6 +96,7 @@ impl Dispatcher {
         };
         let response = serialize_response(response);
         *cached = Some(response.clone());
+        // Never acquire the cache mutex while holding a slot: eviction follows the opposite order.
         drop(cached);
         let mut cache = self.cache.lock().expect("response cache lock poisoned");
         if cache
@@ -157,6 +165,7 @@ pub async fn serve(
                 if !input_closed && requests.len() < MAX_IN_FLIGHT_REQUESTS => {
                 let result = line_result?;
                 if matches!(result, RequestLine::Eof) {
+                    // Stop accepting input but flush every already accepted request before exit.
                     input_closed = true;
                     continue;
                 }
@@ -238,6 +247,7 @@ async fn read_request_line(
         if !too_large && line.len() + content.len() <= MAX_REQUEST_BYTES {
             line.extend_from_slice(content);
         } else {
+            // Discard through the newline to preserve framing without retaining attacker input.
             too_large = true;
         }
         input.consume(consumed);

@@ -1,3 +1,8 @@
+//! Versioned wire contract between the local daemon and its eventual Phoenix transport.
+//!
+//! Tagged request/result variants keep dispatch explicit. Request IDs support replay, while command
+//! output sequence numbers let clients resume polling without acknowledging destructive reads.
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -93,7 +98,9 @@ pub enum ToolResult {
         process_id: Uuid,
         status: ProcessStatus,
         output: Vec<CommandOutput>,
+        /// Oldest sequence still retained; a newer value than requested signals lost output.
         earliest_sequence: u64,
+        /// Cursor to persist for the next poll.
         next_sequence: u64,
         truncated: bool,
     },

@@ -1,3 +1,8 @@
+//! Workspace discovery and the filesystem security boundary for runner tools.
+//!
+//! File and patch paths are always relative to one canonical Git root. Direct reads use a retained
+//! directory capability; paths passed to external programs are validated here first.
+
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -56,6 +61,7 @@ impl Workspace {
 
     pub fn from_root(root: impl AsRef<Path>) -> Result<Self, WorkspaceError> {
         let root = canonicalize(root.as_ref())?;
+        // Ambient authority is used once, at registration, then narrowed to this directory handle.
         let root_dir = Dir::open_ambient_dir(&root, ambient_authority()).map_err(|source| {
             WorkspaceError::Io {
                 path: root.clone(),
@@ -102,6 +108,9 @@ impl Workspace {
     }
 
     /// Resolve a path that may not exist by validating its nearest existing ancestor.
+    ///
+    /// This permits patch-created files while still rejecting an existing symlinked ancestor that
+    /// points outside the workspace.
     pub fn resolve_new(&self, path: impl AsRef<Path>) -> Result<PathBuf, WorkspaceError> {
         let path = validate_relative(path.as_ref())?;
         let candidate = self.root.join(path);
