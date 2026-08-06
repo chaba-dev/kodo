@@ -639,11 +639,11 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 
 ** TODO Milestone 1: Local tool runner
 
-- [ ] Rust daemon and workspace registration.
+- [X] Rust daemon and workspace registration.
 - [ ] Authenticated WebSocket connection to Phoenix.
-- [ ] Read, search, patch, process, and repository-inspection tools.
+- [X] Read, search, patch, process, and repository-inspection tools.
 - [ ] Path confinement and bounded output.
-- [ ] Command output streaming and cancellation.
+- [X] Command output streaming and cancellation.
 - [ ] Exit criterion: typed requests issued without a model can inspect and
   modify a fixture repository, run a test, stream its output, and return the
   resulting diff.
