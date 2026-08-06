@@ -80,8 +80,14 @@ impl Runner {
                 cwd,
                 timeout_ms,
             } => self.start_command(&command, &cwd, timeout_ms).await,
-            ToolRequest::PollCommand { process_id } => self.poll_command(process_id).await,
-            ToolRequest::StopCommand { process_id } => self.stop_command(process_id).await,
+            ToolRequest::PollCommand {
+                process_id,
+                after_sequence,
+            } => self.poll_command(process_id, after_sequence).await,
+            ToolRequest::StopCommand {
+                process_id,
+                after_sequence,
+            } => self.stop_command(process_id, after_sequence).await,
         }
     }
 
@@ -99,22 +105,34 @@ impl Runner {
         Ok(ToolResult::CommandStarted { process_id })
     }
 
-    async fn poll_command(&self, process_id: Uuid) -> Result<ToolResult, RunnerError> {
-        let poll = self.processes.poll(process_id).await?;
+    async fn poll_command(
+        &self,
+        process_id: Uuid,
+        after_sequence: u64,
+    ) -> Result<ToolResult, RunnerError> {
+        let poll = self.processes.poll(process_id, after_sequence).await?;
         Ok(ToolResult::CommandPoll {
             process_id,
             status: poll.status,
             output: poll.output,
+            earliest_sequence: poll.earliest_sequence,
+            next_sequence: poll.next_sequence,
             truncated: poll.truncated,
         })
     }
 
-    async fn stop_command(&self, process_id: Uuid) -> Result<ToolResult, RunnerError> {
-        let poll = self.processes.stop(process_id).await?;
+    async fn stop_command(
+        &self,
+        process_id: Uuid,
+        after_sequence: u64,
+    ) -> Result<ToolResult, RunnerError> {
+        let poll = self.processes.stop(process_id, after_sequence).await?;
         Ok(ToolResult::CommandPoll {
             process_id,
             status: poll.status,
             output: poll.output,
+            earliest_sequence: poll.earliest_sequence,
+            next_sequence: poll.next_sequence,
             truncated: poll.truncated,
         })
     }
@@ -535,20 +553,26 @@ mod tests {
 
         let output = tokio::time::timeout(Duration::from_secs(2), async {
             let mut output = String::new();
+            let mut after_sequence = 0;
             loop {
                 let result = runner
-                    .execute(ToolRequest::PollCommand { process_id })
+                    .execute(ToolRequest::PollCommand {
+                        process_id,
+                        after_sequence,
+                    })
                     .await
                     .unwrap();
                 let ToolResult::CommandPoll {
                     status,
                     output: chunks,
+                    next_sequence,
                     ..
                 } = result
                 else {
                     panic!("expected command output");
                 };
                 output.extend(chunks.into_iter().map(|chunk| chunk.content));
+                after_sequence = next_sequence.saturating_sub(1);
                 if matches!(
                     status,
                     crate::protocol::ProcessStatus::Exited { code: Some(0) }

@@ -49,17 +49,28 @@ struct ProcessState {
     status: ProcessStatus,
 }
 
-#[derive(Default)]
 struct OutputBuffer {
     chunks: VecDeque<CommandOutput>,
     bytes: usize,
-    truncated: bool,
+    next_sequence: u64,
+}
+
+impl Default for OutputBuffer {
+    fn default() -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            bytes: 0,
+            next_sequence: 1,
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProcessPoll {
     pub status: ProcessStatus,
     pub output: Vec<CommandOutput>,
+    pub earliest_sequence: u64,
+    pub next_sequence: u64,
     pub truncated: bool,
 }
 
@@ -122,26 +133,47 @@ impl ProcessManager {
         Ok(process_id)
     }
 
-    pub async fn poll(&self, process_id: Uuid) -> Result<ProcessPoll, ProcessError> {
+    pub async fn poll(
+        &self,
+        process_id: Uuid,
+        after_sequence: u64,
+    ) -> Result<ProcessPoll, ProcessError> {
         let entries = self.entries.lock().await;
         let entry = entries
             .get(&process_id)
             .ok_or(ProcessError::Unknown(process_id))?;
         let state = Arc::clone(&entry.state);
         drop(entries);
-        let mut state = state.lock().expect("process state lock poisoned");
-        let output = state.output.chunks.drain(..).collect();
-        let truncated = std::mem::take(&mut state.output.truncated);
-        state.output.bytes = 0;
+        let state = state.lock().expect("process state lock poisoned");
+        let earliest_sequence = state
+            .output
+            .chunks
+            .front()
+            .map_or(state.output.next_sequence, |chunk| chunk.sequence);
+        let output = state
+            .output
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.sequence > after_sequence)
+            .cloned()
+            .collect::<Vec<_>>();
+        let truncated = after_sequence.saturating_add(1) < earliest_sequence
+            || output.iter().any(|chunk| chunk.truncated);
 
         Ok(ProcessPoll {
             status: state.status.clone(),
             output,
+            earliest_sequence,
+            next_sequence: state.output.next_sequence,
             truncated,
         })
     }
 
-    pub async fn stop(&self, process_id: Uuid) -> Result<ProcessPoll, ProcessError> {
+    pub async fn stop(
+        &self,
+        process_id: Uuid,
+        after_sequence: u64,
+    ) -> Result<ProcessPoll, ProcessError> {
         let entries = self.entries.lock().await;
         let entry = entries
             .get(&process_id)
@@ -158,7 +190,7 @@ impl ProcessManager {
         if running && stop.send(StopReason::Stopped).await.is_err() {
             return Err(ProcessError::SupervisorStopped(process_id));
         }
-        wait_until_terminal(self, process_id).await
+        wait_until_terminal(self, process_id, after_sequence).await
     }
 }
 
@@ -251,9 +283,10 @@ async fn finish_reader(mut reader: tokio::task::JoinHandle<()>) {
 async fn wait_until_terminal(
     manager: &ProcessManager,
     process_id: Uuid,
+    after_sequence: u64,
 ) -> Result<ProcessPoll, ProcessError> {
     loop {
-        let poll = manager.poll(process_id).await?;
+        let poll = manager.poll(process_id, after_sequence).await?;
         if poll.status != ProcessStatus::Running {
             return Ok(poll);
         }
@@ -277,12 +310,22 @@ fn spawn_reader(
             let content = String::from_utf8_lossy(&bytes[..read]).into_owned();
             let mut state = state.lock().expect("process state lock poisoned");
             let output = &mut state.output;
-            let remaining = max_pending_output_bytes.saturating_sub(output.bytes);
-            let (content, truncated) = truncate_utf8(content, remaining);
-            output.truncated |= truncated;
+            let (content, truncated) = truncate_utf8(content, max_pending_output_bytes);
             if !content.is_empty() {
+                while output.bytes + content.len() > max_pending_output_bytes {
+                    let Some(removed) = output.chunks.pop_front() else {
+                        break;
+                    };
+                    output.bytes -= removed.content.len();
+                }
                 output.bytes += content.len();
-                output.chunks.push_back(CommandOutput { stream, content });
+                output.chunks.push_back(CommandOutput {
+                    sequence: output.next_sequence,
+                    stream,
+                    content,
+                    truncated,
+                });
+                output.next_sequence += 1;
             }
         }
     })
@@ -351,7 +394,7 @@ mod tests {
             .await
             .unwrap();
 
-        let poll = manager.stop(process_id).await.unwrap();
+        let poll = manager.stop(process_id, 0).await.unwrap();
 
         assert_eq!(poll.status, ProcessStatus::Stopped);
     }
@@ -384,7 +427,7 @@ mod tests {
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let poll = manager.poll(process_id).await.unwrap();
+        let poll = manager.poll(process_id, 0).await.unwrap();
 
         assert_eq!(poll.status, ProcessStatus::Exited { code: Some(0) });
     }
@@ -400,7 +443,7 @@ mod tests {
 
         tokio::time::timeout(Duration::from_millis(200), async {
             loop {
-                let poll = manager.poll(process_id).await.unwrap();
+                let poll = manager.poll(process_id, 0).await.unwrap();
                 if poll.status != ProcessStatus::Running {
                     assert_eq!(poll.status, ProcessStatus::Exited { code: Some(0) });
                     break;
@@ -422,7 +465,7 @@ mod tests {
             .unwrap();
         let descendant = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                let poll = manager.poll(process_id).await.unwrap();
+                let poll = manager.poll(process_id, 0).await.unwrap();
                 let output: String = poll.output.into_iter().map(|chunk| chunk.content).collect();
                 if let Ok(pid) = output.trim().parse::<i32>() {
                     return Pid::from_raw(pid);
@@ -433,7 +476,7 @@ mod tests {
         .await
         .expect("command did not report its descendant process");
 
-        let poll = manager.stop(process_id).await.unwrap();
+        let poll = manager.stop(process_id, 0).await.unwrap();
 
         assert_eq!(poll.status, ProcessStatus::Stopped);
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -445,18 +488,37 @@ mod tests {
         .expect("descendant process survived cancellation");
     }
 
+    #[tokio::test]
+    async fn repeated_poll_replays_process_output() {
+        let manager = ProcessManager::new(1024);
+        let directory = TempDir::new().unwrap();
+        let process_id = manager
+            .start("printf replay-me", directory.path(), Duration::ZERO)
+            .await
+            .unwrap();
+        let first = poll_until_finished(&manager, process_id).await;
+
+        let replay = manager.poll(process_id, 0).await.unwrap();
+
+        assert_eq!(replay.output, first.output);
+    }
+
     async fn poll_until_finished(manager: &ProcessManager, process_id: Uuid) -> ProcessPoll {
         tokio::time::timeout(Duration::from_secs(2), async {
             let mut output = Vec::new();
             let mut truncated = false;
+            let mut after_sequence = 0;
             loop {
-                let mut poll = manager.poll(process_id).await.unwrap();
+                let mut poll = manager.poll(process_id, after_sequence).await.unwrap();
                 output.append(&mut poll.output);
                 truncated |= poll.truncated;
+                after_sequence = poll.next_sequence.saturating_sub(1);
                 if poll.status != ProcessStatus::Running {
                     return ProcessPoll {
                         status: poll.status,
                         output,
+                        earliest_sequence: poll.earliest_sequence,
+                        next_sequence: poll.next_sequence,
                         truncated,
                     };
                 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RequestEnvelope {
@@ -54,9 +54,11 @@ pub enum ToolRequest {
     },
     PollCommand {
         process_id: Uuid,
+        after_sequence: u64,
     },
     StopCommand {
         process_id: Uuid,
+        after_sequence: u64,
     },
 }
 
@@ -91,6 +93,8 @@ pub enum ToolResult {
         process_id: Uuid,
         status: ProcessStatus,
         output: Vec<CommandOutput>,
+        earliest_sequence: u64,
+        next_sequence: u64,
         truncated: bool,
     },
 }
@@ -113,8 +117,10 @@ pub enum ProcessStatus {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CommandOutput {
+    pub sequence: u64,
     pub stream: OutputStream,
     pub content: String,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
