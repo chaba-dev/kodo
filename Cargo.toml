@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/kodo"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/chaba2/kodo"
+rust-version = "1.96"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
