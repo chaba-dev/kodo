@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -35,6 +36,8 @@ pub enum RunnerError {
     NonUtf8Path(PathBuf),
     #[error("{0}")]
     OutputLimit(String),
+    #[error("runner task failed: {0}")]
+    Task(String),
     #[error(transparent)]
     Process(#[from] ProcessError),
 }
@@ -45,6 +48,7 @@ pub struct Runner {
     max_output_bytes: usize,
     max_results: usize,
     processes: ProcessManager,
+    mutation_lock: Arc<Mutex<()>>,
 }
 
 impl Runner {
@@ -54,6 +58,7 @@ impl Runner {
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_results: DEFAULT_MAX_RESULTS,
             processes: ProcessManager::new(DEFAULT_MAX_OUTPUT_BYTES),
+            mutation_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -63,21 +68,12 @@ impl Runner {
             max_output_bytes,
             max_results,
             processes: ProcessManager::new(max_output_bytes),
+            mutation_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub async fn execute(&self, request: ToolRequest) -> Result<ToolResult, RunnerError> {
         match request {
-            ToolRequest::ListFiles { path } => self.list_files(&path),
-            ToolRequest::SearchCode { query, paths } => self.search_code(&query, &paths),
-            ToolRequest::ReadFile {
-                path,
-                offset,
-                limit,
-            } => self.read_file(&path, offset, limit),
-            ToolRequest::GitStatus => self.git_output(["status", "--short"], &[]),
-            ToolRequest::GitDiff { paths } => self.git_diff(&paths),
-            ToolRequest::ApplyPatch { patch } => self.apply_patch(&patch),
             ToolRequest::StartCommand {
                 command,
                 cwd,
@@ -91,6 +87,32 @@ impl Runner {
                 process_id,
                 after_sequence,
             } => self.stop_command(process_id, after_sequence).await,
+            request => {
+                let runner = self.clone();
+                tokio::task::spawn_blocking(move || runner.execute_blocking(request))
+                    .await
+                    .map_err(|error| RunnerError::Task(error.to_string()))?
+            }
+        }
+    }
+
+    fn execute_blocking(&self, request: ToolRequest) -> Result<ToolResult, RunnerError> {
+        match request {
+            ToolRequest::ListFiles { path } => self.list_files(&path),
+            ToolRequest::SearchCode { query, paths } => self.search_code(&query, &paths),
+            ToolRequest::ReadFile {
+                path,
+                offset,
+                limit,
+            } => self.read_file(&path, offset, limit),
+            ToolRequest::GitStatus => self.git_output(["status", "--short"], &[]),
+            ToolRequest::GitDiff { paths } => self.git_diff(&paths),
+            ToolRequest::ApplyPatch { patch } => self.apply_patch(&patch),
+            ToolRequest::StartCommand { .. }
+            | ToolRequest::PollCommand { .. }
+            | ToolRequest::StopCommand { .. } => {
+                unreachable!("process requests are dispatched asynchronously")
+            }
         }
     }
 
@@ -346,6 +368,10 @@ impl Runner {
                 "patch exceeds {MAX_PATCH_BYTES} byte limit"
             )));
         }
+        let _mutation = self
+            .mutation_lock
+            .lock()
+            .expect("workspace mutation lock poisoned");
         let paths = self.patch_paths(patch)?;
         let check = self.git_with_input(["apply", "--check"], patch)?;
         successful_patch(check)?;
