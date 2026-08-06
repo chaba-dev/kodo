@@ -24,7 +24,7 @@ struct Dispatcher {
 #[derive(Default)]
 struct ResponseCache {
     slots: HashMap<Uuid, Arc<ResponseSlot>>,
-    order: VecDeque<Uuid>,
+    order: VecDeque<(Uuid, usize)>,
     response_bytes: usize,
 }
 
@@ -49,10 +49,10 @@ impl Dispatcher {
                 Arc::clone(slot)
             } else {
                 while cache.slots.len() >= MAX_CACHED_REQUESTS {
-                    let Some(expired) = cache.order.pop_front() else {
+                    let Some((expired, response_len)) = cache.order.pop_front() else {
                         return cache_capacity_response(request.request_id);
                     };
-                    remove_cached_response(&mut cache, expired);
+                    remove_cached_response(&mut cache, expired, response_len);
                 }
                 let slot = Arc::new(ResponseSlot {
                     fingerprint,
@@ -96,12 +96,12 @@ impl Dispatcher {
             .is_some_and(|current| Arc::ptr_eq(current, &slot))
         {
             cache.response_bytes += response.len();
-            cache.order.push_back(request.request_id);
+            cache.order.push_back((request.request_id, response.len()));
             while cache.response_bytes > MAX_CACHED_RESPONSE_BYTES {
-                let Some(expired) = cache.order.pop_front() else {
+                let Some((expired, response_len)) = cache.order.pop_front() else {
                     break;
                 };
-                remove_cached_response(&mut cache, expired);
+                remove_cached_response(&mut cache, expired, response_len);
             }
         }
         response
@@ -115,20 +115,9 @@ fn request_fingerprint(request: &ToolRequest) -> [u8; 32] {
     .into()
 }
 
-fn remove_cached_response(cache: &mut ResponseCache, request_id: Uuid) {
-    let Some(slot) = cache.slots.remove(&request_id) else {
-        return;
-    };
-    let Ok(response) = slot.response.try_lock() else {
-        cache.slots.insert(request_id, slot);
-        return;
-    };
-    if let Some(response) = response.as_ref() {
-        cache.response_bytes = cache.response_bytes.saturating_sub(response.len());
-    } else {
-        drop(response);
-        cache.slots.insert(request_id, slot);
-    }
+fn remove_cached_response(cache: &mut ResponseCache, request_id: Uuid, response_len: usize) {
+    cache.slots.remove(&request_id);
+    cache.response_bytes = cache.response_bytes.saturating_sub(response_len);
 }
 
 fn cache_capacity_response(request_id: Uuid) -> String {
@@ -392,6 +381,27 @@ mod tests {
         let retry = handle_line(&dispatcher, &request).await;
 
         assert_eq!(retry, first);
+    }
+
+    #[tokio::test]
+    async fn completed_cache_entries_remain_evictable_during_replay() {
+        let request_id = Uuid::new_v4();
+        let response = "response".to_owned();
+        let slot = Arc::new(ResponseSlot {
+            fingerprint: [0; 32],
+            response: Mutex::new(Some(response.clone())),
+        });
+        let replay = slot.response.lock().await;
+        let mut cache = ResponseCache::default();
+        cache.slots.insert(request_id, Arc::clone(&slot));
+        cache.order.push_back((request_id, response.len()));
+        cache.response_bytes = response.len();
+
+        remove_cached_response(&mut cache, request_id, response.len());
+
+        assert!(!cache.slots.contains_key(&request_id));
+        assert_eq!(cache.response_bytes, 0);
+        assert_eq!(replay.as_deref(), Some("response"));
     }
 
     #[tokio::test]

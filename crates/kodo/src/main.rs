@@ -23,10 +23,13 @@ enum Commands {
 }
 
 #[tokio::main]
-async fn main() {
-    if let Err(error) = run().await {
-        eprintln!("kodo: {error}");
-        std::process::exit(1);
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("kodo: {error}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 

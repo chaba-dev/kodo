@@ -117,6 +117,9 @@ impl ProcessManager {
             .spawn()
             .map_err(ProcessError::Start)?;
         let process_id = Uuid::new_v4();
+        let process_group = child.id().map(|id| ProcessGroupGuard {
+            group: Some(Pid::from_raw(id as i32)),
+        });
         let stdout = child.stdout.take().expect("piped stdout must be available");
         let stderr = child.stderr.take().expect("piped stderr must be available");
         let state = Arc::new(StdMutex::new(ProcessState {
@@ -143,6 +146,7 @@ impl ProcessManager {
             max_pending_output_bytes: self.max_pending_output_bytes,
             process_id,
             entries: Arc::clone(&self.entries),
+            process_group,
         }));
 
         Ok(process_id)
@@ -225,6 +229,7 @@ struct Supervisor {
     max_pending_output_bytes: usize,
     process_id: Uuid,
     entries: Arc<Mutex<HashMap<Uuid, ProcessEntry>>>,
+    process_group: Option<ProcessGroupGuard>,
 }
 
 async fn supervise(supervisor: Supervisor) {
@@ -238,6 +243,7 @@ async fn supervise(supervisor: Supervisor) {
         max_pending_output_bytes,
         process_id,
         entries,
+        mut process_group,
     } = supervisor;
     let stdout_reader = spawn_reader(
         stdout,
@@ -251,7 +257,7 @@ async fn supervise(supervisor: Supervisor) {
         Arc::clone(&state),
         max_pending_output_bytes,
     );
-    let process_group = child.id().map(|id| Pid::from_raw(id as i32));
+    let group = process_group.as_ref().and_then(|guard| guard.group);
 
     let outcome = if timeout.is_zero() {
         tokio::select! {
@@ -270,17 +276,17 @@ async fn supervise(supervisor: Supervisor) {
 
     let status = match outcome {
         SupervisorOutcome::Exited(Ok(status)) => {
-            cleanup_process_group(process_group).await;
+            cleanup_process_group(group).await;
             ProcessStatus::Exited {
                 code: status.code(),
             }
         }
         SupervisorOutcome::Exited(Err(_)) => {
-            cleanup_process_group(process_group).await;
+            cleanup_process_group(group).await;
             ProcessStatus::Exited { code: None }
         }
         SupervisorOutcome::Stopped(reason) => {
-            terminate_process_group(&mut child, process_group).await;
+            terminate_process_group(&mut child, group).await;
             match reason {
                 StopReason::TimedOut => ProcessStatus::TimedOut,
                 StopReason::Stopped => ProcessStatus::Stopped,
@@ -294,6 +300,9 @@ async fn supervise(supervisor: Supervisor) {
         state.output.terminal_truncated |= output_truncated;
         state.status = status;
     }
+    if let Some(process_group) = process_group.as_mut() {
+        process_group.disarm();
+    }
     tokio::time::sleep(PROCESS_RETENTION).await;
     entries.lock().await.remove(&process_id);
 }
@@ -301,6 +310,24 @@ async fn supervise(supervisor: Supervisor) {
 enum SupervisorOutcome {
     Exited(Result<std::process::ExitStatus, std::io::Error>),
     Stopped(StopReason),
+}
+
+struct ProcessGroupGuard {
+    group: Option<Pid>,
+}
+
+impl ProcessGroupGuard {
+    fn disarm(&mut self) {
+        self.group = None;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(group) = self.group {
+            let _ = signal::killpg(group, Signal::SIGKILL);
+        }
+    }
 }
 
 async fn terminate_process_group(child: &mut Child, process_group: Option<Pid>) {
@@ -462,7 +489,7 @@ mod tests {
     use std::task::{Context, Poll};
 
     use tempfile::TempDir;
-    use tokio::io::ReadBuf;
+    use tokio::io::{AsyncBufReadExt, ReadBuf};
 
     use super::*;
 
@@ -656,6 +683,27 @@ mod tests {
         assert_eq!(first.unwrap().status, ProcessStatus::Stopped);
         assert_eq!(second.unwrap().status, ProcessStatus::Stopped);
         assert_eq!(third.unwrap().status, ProcessStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn dropping_process_group_guard_kills_the_group() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = Pid::from_raw(child.id().unwrap() as i32);
+        let guard = ProcessGroupGuard { group: Some(group) };
+        let mut stdout = tokio::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        stdout.read_line(&mut line).await.unwrap();
+        let descendant = Pid::from_raw(line.trim().parse().unwrap());
+
+        drop(guard);
+        child.wait().await.unwrap();
+
+        assert_process_exits(descendant).await;
     }
 
     #[tokio::test]
