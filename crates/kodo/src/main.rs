@@ -24,6 +24,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    // Return normally so Tokio can drop process-group guards instead of orphaning commands.
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {

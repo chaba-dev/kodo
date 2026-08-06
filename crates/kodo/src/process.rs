@@ -312,12 +312,14 @@ enum SupervisorOutcome {
     Stopped(StopReason),
 }
 
+/// Last-resort ownership guard for descendants if the async supervisor is cancelled or dropped.
 struct ProcessGroupGuard {
     group: Option<Pid>,
 }
 
 impl ProcessGroupGuard {
     fn disarm(&mut self) {
+        // Normal supervision has already terminated and reaped everything in the group.
         self.group = None;
     }
 }

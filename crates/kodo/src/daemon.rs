@@ -24,6 +24,7 @@ struct Dispatcher {
 #[derive(Default)]
 struct ResponseCache {
     slots: HashMap<Uuid, Arc<ResponseSlot>>,
+    // Store completed response sizes here so eviction never locks a slot while holding the cache.
     order: VecDeque<(Uuid, usize)>,
     response_bytes: usize,
 }
