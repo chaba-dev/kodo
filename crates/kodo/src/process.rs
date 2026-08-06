@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::protocol::{CommandOutput, OutputStream, ProcessStatus};
 
 const MAX_RETAINED_PROCESSES: usize = 1024;
+const MAX_OUTPUT_CHUNKS: usize = 1024;
 const PROCESS_RETENTION: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Error)]
@@ -58,6 +59,7 @@ struct OutputBuffer {
     chunks: VecDeque<CommandOutput>,
     bytes: usize,
     next_sequence: u64,
+    terminal_truncated: bool,
 }
 
 impl Default for OutputBuffer {
@@ -66,6 +68,7 @@ impl Default for OutputBuffer {
             chunks: VecDeque::new(),
             bytes: 0,
             next_sequence: 1,
+            terminal_truncated: false,
         }
     }
 }
@@ -169,7 +172,8 @@ impl ProcessManager {
             .filter(|chunk| chunk.sequence > after_sequence)
             .cloned()
             .collect::<Vec<_>>();
-        let truncated = after_sequence.saturating_add(1) < earliest_sequence
+        let truncated = state.output.terminal_truncated
+            || after_sequence.saturating_add(1) < earliest_sequence
             || output.iter().any(|chunk| chunk.truncated);
 
         Ok(ProcessPoll {
@@ -199,8 +203,13 @@ impl ProcessManager {
         let stop = entry.stop.clone();
         drop(entries);
 
-        if running && stop.send(StopReason::Stopped).await.is_err() {
-            return Err(ProcessError::SupervisorStopped(process_id));
+        if running {
+            match stop.try_send(StopReason::Stopped) {
+                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tokio::task::yield_now().await;
+                }
+            }
         }
         wait_until_terminal(self, process_id, after_sequence).await
     }
@@ -242,6 +251,7 @@ async fn supervise(supervisor: Supervisor) {
         Arc::clone(&state),
         max_pending_output_bytes,
     );
+    let process_group = child.id().map(|id| Pid::from_raw(id as i32));
 
     let outcome = if timeout.is_zero() {
         tokio::select! {
@@ -259,12 +269,18 @@ async fn supervise(supervisor: Supervisor) {
     };
 
     let status = match outcome {
-        SupervisorOutcome::Exited(Ok(status)) => ProcessStatus::Exited {
-            code: status.code(),
-        },
-        SupervisorOutcome::Exited(Err(_)) => ProcessStatus::Exited { code: None },
+        SupervisorOutcome::Exited(Ok(status)) => {
+            cleanup_process_group(process_group).await;
+            ProcessStatus::Exited {
+                code: status.code(),
+            }
+        }
+        SupervisorOutcome::Exited(Err(_)) => {
+            cleanup_process_group(process_group).await;
+            ProcessStatus::Exited { code: None }
+        }
         SupervisorOutcome::Stopped(reason) => {
-            terminate_process_group(&mut child).await;
+            terminate_process_group(&mut child, process_group).await;
             match reason {
                 StopReason::TimedOut => ProcessStatus::TimedOut,
                 StopReason::Stopped => ProcessStatus::Stopped,
@@ -272,9 +288,12 @@ async fn supervise(supervisor: Supervisor) {
         }
     };
 
-    finish_reader(stdout_reader).await;
-    finish_reader(stderr_reader).await;
-    state.lock().expect("process state lock poisoned").status = status;
+    let output_truncated = finish_reader(stdout_reader).await | finish_reader(stderr_reader).await;
+    {
+        let mut state = state.lock().expect("process state lock poisoned");
+        state.output.terminal_truncated |= output_truncated;
+        state.status = status;
+    }
     tokio::time::sleep(PROCESS_RETENTION).await;
     entries.lock().await.remove(&process_id);
 }
@@ -284,28 +303,38 @@ enum SupervisorOutcome {
     Stopped(StopReason),
 }
 
-async fn terminate_process_group(child: &mut Child) {
-    let Some(id) = child.id() else {
+async fn terminate_process_group(child: &mut Child, process_group: Option<Pid>) {
+    let Some(group) = process_group else {
+        let _ = child.wait().await;
         return;
     };
-    let group = Pid::from_raw(id as i32);
     let _ = signal::killpg(group, Signal::SIGTERM);
-    if tokio::time::timeout(Duration::from_millis(100), child.wait())
-        .await
-        .is_err()
-    {
-        let _ = signal::killpg(group, Signal::SIGKILL);
+    let waited = tokio::time::timeout(Duration::from_millis(100), child.wait()).await;
+    let _ = signal::killpg(group, Signal::SIGKILL);
+    if waited.is_err() {
         let _ = child.wait().await;
     }
 }
 
-async fn finish_reader(mut reader: tokio::task::JoinHandle<()>) {
+async fn cleanup_process_group(process_group: Option<Pid>) {
+    let Some(group) = process_group else {
+        return;
+    };
+    let _ = signal::killpg(group, Signal::SIGTERM);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = signal::killpg(group, Signal::SIGKILL);
+}
+
+async fn finish_reader(mut reader: tokio::task::JoinHandle<()>) -> bool {
     if tokio::time::timeout(Duration::from_millis(25), &mut reader)
         .await
         .is_err()
     {
         reader.abort();
         let _ = reader.await;
+        true
+    } else {
+        false
     }
 }
 
@@ -319,7 +348,7 @@ async fn wait_until_terminal(
         if poll.status != ProcessStatus::Running {
             return Ok(poll);
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }
 
@@ -359,7 +388,9 @@ fn append_output(
     if content.is_empty() {
         return;
     }
-    while output.bytes + content.len() > max_pending_output_bytes {
+    while output.bytes + content.len() > max_pending_output_bytes
+        || output.chunks.len() >= MAX_OUTPUT_CHUNKS
+    {
         let Some(removed) = output.chunks.pop_front() else {
             break;
         };
@@ -512,7 +543,7 @@ mod tests {
             .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let poll = manager.poll(process_id, 0).await.unwrap();
+        let poll = poll_until_finished(&manager, process_id).await;
 
         assert_eq!(poll.status, ProcessStatus::Exited { code: Some(0) });
     }
@@ -574,6 +605,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stopping_escalates_for_descendants_that_ignore_sigterm() {
+        let manager = ProcessManager::new(1024);
+        let directory = TempDir::new().unwrap();
+        let process_id = manager
+            .start(
+                "trap '' TERM; sleep 30 & echo $!; wait",
+                directory.path(),
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+        let descendant = reported_pid(&manager, process_id).await;
+
+        manager.stop(process_id, 0).await.unwrap();
+
+        assert_process_exits(descendant).await;
+    }
+
+    #[tokio::test]
+    async fn natural_shell_exit_cleans_up_background_descendants() {
+        let manager = ProcessManager::new(1024);
+        let directory = TempDir::new().unwrap();
+        let process_id = manager
+            .start("sleep 30 & echo $!", directory.path(), Duration::ZERO)
+            .await
+            .unwrap();
+        let descendant = reported_pid(&manager, process_id).await;
+
+        poll_until_finished(&manager, process_id).await;
+
+        assert_process_exits(descendant).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_stop_requests_are_idempotent() {
+        let manager = ProcessManager::new(1024);
+        let directory = TempDir::new().unwrap();
+        let process_id = manager
+            .start("while true; do :; done", directory.path(), Duration::ZERO)
+            .await
+            .unwrap();
+
+        let (first, second, third) = tokio::join!(
+            manager.stop(process_id, 0),
+            manager.stop(process_id, 0),
+            manager.stop(process_id, 0)
+        );
+
+        assert_eq!(first.unwrap().status, ProcessStatus::Stopped);
+        assert_eq!(second.unwrap().status, ProcessStatus::Stopped);
+        assert_eq!(third.unwrap().status, ProcessStatus::Stopped);
+    }
+
+    #[tokio::test]
     async fn repeated_poll_replays_process_output() {
         let manager = ProcessManager::new(1024);
         let directory = TempDir::new().unwrap();
@@ -610,6 +695,28 @@ mod tests {
         assert_eq!(output, "€");
     }
 
+    #[tokio::test]
+    async fn bounds_process_output_chunk_metadata() {
+        let state = Arc::new(StdMutex::new(ProcessState {
+            output: OutputBuffer::default(),
+            status: ProcessStatus::Running,
+        }));
+        let reader = ChunkReader::new((0..MAX_OUTPUT_CHUNKS + 10).map(|_| vec![b'x']));
+
+        spawn_reader(
+            reader,
+            OutputStream::Stdout,
+            Arc::clone(&state),
+            1024 * 1024,
+        )
+        .await
+        .unwrap();
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.output.chunks.len(), MAX_OUTPUT_CHUNKS);
+        assert!(state.output.chunks.front().unwrap().sequence > 1);
+    }
+
     struct ChunkReader {
         chunks: VecDeque<Vec<u8>>,
     }
@@ -633,6 +740,31 @@ mod tests {
             }
             Poll::Ready(Ok(()))
         }
+    }
+
+    async fn reported_pid(manager: &ProcessManager, process_id: Uuid) -> Pid {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let poll = manager.poll(process_id, 0).await.unwrap();
+                let output: String = poll.output.into_iter().map(|chunk| chunk.content).collect();
+                if let Ok(pid) = output.trim().parse::<i32>() {
+                    return Pid::from_raw(pid);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("command did not report its descendant process")
+    }
+
+    async fn assert_process_exits(process: Pid) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while signal::kill(process, None).is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("descendant process survived cleanup");
     }
 
     async fn poll_until_finished(manager: &ProcessManager, process_id: Uuid) -> ProcessPoll {

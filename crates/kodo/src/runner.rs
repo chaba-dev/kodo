@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use thiserror::Error;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::process::{ProcessError, ProcessManager};
@@ -14,6 +15,7 @@ use crate::workspace::{Workspace, WorkspaceError};
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 1_000;
 const MAX_PATCH_BYTES: usize = 1024 * 1024;
+const MAX_BLOCKING_TOOLS: usize = 8;
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
@@ -42,6 +44,7 @@ pub struct Runner {
     max_results: usize,
     processes: ProcessManager,
     mutation_lock: Arc<Mutex<()>>,
+    blocking_tools: Arc<Semaphore>,
 }
 
 impl Runner {
@@ -52,6 +55,7 @@ impl Runner {
             max_results: DEFAULT_MAX_RESULTS,
             processes: ProcessManager::new(DEFAULT_MAX_OUTPUT_BYTES),
             mutation_lock: Arc::new(Mutex::new(())),
+            blocking_tools: Arc::new(Semaphore::new(MAX_BLOCKING_TOOLS)),
         }
     }
 
@@ -62,6 +66,7 @@ impl Runner {
             max_results,
             processes: ProcessManager::new(max_output_bytes),
             mutation_lock: Arc::new(Mutex::new(())),
+            blocking_tools: Arc::new(Semaphore::new(MAX_BLOCKING_TOOLS)),
         }
     }
 
@@ -82,9 +87,16 @@ impl Runner {
             } => self.stop_command(process_id, after_sequence).await,
             request => {
                 let runner = self.clone();
-                tokio::task::spawn_blocking(move || runner.execute_blocking(request))
+                let permit = Arc::clone(&self.blocking_tools)
+                    .acquire_owned()
                     .await
-                    .map_err(|error| RunnerError::Task(error.to_string()))?
+                    .map_err(|error| RunnerError::Task(error.to_string()))?;
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    runner.execute_blocking(request)
+                })
+                .await
+                .map_err(|error| RunnerError::Task(error.to_string()))?
             }
         }
     }
@@ -567,20 +579,25 @@ fn run_command(
     let stdout_reader = std::thread::spawn(move || read_bounded(stdout, limit));
     let stderr_reader = std::thread::spawn(move || read_bounded(stderr, limit));
 
-    if let Some(input) = input {
+    let input_error = input.and_then(|input| {
         child
             .stdin
             .take()
             .expect("piped stdin must be available")
-            .write_all(input)?;
+            .write_all(input)
+            .err()
+    });
+    let status = child.wait();
+    let stdout = stdout_reader.join().expect("stdout reader thread panicked");
+    let stderr = stderr_reader.join().expect("stderr reader thread panicked");
+    let status = status?;
+    let (stdout, stdout_truncated) = stdout?;
+    let (stderr, stderr_truncated) = stderr?;
+    if status.success()
+        && let Some(error) = input_error
+    {
+        return Err(error);
     }
-    let status = child.wait()?;
-    let (stdout, stdout_truncated) = stdout_reader
-        .join()
-        .expect("stdout reader thread panicked")?;
-    let (stderr, stderr_truncated) = stderr_reader
-        .join()
-        .expect("stderr reader thread panicked")?;
     Ok(CapturedOutput {
         status,
         stdout,

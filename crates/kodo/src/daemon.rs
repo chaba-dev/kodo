@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -11,6 +12,8 @@ use crate::runner::Runner;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_CACHED_REQUESTS: usize = 1024;
+const MAX_CACHED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 #[derive(Clone)]
 struct Dispatcher {
@@ -20,13 +23,14 @@ struct Dispatcher {
 
 #[derive(Default)]
 struct ResponseCache {
-    slots: HashMap<Uuid, Arc<Mutex<Option<CachedResponse>>>>,
+    slots: HashMap<Uuid, Arc<ResponseSlot>>,
     order: VecDeque<Uuid>,
+    response_bytes: usize,
 }
 
-struct CachedResponse {
-    request: ToolRequest,
-    response: String,
+struct ResponseSlot {
+    fingerprint: [u8; 32],
+    response: Mutex<Option<String>>,
 }
 
 impl Dispatcher {
@@ -38,6 +42,7 @@ impl Dispatcher {
     }
 
     async fn dispatch(&self, request: RequestEnvelope) -> String {
+        let fingerprint = request_fingerprint(&request.request);
         let slot = {
             let mut cache = self.cache.lock().expect("response cache lock poisoned");
             if let Some(slot) = cache.slots.get(&request.request_id) {
@@ -45,29 +50,31 @@ impl Dispatcher {
             } else {
                 while cache.slots.len() >= MAX_CACHED_REQUESTS {
                     let Some(expired) = cache.order.pop_front() else {
-                        break;
+                        return cache_capacity_response(request.request_id);
                     };
-                    cache.slots.remove(&expired);
+                    remove_cached_response(&mut cache, expired);
                 }
-                let slot = Arc::new(Mutex::new(None));
-                cache.order.push_back(request.request_id);
+                let slot = Arc::new(ResponseSlot {
+                    fingerprint,
+                    response: Mutex::new(None),
+                });
                 cache.slots.insert(request.request_id, Arc::clone(&slot));
                 slot
             }
         };
-        let mut cached = slot.lock().await;
-        if let Some(cached) = cached.as_ref() {
-            if cached.request == request.request {
-                return cached.response.clone();
-            }
+        if slot.fingerprint != fingerprint {
             return serialize_response(ResponseEnvelope::Error {
                 protocol_version: PROTOCOL_VERSION,
                 request_id: Some(request.request_id),
                 error: "request_id was already used for a different request".into(),
             });
         }
+        let mut cached = slot.response.lock().await;
+        if let Some(response) = cached.as_ref() {
+            return response.clone();
+        }
 
-        let response = match self.runner.execute(request.request.clone()).await {
+        let response = match self.runner.execute(request.request).await {
             Ok(response) => ResponseEnvelope::Success {
                 protocol_version: PROTOCOL_VERSION,
                 request_id: request.request_id,
@@ -80,12 +87,56 @@ impl Dispatcher {
             },
         };
         let response = serialize_response(response);
-        *cached = Some(CachedResponse {
-            request: request.request,
-            response: response.clone(),
-        });
+        *cached = Some(response.clone());
+        drop(cached);
+        let mut cache = self.cache.lock().expect("response cache lock poisoned");
+        if cache
+            .slots
+            .get(&request.request_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &slot))
+        {
+            cache.response_bytes += response.len();
+            cache.order.push_back(request.request_id);
+            while cache.response_bytes > MAX_CACHED_RESPONSE_BYTES {
+                let Some(expired) = cache.order.pop_front() else {
+                    break;
+                };
+                remove_cached_response(&mut cache, expired);
+            }
+        }
         response
     }
+}
+
+fn request_fingerprint(request: &ToolRequest) -> [u8; 32] {
+    Sha256::digest(
+        serde_json::to_vec(request).expect("tool request must serialize for fingerprinting"),
+    )
+    .into()
+}
+
+fn remove_cached_response(cache: &mut ResponseCache, request_id: Uuid) {
+    let Some(slot) = cache.slots.remove(&request_id) else {
+        return;
+    };
+    let Ok(response) = slot.response.try_lock() else {
+        cache.slots.insert(request_id, slot);
+        return;
+    };
+    if let Some(response) = response.as_ref() {
+        cache.response_bytes = cache.response_bytes.saturating_sub(response.len());
+    } else {
+        drop(response);
+        cache.slots.insert(request_id, slot);
+    }
+}
+
+fn cache_capacity_response(request_id: Uuid) -> String {
+    serialize_response(ResponseEnvelope::Error {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: Some(request_id),
+        error: "too many requests are currently in flight".into(),
+    })
 }
 
 pub async fn serve_stdio(runner: &Runner) -> Result<(), std::io::Error> {
@@ -112,7 +163,8 @@ pub async fn serve(
         }
 
         tokio::select! {
-            line_result = read_request_line(&mut input, &mut line), if !input_closed => {
+            line_result = read_request_line(&mut input, &mut line),
+                if !input_closed && requests.len() < MAX_IN_FLIGHT_REQUESTS => {
                 let result = line_result?;
                 if matches!(result, RequestLine::Eof) {
                     input_closed = true;
