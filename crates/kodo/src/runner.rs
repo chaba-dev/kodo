@@ -1,6 +1,6 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -166,11 +166,11 @@ impl Runner {
         ];
         args.push(relative);
         let output = self.git(args)?;
-        let files = successful_stdout(output)?;
+        let (files, output_truncated) = successful_stdout(output)?;
         let mut paths: Vec<_> = files.lines().map(str::to_owned).collect();
         paths.sort_unstable();
         let mut bytes = 0;
-        let mut truncated = paths.len() > self.max_results;
+        let mut truncated = output_truncated || paths.len() > self.max_results;
         paths.truncate(self.max_results);
         paths.retain(|path| {
             if bytes + path.len() > self.max_output_bytes {
@@ -316,7 +316,7 @@ impl Runner {
                 .into_iter()
                 .chain(relative_paths.iter().cloned()),
         )?;
-        let mut content = successful_stdout(tracked)?;
+        let (mut content, mut truncated) = successful_stdout(tracked)?;
 
         let mut untracked_args = vec![
             "ls-files".to_owned(),
@@ -326,27 +326,44 @@ impl Runner {
             "--".to_owned(),
         ];
         untracked_args.extend(relative_paths);
-        let untracked = successful_stdout(self.git(untracked_args)?)?;
+        let (untracked, untracked_truncated) =
+            successful_stdout(self.git_with_limit(untracked_args, MAX_PATCH_BYTES, None)?)?;
+        if untracked_truncated {
+            return Err(RunnerError::OutputLimit(
+                "untracked file list exceeds internal byte limit".into(),
+            ));
+        }
         for path in untracked.split('\0').filter(|path| !path.is_empty()) {
+            if content.len() >= self.max_output_bytes {
+                truncated = true;
+                break;
+            }
             self.workspace.resolve(path)?;
-            let output = self.git([
-                "diff",
-                "--no-index",
-                "--binary",
-                "--no-ext-diff",
-                "--",
-                "/dev/null",
-                path,
-            ])?;
+            let output = self.git_with_limit(
+                [
+                    "diff",
+                    "--no-index",
+                    "--binary",
+                    "--no-ext-diff",
+                    "--",
+                    "/dev/null",
+                    path,
+                ],
+                self.max_output_bytes - content.len(),
+                None,
+            )?;
             if !matches!(output.status.code(), Some(0 | 1)) {
                 return Err(RunnerError::Git(
                     String::from_utf8_lossy(&output.stderr).trim().to_owned(),
                 ));
             }
             content.push_str(&String::from_utf8_lossy(&output.stdout));
+            truncated |= output.stdout_truncated;
+            if output.stdout_truncated {
+                break;
+            }
         }
 
-        let (content, truncated) = truncate_utf8(content, self.max_output_bytes);
         Ok(ToolResult::Output { content, truncated })
     }
 
@@ -369,7 +386,11 @@ impl Runner {
     }
 
     fn patch_paths(&self, patch: &str) -> Result<Vec<String>, RunnerError> {
-        let output = self.git_with_input(["apply", "--numstat", "-z"], patch)?;
+        let output = self.git_with_limit(
+            ["apply", "--numstat", "-z"],
+            MAX_PATCH_BYTES,
+            Some(patch.as_bytes()),
+        )?;
         let stdout = successful_patch(output)?;
         let mut paths = Vec::new();
 
@@ -428,43 +449,39 @@ impl Runner {
                 .map(str::to_owned)
                 .chain(paths.iter().cloned()),
         )?;
-        let content = successful_stdout(output)?;
-        let (content, truncated) = truncate_utf8(content, self.max_output_bytes);
+        let (content, truncated) = successful_stdout(output)?;
         Ok(ToolResult::Output { content, truncated })
     }
 
-    fn git<I, S>(&self, args: I) -> Result<Output, RunnerError>
+    fn git<I, S>(&self, args: I) -> Result<CapturedOutput, RunnerError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        Command::new("git")
-            .args(args)
-            .current_dir(self.workspace.root())
-            .output()
-            .map_err(RunnerError::GitIo)
+        self.git_with_limit(args, self.max_output_bytes, None)
     }
 
     fn git_with_input<const N: usize>(
         &self,
         args: [&str; N],
         input: &str,
-    ) -> Result<Output, RunnerError> {
-        let mut child = Command::new("git")
-            .args(args)
-            .current_dir(self.workspace.root())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(RunnerError::GitIo)?;
-        child
-            .stdin
-            .take()
-            .expect("piped stdin must be available")
-            .write_all(input.as_bytes())
-            .map_err(RunnerError::GitIo)?;
-        child.wait_with_output().map_err(RunnerError::GitIo)
+    ) -> Result<CapturedOutput, RunnerError> {
+        self.git_with_limit(args, self.max_output_bytes, Some(input.as_bytes()))
+    }
+
+    fn git_with_limit<I, S>(
+        &self,
+        args: I,
+        limit: usize,
+        input: Option<&[u8]>,
+    ) -> Result<CapturedOutput, RunnerError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(self.workspace.root());
+        run_command(&mut command, input, limit).map_err(RunnerError::GitIo)
     }
 
     fn confined_relative(&self, path: &str) -> Result<String, RunnerError> {
@@ -491,23 +508,100 @@ impl Runner {
     }
 }
 
-fn successful_stdout(output: Output) -> Result<String, RunnerError> {
+struct CapturedOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+fn successful_stdout(output: CapturedOutput) -> Result<(String, bool), RunnerError> {
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        Err(RunnerError::Git(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        Ok((
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            output.stdout_truncated,
         ))
+    } else {
+        let mut error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if output.stderr_truncated {
+            error.push_str("\n[stderr truncated]");
+        }
+        Err(RunnerError::Git(error))
     }
 }
 
-fn successful_patch(output: Output) -> Result<Vec<u8>, RunnerError> {
+fn successful_patch(output: CapturedOutput) -> Result<Vec<u8>, RunnerError> {
     if output.status.success() {
+        if output.stdout_truncated {
+            return Err(RunnerError::Patch(
+                "patch metadata exceeds internal byte limit".into(),
+            ));
+        }
         Ok(output.stdout)
     } else {
-        Err(RunnerError::Patch(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ))
+        let mut error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if output.stderr_truncated {
+            error.push_str("\n[stderr truncated]");
+        }
+        Err(RunnerError::Patch(error))
+    }
+}
+
+fn run_command(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    limit: usize,
+) -> Result<CapturedOutput, std::io::Error> {
+    let mut child = command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().expect("piped stdout must be available");
+    let stderr = child.stderr.take().expect("piped stderr must be available");
+    let stdout_reader = std::thread::spawn(move || read_bounded(stdout, limit));
+    let stderr_reader = std::thread::spawn(move || read_bounded(stderr, limit));
+
+    if let Some(input) = input {
+        child
+            .stdin
+            .take()
+            .expect("piped stdin must be available")
+            .write_all(input)?;
+    }
+    let status = child.wait()?;
+    let (stdout, stdout_truncated) = stdout_reader
+        .join()
+        .expect("stdout reader thread panicked")?;
+    let (stderr, stderr_truncated) = stderr_reader
+        .join()
+        .expect("stderr reader thread panicked")?;
+    Ok(CapturedOutput {
+        status,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+    })
+}
+
+fn read_bounded(mut reader: impl Read, limit: usize) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let mut output = Vec::with_capacity(limit.min(8 * 1024));
+    let mut buffer = [0; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            return Ok((output, truncated));
+        }
+        let remaining = limit.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..read.min(remaining)]);
+        truncated |= read > remaining;
     }
 }
 
@@ -642,6 +736,28 @@ mod tests {
         };
         assert!(content.contains("-before"));
         assert!(content.contains("+after"));
+    }
+
+    #[tokio::test]
+    async fn repository_output_is_bounded_while_git_is_drained() {
+        let repository = repository();
+        for index in 0..20 {
+            fs::write(
+                repository.path().join(format!("file-{index}.txt")),
+                "content",
+            )
+            .unwrap();
+        }
+        let runner = Runner::with_limits(Workspace::from_root(repository.path()).unwrap(), 16, 100);
+
+        let ToolResult::Output { content, truncated } =
+            runner.execute(ToolRequest::GitStatus).await.unwrap()
+        else {
+            panic!("expected repository output");
+        };
+
+        assert!(content.len() <= 16);
+        assert!(truncated);
     }
 
     #[tokio::test]
