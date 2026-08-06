@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
@@ -247,9 +247,68 @@ impl Runner {
     fn git_diff(&self, paths: &[String]) -> Result<ToolResult, RunnerError> {
         let relative_paths = paths
             .iter()
-            .map(|path| self.confined_relative(path))
+            .map(|path| self.confined_relative_new(path))
             .collect::<Result<Vec<_>, _>>()?;
-        self.git_output(["diff", "HEAD", "--"], &relative_paths)
+        let head_exists = self
+            .git(["rev-parse", "--verify", "--quiet", "HEAD"])?
+            .status
+            .success();
+        let tracked_args = if head_exists {
+            vec![
+                "diff".to_owned(),
+                "--binary".to_owned(),
+                "--no-ext-diff".to_owned(),
+                "--no-textconv".to_owned(),
+                "HEAD".to_owned(),
+                "--".to_owned(),
+            ]
+        } else {
+            vec![
+                "diff".to_owned(),
+                "--cached".to_owned(),
+                "--binary".to_owned(),
+                "--no-ext-diff".to_owned(),
+                "--no-textconv".to_owned(),
+                "--".to_owned(),
+            ]
+        };
+        let tracked = self.git(
+            tracked_args
+                .into_iter()
+                .chain(relative_paths.iter().cloned()),
+        )?;
+        let mut content = successful_stdout(tracked)?;
+
+        let mut untracked_args = vec![
+            "ls-files".to_owned(),
+            "--others".to_owned(),
+            "--exclude-standard".to_owned(),
+            "-z".to_owned(),
+            "--".to_owned(),
+        ];
+        untracked_args.extend(relative_paths);
+        let untracked = successful_stdout(self.git(untracked_args)?)?;
+        for path in untracked.split('\0').filter(|path| !path.is_empty()) {
+            self.workspace.resolve(path)?;
+            let output = self.git([
+                "diff",
+                "--no-index",
+                "--binary",
+                "--no-ext-diff",
+                "--",
+                "/dev/null",
+                path,
+            ])?;
+            if !matches!(output.status.code(), Some(0 | 1)) {
+                return Err(RunnerError::Git(
+                    String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                ));
+            }
+            content.push_str(&String::from_utf8_lossy(&output.stdout));
+        }
+
+        let (content, truncated) = truncate_utf8(content, self.max_output_bytes);
+        Ok(ToolResult::Output { content, truncated })
     }
 
     fn apply_patch(&self, patch: &str) -> Result<ToolResult, RunnerError> {
@@ -278,6 +337,22 @@ impl Runner {
                 .map_err(|_| RunnerError::Patch("patch path is not valid UTF-8".into()))?;
             self.workspace.resolve_new(&path)?;
             paths.push(path);
+        }
+
+        for line in patch.lines() {
+            let path = ["rename from ", "rename to ", "copy from ", "copy to "]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix));
+            let Some(path) = path else {
+                continue;
+            };
+            if path.starts_with('"') {
+                return Err(RunnerError::Patch(
+                    "quoted rename and copy paths are not supported".into(),
+                ));
+            }
+            self.workspace.resolve_new(path)?;
+            paths.push(path.to_owned());
         }
 
         if paths.is_empty() {
@@ -340,6 +415,15 @@ impl Runner {
 
     fn confined_relative(&self, path: &str) -> Result<String, RunnerError> {
         let resolved = self.workspace.resolve(path)?;
+        self.relative_path(&resolved)
+    }
+
+    fn confined_relative_new(&self, path: &str) -> Result<String, RunnerError> {
+        let resolved = self.workspace.resolve_new(path)?;
+        self.relative_path(&resolved)
+    }
+
+    fn relative_path(&self, resolved: &Path) -> Result<String, RunnerError> {
         let relative = resolved
             .strip_prefix(self.workspace.root())
             .expect("confined workspace path must have workspace prefix");
@@ -482,6 +566,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn diff_includes_untracked_files_in_an_unborn_repository() {
+        let repository = repository();
+        fs::write(repository.path().join("new.txt"), "new content\n").unwrap();
+        let runner = runner(&repository);
+
+        let ToolResult::Output { content, .. } = runner
+            .execute(ToolRequest::GitDiff { paths: vec![] })
+            .await
+            .unwrap()
+        else {
+            panic!("expected diff output");
+        };
+
+        assert!(content.contains("new.txt"));
+        assert!(content.contains("+new content"));
+    }
+
+    #[tokio::test]
     async fn applies_a_patch_and_reports_affected_paths() {
         let repository = repository();
         fs::write(repository.path().join("file.txt"), "before\n").unwrap();
@@ -505,6 +607,30 @@ mod tests {
         assert_eq!(
             fs::read_to_string(repository.path().join("file.txt")).unwrap(),
             "after\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn applying_a_rename_reports_source_and_destination_paths() {
+        let repository = repository();
+        fs::write(repository.path().join("old.txt"), "content\n").unwrap();
+        git(repository.path(), ["add", "old.txt"]);
+        git(repository.path(), ["commit", "-m", "fixture"]);
+        git(repository.path(), ["mv", "old.txt", "new.txt"]);
+        let patch = git_stdout(repository.path(), ["diff", "--cached", "--binary"]);
+        git(repository.path(), ["reset", "--hard", "HEAD"]);
+        let runner = runner(&repository);
+
+        let result = runner
+            .execute(ToolRequest::ApplyPatch { patch })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            ToolResult::FilesChanged {
+                paths: vec!["new.txt".into(), "old.txt".into()]
+            }
         );
     }
 
@@ -610,5 +736,15 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    fn git_stdout<const N: usize>(directory: &Path, args: [&str; N]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
     }
 }
