@@ -1,6 +1,30 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const PROTOCOL_VERSION: u16 = 1;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RequestEnvelope {
+    pub protocol_version: u16,
+    pub request_id: Uuid,
+    pub request: ToolRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ResponseEnvelope {
+    Success {
+        protocol_version: u16,
+        request_id: Uuid,
+        response: ToolResult,
+    },
+    Error {
+        protocol_version: u16,
+        request_id: Option<Uuid>,
+        error: String,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub enum ToolRequest {
