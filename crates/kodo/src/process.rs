@@ -4,10 +4,12 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
 use crate::protocol::{CommandOutput, OutputStream, ProcessStatus};
@@ -18,18 +20,8 @@ pub enum ProcessError {
     Start(#[source] std::io::Error),
     #[error("unknown process: {0}")]
     Unknown(Uuid),
-    #[error("failed to inspect process {process_id}: {source}")]
-    Inspect {
-        process_id: Uuid,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to stop process {process_id}: {source}")]
-    Stop {
-        process_id: Uuid,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error("process supervisor for {0} stopped unexpectedly")]
+    SupervisorStopped(Uuid),
 }
 
 #[derive(Clone)]
@@ -48,9 +40,12 @@ impl std::fmt::Debug for ProcessManager {
 }
 
 struct ProcessEntry {
-    child: Child,
-    output: Arc<StdMutex<OutputBuffer>>,
-    readers: Vec<tokio::task::JoinHandle<()>>,
+    state: Arc<StdMutex<ProcessState>>,
+    stop: mpsc::Sender<StopReason>,
+}
+
+struct ProcessState {
+    output: OutputBuffer,
     status: ProcessStatus,
 }
 
@@ -66,6 +61,12 @@ pub struct ProcessPoll {
     pub status: ProcessStatus,
     pub output: Vec<CommandOutput>,
     pub truncated: bool,
+}
+
+#[derive(Clone, Copy)]
+enum StopReason {
+    TimedOut,
+    Stopped,
 }
 
 impl ProcessManager {
@@ -89,123 +90,181 @@ impl ProcessManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
+            .process_group(0)
             .spawn()
             .map_err(ProcessError::Start)?;
         let process_id = Uuid::new_v4();
-        let output = Arc::new(StdMutex::new(OutputBuffer::default()));
-
-        let stdout_reader = spawn_reader(
-            child.stdout.take().expect("piped stdout must be available"),
-            OutputStream::Stdout,
-            Arc::clone(&output),
-            self.max_pending_output_bytes,
-        );
-        let stderr_reader = spawn_reader(
-            child.stderr.take().expect("piped stderr must be available"),
-            OutputStream::Stderr,
-            Arc::clone(&output),
-            self.max_pending_output_bytes,
-        );
+        let stdout = child.stdout.take().expect("piped stdout must be available");
+        let stderr = child.stderr.take().expect("piped stderr must be available");
+        let state = Arc::new(StdMutex::new(ProcessState {
+            output: OutputBuffer::default(),
+            status: ProcessStatus::Running,
+        }));
+        let (stop, stop_receiver) = mpsc::channel(1);
 
         self.entries.lock().await.insert(
             process_id,
             ProcessEntry {
-                child,
-                output,
-                readers: vec![stdout_reader, stderr_reader],
-                status: ProcessStatus::Running,
+                state: Arc::clone(&state),
+                stop,
             },
         );
-
-        if !timeout.is_zero() {
-            self.schedule_timeout(process_id, timeout);
-        }
+        tokio::spawn(supervise(
+            child,
+            stdout,
+            stderr,
+            state,
+            stop_receiver,
+            timeout,
+            self.max_pending_output_bytes,
+        ));
 
         Ok(process_id)
     }
 
     pub async fn poll(&self, process_id: Uuid) -> Result<ProcessPoll, ProcessError> {
-        let mut entries = self.entries.lock().await;
+        let entries = self.entries.lock().await;
         let entry = entries
-            .get_mut(&process_id)
+            .get(&process_id)
             .ok_or(ProcessError::Unknown(process_id))?;
-
-        if entry.status == ProcessStatus::Running
-            && let Some(status) = entry
-                .child
-                .try_wait()
-                .map_err(|source| ProcessError::Inspect { process_id, source })?
-        {
-            entry.status = ProcessStatus::Exited {
-                code: status.code(),
-            };
-        }
-
-        let readers = if entry.status == ProcessStatus::Running {
-            Vec::new()
-        } else {
-            std::mem::take(&mut entry.readers)
-        };
+        let state = Arc::clone(&entry.state);
         drop(entries);
-
-        for reader in readers {
-            let _ = reader.await;
-        }
-
-        let mut entries = self.entries.lock().await;
-        let entry = entries
-            .get_mut(&process_id)
-            .ok_or(ProcessError::Unknown(process_id))?;
-
-        let mut buffer = entry.output.lock().expect("output buffer lock poisoned");
-        let output = buffer.chunks.drain(..).collect();
-        let truncated = std::mem::take(&mut buffer.truncated);
-        buffer.bytes = 0;
+        let mut state = state.lock().expect("process state lock poisoned");
+        let output = state.output.chunks.drain(..).collect();
+        let truncated = std::mem::take(&mut state.output.truncated);
+        state.output.bytes = 0;
 
         Ok(ProcessPoll {
-            status: entry.status.clone(),
+            status: state.status.clone(),
             output,
             truncated,
         })
     }
 
     pub async fn stop(&self, process_id: Uuid) -> Result<ProcessPoll, ProcessError> {
-        let mut entries = self.entries.lock().await;
+        let entries = self.entries.lock().await;
         let entry = entries
-            .get_mut(&process_id)
+            .get(&process_id)
             .ok_or(ProcessError::Unknown(process_id))?;
-
-        if entry.status == ProcessStatus::Running {
-            entry
-                .child
-                .start_kill()
-                .map_err(|source| ProcessError::Stop { process_id, source })?;
-            entry.status = ProcessStatus::Stopped;
-        }
+        let running = entry
+            .state
+            .lock()
+            .expect("process state lock poisoned")
+            .status
+            == ProcessStatus::Running;
+        let stop = entry.stop.clone();
         drop(entries);
-        self.poll(process_id).await
-    }
 
-    fn schedule_timeout(&self, process_id: Uuid, timeout: Duration) {
-        let entries = Arc::clone(&self.entries);
-        tokio::spawn(async move {
-            tokio::time::sleep(timeout).await;
-            let mut entries = entries.lock().await;
-            let Some(entry) = entries.get_mut(&process_id) else {
-                return;
-            };
-            if entry.status == ProcessStatus::Running {
-                let _ = entry.child.start_kill();
-                entry.status = ProcessStatus::TimedOut;
+        if running && stop.send(StopReason::Stopped).await.is_err() {
+            return Err(ProcessError::SupervisorStopped(process_id));
+        }
+        wait_until_terminal(self, process_id).await
+    }
+}
+
+async fn supervise(
+    mut child: Child,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+    state: Arc<StdMutex<ProcessState>>,
+    mut stop: mpsc::Receiver<StopReason>,
+    timeout: Duration,
+    max_pending_output_bytes: usize,
+) {
+    let stdout_reader = spawn_reader(
+        stdout,
+        OutputStream::Stdout,
+        Arc::clone(&state),
+        max_pending_output_bytes,
+    );
+    let stderr_reader = spawn_reader(
+        stderr,
+        OutputStream::Stderr,
+        Arc::clone(&state),
+        max_pending_output_bytes,
+    );
+
+    let outcome = if timeout.is_zero() {
+        tokio::select! {
+            biased;
+            status = child.wait() => SupervisorOutcome::Exited(status),
+            reason = stop.recv() => SupervisorOutcome::Stopped(reason.unwrap_or(StopReason::Stopped)),
+        }
+    } else {
+        tokio::select! {
+            biased;
+            status = child.wait() => SupervisorOutcome::Exited(status),
+            reason = stop.recv() => SupervisorOutcome::Stopped(reason.unwrap_or(StopReason::Stopped)),
+            _ = tokio::time::sleep(timeout) => SupervisorOutcome::Stopped(StopReason::TimedOut),
+        }
+    };
+
+    let status = match outcome {
+        SupervisorOutcome::Exited(Ok(status)) => ProcessStatus::Exited {
+            code: status.code(),
+        },
+        SupervisorOutcome::Exited(Err(_)) => ProcessStatus::Exited { code: None },
+        SupervisorOutcome::Stopped(reason) => {
+            terminate_process_group(&mut child).await;
+            match reason {
+                StopReason::TimedOut => ProcessStatus::TimedOut,
+                StopReason::Stopped => ProcessStatus::Stopped,
             }
-        });
+        }
+    };
+
+    finish_reader(stdout_reader).await;
+    finish_reader(stderr_reader).await;
+    state.lock().expect("process state lock poisoned").status = status;
+}
+
+enum SupervisorOutcome {
+    Exited(Result<std::process::ExitStatus, std::io::Error>),
+    Stopped(StopReason),
+}
+
+async fn terminate_process_group(child: &mut Child) {
+    let Some(id) = child.id() else {
+        return;
+    };
+    let group = Pid::from_raw(id as i32);
+    let _ = signal::killpg(group, Signal::SIGTERM);
+    if tokio::time::timeout(Duration::from_millis(100), child.wait())
+        .await
+        .is_err()
+    {
+        let _ = signal::killpg(group, Signal::SIGKILL);
+        let _ = child.wait().await;
+    }
+}
+
+async fn finish_reader(mut reader: tokio::task::JoinHandle<()>) {
+    if tokio::time::timeout(Duration::from_millis(25), &mut reader)
+        .await
+        .is_err()
+    {
+        reader.abort();
+        let _ = reader.await;
+    }
+}
+
+async fn wait_until_terminal(
+    manager: &ProcessManager,
+    process_id: Uuid,
+) -> Result<ProcessPoll, ProcessError> {
+    loop {
+        let poll = manager.poll(process_id).await?;
+        if poll.status != ProcessStatus::Running {
+            return Ok(poll);
+        }
+        tokio::task::yield_now().await;
     }
 }
 
 fn spawn_reader(
     mut reader: impl AsyncRead + Unpin + Send + 'static,
     stream: OutputStream,
-    output: Arc<StdMutex<OutputBuffer>>,
+    state: Arc<StdMutex<ProcessState>>,
     max_pending_output_bytes: usize,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -216,7 +275,8 @@ fn spawn_reader(
                 Ok(read) => read,
             };
             let content = String::from_utf8_lossy(&bytes[..read]).into_owned();
-            let mut output = output.lock().expect("output buffer lock poisoned");
+            let mut state = state.lock().expect("process state lock poisoned");
+            let output = &mut state.output;
             let remaining = max_pending_output_bytes.saturating_sub(output.bytes);
             let (content, truncated) = truncate_utf8(content, remaining);
             output.truncated |= truncated;
@@ -312,6 +372,77 @@ mod tests {
         let poll = poll_until_finished(&manager, process_id).await;
 
         assert_eq!(poll.status, ProcessStatus::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn does_not_timeout_a_process_that_exited_before_its_deadline() {
+        let manager = ProcessManager::new(1024);
+        let directory = TempDir::new().unwrap();
+        let process_id = manager
+            .start("exit 0", directory.path(), Duration::from_millis(20))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let poll = manager.poll(process_id).await.unwrap();
+
+        assert_eq!(poll.status, ProcessStatus::Exited { code: Some(0) });
+    }
+
+    #[tokio::test]
+    async fn terminal_poll_does_not_wait_for_a_background_descendants_pipes() {
+        let manager = ProcessManager::new(1024);
+        let directory = TempDir::new().unwrap();
+        let process_id = manager
+            .start("sleep 1 &", directory.path(), Duration::ZERO)
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(200), async {
+            loop {
+                let poll = manager.poll(process_id).await.unwrap();
+                if poll.status != ProcessStatus::Running {
+                    assert_eq!(poll.status, ProcessStatus::Exited { code: Some(0) });
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal poll waited for a background descendant");
+    }
+
+    #[tokio::test]
+    async fn stopping_a_command_terminates_its_descendants() {
+        let manager = ProcessManager::new(1024);
+        let directory = TempDir::new().unwrap();
+        let process_id = manager
+            .start("sleep 30 & echo $!; wait", directory.path(), Duration::ZERO)
+            .await
+            .unwrap();
+        let descendant = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let poll = manager.poll(process_id).await.unwrap();
+                let output: String = poll.output.into_iter().map(|chunk| chunk.content).collect();
+                if let Ok(pid) = output.trim().parse::<i32>() {
+                    return Pid::from_raw(pid);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("command did not report its descendant process");
+
+        let poll = manager.stop(process_id).await.unwrap();
+
+        assert_eq!(poll.status, ProcessStatus::Stopped);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while signal::kill(descendant, None).is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("descendant process survived cancellation");
     }
 
     async fn poll_until_finished(manager: &ProcessManager, process_id: Uuid) -> ProcessPoll {
