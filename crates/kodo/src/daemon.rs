@@ -103,7 +103,7 @@ pub async fn serve(
     mut output: impl AsyncWrite + Unpin,
 ) -> Result<(), std::io::Error> {
     let dispatcher = Dispatcher::new(runner.clone());
-    let mut line = String::new();
+    let mut line = Vec::new();
     let mut requests = FuturesUnordered::new();
     let mut input_closed = false;
     loop {
@@ -122,7 +122,10 @@ pub async fn serve(
                 let dispatcher = dispatcher.clone();
                 requests.push(async move {
                     match result {
-                        RequestLine::Complete => handle_line(&dispatcher, &request_line).await,
+                        RequestLine::Complete => match String::from_utf8(request_line) {
+                            Ok(request_line) => handle_line(&dispatcher, &request_line).await,
+                            Err(_) => invalid_utf8_response(),
+                        },
                         RequestLine::TooLarge => oversized_request_response(),
                         RequestLine::Eof => unreachable!(),
                     }
@@ -172,7 +175,7 @@ enum RequestLine {
 
 async fn read_request_line(
     input: &mut (impl AsyncBufRead + Unpin),
-    line: &mut String,
+    line: &mut Vec<u8>,
 ) -> Result<RequestLine, std::io::Error> {
     let mut too_large = false;
     loop {
@@ -191,7 +194,7 @@ async fn read_request_line(
         let consumed = newline.map_or(buffer.len(), |position| position + 1);
         let content = &buffer[..newline.unwrap_or(buffer.len())];
         if !too_large && line.len() + content.len() <= MAX_REQUEST_BYTES {
-            line.push_str(&String::from_utf8_lossy(content));
+            line.extend_from_slice(content);
         } else {
             too_large = true;
         }
@@ -212,6 +215,14 @@ fn oversized_request_response() -> String {
         protocol_version: PROTOCOL_VERSION,
         request_id: None,
         error: format!("request exceeds {MAX_REQUEST_BYTES} byte transport limit"),
+    })
+}
+
+fn invalid_utf8_response() -> String {
+    serialize_response(ResponseEnvelope::Error {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: None,
+        error: "request is not valid UTF-8".into(),
     })
 }
 
@@ -331,6 +342,113 @@ mod tests {
         assert_eq!(retry, first);
     }
 
+    #[tokio::test]
+    async fn completes_the_model_free_fixture_workflow() {
+        let repository = git_repository();
+        std::fs::write(repository.path().join("file.txt"), "before\n").unwrap();
+        git(repository.path(), ["add", "file.txt"]);
+        git(repository.path(), ["commit", "-m", "fixture"]);
+        let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
+        let dispatcher = Dispatcher::new(runner);
+
+        let read = dispatch(
+            &dispatcher,
+            ToolRequest::ReadFile {
+                path: "file.txt".into(),
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .await;
+        assert!(matches!(read, ToolResult::File { content, .. } if content == "before"));
+
+        let changed = dispatch(
+            &dispatcher,
+            ToolRequest::ApplyPatch {
+                patch: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            changed,
+            ToolResult::FilesChanged {
+                paths: vec!["file.txt".into()]
+            }
+        );
+
+        let ToolResult::CommandStarted { process_id } = dispatch(
+            &dispatcher,
+            ToolRequest::StartCommand {
+                command: "test \"$(cat file.txt)\" = after && printf verified".into(),
+                cwd: String::new(),
+                timeout_ms: 1_000,
+            },
+        )
+        .await
+        else {
+            panic!("expected command process");
+        };
+        let mut after_sequence = 0;
+        let mut command_output = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let result = dispatch(
+                    &dispatcher,
+                    ToolRequest::PollCommand {
+                        process_id,
+                        after_sequence,
+                    },
+                )
+                .await;
+                let ToolResult::CommandPoll {
+                    status,
+                    output,
+                    next_sequence,
+                    ..
+                } = result
+                else {
+                    panic!("expected command poll");
+                };
+                command_output.extend(output.into_iter().map(|chunk| chunk.content));
+                after_sequence = next_sequence.saturating_sub(1);
+                if status != crate::protocol::ProcessStatus::Running {
+                    assert_eq!(
+                        status,
+                        crate::protocol::ProcessStatus::Exited { code: Some(0) }
+                    );
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("verification command did not finish");
+        assert_eq!(command_output, "verified");
+
+        let diff = dispatch(&dispatcher, ToolRequest::GitDiff { paths: vec![] }).await;
+        assert!(matches!(
+            diff,
+            ToolResult::Output { content, .. }
+                if content.contains("-before") && content.contains("+after")
+        ));
+    }
+
+    async fn dispatch(dispatcher: &Dispatcher, request: ToolRequest) -> ToolResult {
+        let response = dispatcher
+            .dispatch(RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: Uuid::new_v4(),
+                request,
+            })
+            .await;
+        let ResponseEnvelope::Success { response, .. } =
+            serde_json::from_str::<ResponseEnvelope>(&response).unwrap()
+        else {
+            panic!("expected successful response: {response}");
+        };
+        response
+    }
+
     fn git_repository() -> TempDir {
         let directory = TempDir::new().unwrap();
         let status = Command::new("git")
@@ -340,5 +458,14 @@ mod tests {
             .unwrap();
         assert!(status.success());
         directory
+    }
+
+    fn git<const N: usize>(directory: &std::path::Path, args: [&str; N]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }
