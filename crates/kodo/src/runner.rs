@@ -1,0 +1,362 @@
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+
+use thiserror::Error;
+
+use crate::protocol::{SearchMatch, ToolRequest, ToolResult};
+use crate::workspace::{Workspace, WorkspaceError};
+
+const DEFAULT_MAX_OUTPUT_BYTES: usize = 256 * 1024;
+const DEFAULT_MAX_RESULTS: usize = 1_000;
+
+#[derive(Debug, Error)]
+pub enum RunnerError {
+    #[error(transparent)]
+    Workspace(#[from] WorkspaceError),
+    #[error("failed to read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to run Git: {0}")]
+    GitIo(#[source] std::io::Error),
+    #[error("Git command failed: {0}")]
+    Git(String),
+    #[error("path is not valid UTF-8: {0}")]
+    NonUtf8Path(PathBuf),
+}
+
+#[derive(Clone, Debug)]
+pub struct Runner {
+    workspace: Workspace,
+    max_output_bytes: usize,
+    max_results: usize,
+}
+
+impl Runner {
+    pub fn new(workspace: Workspace) -> Self {
+        Self {
+            workspace,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+            max_results: DEFAULT_MAX_RESULTS,
+        }
+    }
+
+    pub fn with_limits(workspace: Workspace, max_output_bytes: usize, max_results: usize) -> Self {
+        Self {
+            workspace,
+            max_output_bytes,
+            max_results,
+        }
+    }
+
+    pub fn execute(&self, request: ToolRequest) -> Result<ToolResult, RunnerError> {
+        match request {
+            ToolRequest::ListFiles { path } => self.list_files(&path),
+            ToolRequest::SearchCode { query, paths } => self.search_code(&query, &paths),
+            ToolRequest::ReadFile {
+                path,
+                offset,
+                limit,
+            } => self.read_file(&path, offset, limit),
+            ToolRequest::GitStatus => self.git_output(["status", "--short"], &[]),
+            ToolRequest::GitDiff { paths } => self.git_diff(&paths),
+        }
+    }
+
+    fn list_files(&self, path: &str) -> Result<ToolResult, RunnerError> {
+        let relative = self.confined_relative(path)?;
+        let mut args = vec![
+            "ls-files".to_owned(),
+            "--cached".to_owned(),
+            "--others".to_owned(),
+            "--exclude-standard".to_owned(),
+            "--".to_owned(),
+        ];
+        args.push(relative);
+        let output = self.git(args)?;
+        let files = successful_stdout(output)?;
+        let mut paths: Vec<_> = files.lines().map(str::to_owned).collect();
+        paths.sort_unstable();
+        let truncated = paths.len() > self.max_results;
+        paths.truncate(self.max_results);
+
+        Ok(ToolResult::Files { paths, truncated })
+    }
+
+    fn search_code(&self, query: &str, paths: &[String]) -> Result<ToolResult, RunnerError> {
+        let search_paths = if paths.is_empty() {
+            vec![String::new()]
+        } else {
+            paths.to_vec()
+        };
+        let mut matches = Vec::new();
+        let mut truncated = false;
+
+        for search_path in search_paths {
+            let ToolResult::Files {
+                paths,
+                truncated: files_truncated,
+            } = self.list_files(&search_path)?
+            else {
+                unreachable!();
+            };
+            truncated |= files_truncated;
+
+            for path in paths {
+                let resolved = self.workspace.resolve(&path)?;
+                if !resolved.is_file() {
+                    continue;
+                }
+
+                let Ok(content) = fs::read_to_string(&resolved) else {
+                    continue;
+                };
+
+                for (index, line) in content.lines().enumerate() {
+                    if line.contains(query) {
+                        if matches.len() == self.max_results {
+                            truncated = true;
+                            break;
+                        }
+                        matches.push(SearchMatch {
+                            path: path.clone(),
+                            line: index + 1,
+                            content: line.to_owned(),
+                        });
+                    }
+                }
+
+                if matches.len() == self.max_results {
+                    break;
+                }
+            }
+
+            if matches.len() == self.max_results {
+                break;
+            }
+        }
+
+        Ok(ToolResult::Matches { matches, truncated })
+    }
+
+    fn read_file(
+        &self,
+        path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<ToolResult, RunnerError> {
+        let resolved = self.workspace.resolve(path)?;
+        let content = fs::read_to_string(&resolved).map_err(|source| RunnerError::Read {
+            path: resolved,
+            source,
+        })?;
+        let lines: Vec<_> = content.lines().collect();
+        let selected = lines
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let next_line = offset.saturating_add(limit);
+        let next_offset = (next_line < lines.len()).then_some(next_line);
+        let (content, bytes_truncated) = truncate_utf8(selected, self.max_output_bytes);
+
+        Ok(ToolResult::File {
+            content,
+            offset,
+            next_offset,
+            truncated: bytes_truncated || next_offset.is_some(),
+        })
+    }
+
+    fn git_diff(&self, paths: &[String]) -> Result<ToolResult, RunnerError> {
+        let relative_paths = paths
+            .iter()
+            .map(|path| self.confined_relative(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.git_output(["diff", "HEAD", "--"], &relative_paths)
+    }
+
+    fn git_output<const N: usize>(
+        &self,
+        args: [&str; N],
+        paths: &[String],
+    ) -> Result<ToolResult, RunnerError> {
+        let output = self.git(
+            args.into_iter()
+                .map(str::to_owned)
+                .chain(paths.iter().cloned()),
+        )?;
+        let content = successful_stdout(output)?;
+        let (content, truncated) = truncate_utf8(content, self.max_output_bytes);
+        Ok(ToolResult::Output { content, truncated })
+    }
+
+    fn git<I, S>(&self, args: I) -> Result<Output, RunnerError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        Command::new("git")
+            .args(args)
+            .current_dir(self.workspace.root())
+            .output()
+            .map_err(RunnerError::GitIo)
+    }
+
+    fn confined_relative(&self, path: &str) -> Result<String, RunnerError> {
+        let resolved = self.workspace.resolve(path)?;
+        let relative = resolved
+            .strip_prefix(self.workspace.root())
+            .expect("confined workspace path must have workspace prefix");
+        if relative.as_os_str().is_empty() {
+            return Ok(".".to_owned());
+        }
+        relative
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| RunnerError::NonUtf8Path(relative.to_path_buf()))
+    }
+}
+
+fn successful_stdout(output: Output) -> Result<String, RunnerError> {
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(RunnerError::Git(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ))
+    }
+}
+
+fn truncate_utf8(mut content: String, max_bytes: usize) -> (String, bool) {
+    if content.len() <= max_bytes {
+        return (content, false);
+    }
+
+    let mut boundary = max_bytes;
+    while boundary > 0 && !content.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    content.truncate(boundary);
+    (content, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn reads_lines_with_offsets_and_reports_truncation() {
+        let repository = repository();
+        fs::write(repository.path().join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+        let runner = runner(&repository);
+
+        assert_eq!(
+            runner
+                .execute(ToolRequest::ReadFile {
+                    path: "notes.txt".into(),
+                    offset: 1,
+                    limit: 1,
+                })
+                .unwrap(),
+            ToolResult::File {
+                content: "two".into(),
+                offset: 1,
+                next_offset: Some(2),
+                truncated: true,
+            }
+        );
+    }
+
+    #[test]
+    fn lists_and_searches_tracked_and_untracked_files() {
+        let repository = repository();
+        fs::write(repository.path().join("tracked.txt"), "find me\n").unwrap();
+        git(repository.path(), ["add", "tracked.txt"]);
+        git(repository.path(), ["commit", "-m", "fixture"]);
+        fs::write(repository.path().join("untracked.txt"), "also find me\n").unwrap();
+        let runner = runner(&repository);
+
+        let ToolResult::Files { paths, truncated } = runner
+            .execute(ToolRequest::ListFiles {
+                path: String::new(),
+            })
+            .unwrap()
+        else {
+            panic!("expected files");
+        };
+        assert_eq!(paths, ["tracked.txt", "untracked.txt"]);
+        assert!(!truncated);
+
+        let ToolResult::Matches { matches, truncated } = runner
+            .execute(ToolRequest::SearchCode {
+                query: "find me".into(),
+                paths: vec![],
+            })
+            .unwrap()
+        else {
+            panic!("expected matches");
+        };
+        assert_eq!(matches.len(), 2);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn reports_status_and_the_resulting_diff() {
+        let repository = repository();
+        fs::write(repository.path().join("file.txt"), "before\n").unwrap();
+        git(repository.path(), ["add", "file.txt"]);
+        git(repository.path(), ["commit", "-m", "fixture"]);
+        fs::write(repository.path().join("file.txt"), "after\n").unwrap();
+        let runner = runner(&repository);
+
+        let ToolResult::Output { content, .. } = runner.execute(ToolRequest::GitStatus).unwrap()
+        else {
+            panic!("expected output");
+        };
+        assert_eq!(content, " M file.txt\n");
+
+        let ToolResult::Output { content, .. } = runner
+            .execute(ToolRequest::GitDiff { paths: vec![] })
+            .unwrap()
+        else {
+            panic!("expected output");
+        };
+        assert!(content.contains("-before"));
+        assert!(content.contains("+after"));
+    }
+
+    fn runner(repository: &TempDir) -> Runner {
+        Runner::new(Workspace::from_root(repository.path()).unwrap())
+    }
+
+    fn repository() -> TempDir {
+        let directory = TempDir::new().unwrap();
+        git(directory.path(), ["init", "--quiet"]);
+        git(
+            directory.path(),
+            ["config", "user.email", "test@example.com"],
+        );
+        git(directory.path(), ["config", "user.name", "Test"]);
+        directory
+    }
+
+    fn git<const N: usize>(directory: &Path, args: [&str; N]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+}
