@@ -3,6 +3,8 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use crate::protocol::{PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope};
 use crate::runner::Runner;
 
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
 pub async fn serve_stdio(runner: &Runner) -> Result<(), std::io::Error> {
     serve(
         runner,
@@ -18,17 +20,24 @@ pub async fn serve(
     mut output: impl AsyncWrite + Unpin,
 ) -> Result<(), std::io::Error> {
     let mut line = String::new();
-    while input.read_line(&mut line).await? != 0 {
-        let response = handle_line(runner, line.trim_end()).await;
+    loop {
+        let response = match read_request_line(&mut input, &mut line).await? {
+            RequestLine::Eof => return Ok(()),
+            RequestLine::Complete => handle_line(runner, &line).await,
+            RequestLine::TooLarge => oversized_request_response(),
+        };
         output.write_all(response.as_bytes()).await?;
         output.write_all(b"\n").await?;
         output.flush().await?;
         line.clear();
     }
-    Ok(())
 }
 
 async fn handle_line(runner: &Runner, line: &str) -> String {
+    if line.len() > MAX_REQUEST_BYTES {
+        return oversized_request_response();
+    }
+
     let response = match serde_json::from_str::<RequestEnvelope>(line) {
         Ok(request) if request.protocol_version == PROTOCOL_VERSION => {
             match runner.execute(request.request).await {
@@ -60,6 +69,58 @@ async fn handle_line(runner: &Runner, line: &str) -> String {
     };
 
     serde_json::to_string(&response).expect("response envelope must serialize")
+}
+
+enum RequestLine {
+    Eof,
+    Complete,
+    TooLarge,
+}
+
+async fn read_request_line(
+    input: &mut (impl AsyncBufRead + Unpin),
+    line: &mut String,
+) -> Result<RequestLine, std::io::Error> {
+    let mut too_large = false;
+    loop {
+        let buffer = input.fill_buf().await?;
+        if buffer.is_empty() {
+            return Ok(if line.is_empty() {
+                RequestLine::Eof
+            } else if too_large {
+                RequestLine::TooLarge
+            } else {
+                RequestLine::Complete
+            });
+        }
+
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(buffer.len(), |position| position + 1);
+        let content = &buffer[..newline.unwrap_or(buffer.len())];
+        if !too_large && line.len() + content.len() <= MAX_REQUEST_BYTES {
+            line.push_str(&String::from_utf8_lossy(content));
+        } else {
+            too_large = true;
+        }
+        input.consume(consumed);
+
+        if newline.is_some() {
+            return Ok(if too_large {
+                RequestLine::TooLarge
+            } else {
+                RequestLine::Complete
+            });
+        }
+    }
+}
+
+fn oversized_request_response() -> String {
+    serde_json::to_string(&ResponseEnvelope::Error {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: None,
+        error: format!("request exceeds {MAX_REQUEST_BYTES} byte transport limit"),
+    })
+    .expect("error envelope must serialize")
 }
 
 #[cfg(test)]
@@ -125,6 +186,29 @@ mod tests {
                 ..
             } if id == request_id
         ));
+    }
+
+    #[tokio::test]
+    async fn rejects_requests_larger_than_the_transport_limit() {
+        let repository = git_repository();
+        let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
+        let request = serde_json::to_string(&RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            request: ToolRequest::ApplyPatch {
+                patch: "x".repeat(1_100_000),
+            },
+        })
+        .unwrap();
+
+        let response = handle_line(&runner, &request).await;
+        let ResponseEnvelope::Error { error, .. } =
+            serde_json::from_str::<ResponseEnvelope>(&response).unwrap()
+        else {
+            panic!("expected oversized request error");
+        };
+
+        assert!(error.contains("request exceeds"));
     }
 
     fn git_repository() -> TempDir {

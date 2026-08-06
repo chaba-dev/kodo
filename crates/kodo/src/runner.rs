@@ -13,6 +13,7 @@ use crate::workspace::{Workspace, WorkspaceError};
 
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 1_000;
+const MAX_PATCH_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
@@ -32,6 +33,8 @@ pub enum RunnerError {
     Patch(String),
     #[error("path is not valid UTF-8: {0}")]
     NonUtf8Path(PathBuf),
+    #[error("{0}")]
+    OutputLimit(String),
     #[error(transparent)]
     Process(#[from] ProcessError),
 }
@@ -151,8 +154,18 @@ impl Runner {
         let files = successful_stdout(output)?;
         let mut paths: Vec<_> = files.lines().map(str::to_owned).collect();
         paths.sort_unstable();
-        let truncated = paths.len() > self.max_results;
+        let mut bytes = 0;
+        let mut truncated = paths.len() > self.max_results;
         paths.truncate(self.max_results);
+        paths.retain(|path| {
+            if bytes + path.len() > self.max_output_bytes {
+                truncated = true;
+                false
+            } else {
+                bytes += path.len();
+                true
+            }
+        });
 
         Ok(ToolResult::Files { paths, truncated })
     }
@@ -165,8 +178,9 @@ impl Runner {
         };
         let mut matches = Vec::new();
         let mut truncated = false;
+        let mut output_bytes = 0;
 
-        for search_path in search_paths {
+        'search: for search_path in search_paths {
             let ToolResult::Files {
                 paths,
                 truncated: files_truncated,
@@ -190,23 +204,28 @@ impl Runner {
                     if line.contains(query) {
                         if matches.len() == self.max_results {
                             truncated = true;
-                            break;
+                            break 'search;
                         }
+                        let path_bytes = path.len();
+                        if output_bytes + path_bytes >= self.max_output_bytes {
+                            truncated = true;
+                            break 'search;
+                        }
+                        let remaining = self.max_output_bytes - output_bytes - path_bytes;
+                        let (content, content_truncated) =
+                            truncate_utf8(line.to_owned(), remaining);
                         matches.push(SearchMatch {
                             path: path.clone(),
                             line: index + 1,
-                            content: line.to_owned(),
+                            content,
                         });
+                        output_bytes += path_bytes + matches.last().unwrap().content.len();
+                        if content_truncated {
+                            truncated = true;
+                            break 'search;
+                        }
                     }
                 }
-
-                if matches.len() == self.max_results {
-                    break;
-                }
-            }
-
-            if matches.len() == self.max_results {
-                break;
             }
         }
 
@@ -219,6 +238,11 @@ impl Runner {
         offset: usize,
         limit: usize,
     ) -> Result<ToolResult, RunnerError> {
+        if limit == 0 {
+            return Err(RunnerError::OutputLimit(
+                "read_file limit must be greater than zero".into(),
+            ));
+        }
         let resolved = self.workspace.resolve(path)?;
         let content = fs::read_to_string(&resolved).map_err(|source| RunnerError::Read {
             path: resolved,
@@ -232,15 +256,20 @@ impl Runner {
             .copied()
             .collect::<Vec<_>>()
             .join("\n");
+        if selected.len() > self.max_output_bytes {
+            return Err(RunnerError::OutputLimit(format!(
+                "requested file lines exceed {} byte output limit",
+                self.max_output_bytes
+            )));
+        }
         let next_line = offset.saturating_add(limit);
         let next_offset = (next_line < lines.len()).then_some(next_line);
-        let (content, bytes_truncated) = truncate_utf8(selected, self.max_output_bytes);
 
         Ok(ToolResult::File {
-            content,
+            content: selected,
             offset,
             next_offset,
-            truncated: bytes_truncated || next_offset.is_some(),
+            truncated: next_offset.is_some(),
         })
     }
 
@@ -312,6 +341,11 @@ impl Runner {
     }
 
     fn apply_patch(&self, patch: &str) -> Result<ToolResult, RunnerError> {
+        if patch.len() > MAX_PATCH_BYTES {
+            return Err(RunnerError::Patch(format!(
+                "patch exceeds {MAX_PATCH_BYTES} byte limit"
+            )));
+        }
         let paths = self.patch_paths(patch)?;
         let check = self.git_with_input(["apply", "--check"], patch)?;
         successful_patch(check)?;
@@ -361,6 +395,12 @@ impl Runner {
 
         paths.sort_unstable();
         paths.dedup();
+        if paths.len() > self.max_results {
+            return Err(RunnerError::Patch(format!(
+                "patch affects more than {} files",
+                self.max_results
+            )));
+        }
         Ok(paths)
     }
 
@@ -536,6 +576,31 @@ mod tests {
         };
         assert_eq!(matches.len(), 2);
         assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn search_respects_byte_and_result_limits() {
+        let repository = repository();
+        fs::write(
+            repository.path().join("large.txt"),
+            "needle followed by a very long matching line\nneedle again\n",
+        )
+        .unwrap();
+        let runner = Runner::with_limits(Workspace::from_root(repository.path()).unwrap(), 16, 1);
+
+        let ToolResult::Matches { matches, truncated } = runner
+            .execute(ToolRequest::SearchCode {
+                query: "needle".into(),
+                paths: vec![],
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected matches");
+        };
+
+        assert!(matches[0].content.len() <= 16);
+        assert!(truncated);
     }
 
     #[tokio::test]
