@@ -1,4 +1,3 @@
-use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -20,12 +19,6 @@ const MAX_PATCH_BYTES: usize = 1024 * 1024;
 pub enum RunnerError {
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
-    #[error("failed to read {path}: {source}")]
-    Read {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("failed to run Git: {0}")]
     GitIo(#[source] std::io::Error),
     #[error("Git command failed: {0}")]
@@ -213,12 +206,11 @@ impl Runner {
             truncated |= files_truncated;
 
             for path in paths {
-                let resolved = self.workspace.resolve(&path)?;
-                if !resolved.is_file() {
+                if !self.workspace.is_file(&path)? {
                     continue;
                 }
 
-                let Ok(content) = fs::read_to_string(&resolved) else {
+                let Ok(content) = self.workspace.read_to_string(&path) else {
                     continue;
                 };
 
@@ -265,11 +257,7 @@ impl Runner {
                 "read_file limit must be greater than zero".into(),
             ));
         }
-        let resolved = self.workspace.resolve(path)?;
-        let content = fs::read_to_string(&resolved).map_err(|source| RunnerError::Read {
-            path: resolved,
-            source,
-        })?;
+        let content = self.workspace.read_to_string(path)?;
         let lines: Vec<_> = content.lines().collect();
         let selected = lines
             .iter()

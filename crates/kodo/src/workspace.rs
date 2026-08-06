@@ -1,6 +1,9 @@
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -24,9 +27,10 @@ pub enum WorkspaceError {
 }
 
 /// A canonical Git worktree root used to confine every runner filesystem operation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Workspace {
     root: PathBuf,
+    root_dir: Arc<Dir>,
 }
 
 impl Workspace {
@@ -47,18 +51,47 @@ impl Workspace {
         }
 
         let reported_root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-        Ok(Self {
-            root: canonicalize(&reported_root)?,
-        })
+        Self::from_root(reported_root)
     }
 
     pub fn from_root(root: impl AsRef<Path>) -> Result<Self, WorkspaceError> {
         let root = canonicalize(root.as_ref())?;
-        Ok(Self { root })
+        let root_dir = Dir::open_ambient_dir(&root, ambient_authority()).map_err(|source| {
+            WorkspaceError::Io {
+                path: root.clone(),
+                source,
+            }
+        })?;
+        Ok(Self {
+            root,
+            root_dir: Arc::new(root_dir),
+        })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Read through the retained root capability so concurrent symlink changes cannot escape it.
+    pub fn read_to_string(&self, path: impl AsRef<Path>) -> Result<String, WorkspaceError> {
+        let path = validate_relative(path.as_ref())?;
+        self.root_dir
+            .read_to_string(path)
+            .map_err(|source| WorkspaceError::Io {
+                path: self.root.join(path),
+                source,
+            })
+    }
+
+    pub fn is_file(&self, path: impl AsRef<Path>) -> Result<bool, WorkspaceError> {
+        let path = validate_relative(path.as_ref())?;
+        self.root_dir
+            .metadata(path)
+            .map(|metadata| metadata.is_file())
+            .map_err(|source| WorkspaceError::Io {
+                path: self.root.join(path),
+                source,
+            })
     }
 
     /// Resolve an existing workspace-relative path and reject symlinks that escape the root.
@@ -159,6 +192,7 @@ mod tests {
 
         let repository = git_repository();
         let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("secret.txt"), "secret").unwrap();
         symlink(outside.path(), repository.path().join("escape")).unwrap();
         let workspace = Workspace::from_root(repository.path()).unwrap();
 
@@ -170,6 +204,7 @@ mod tests {
             workspace.resolve_new("escape/new-file"),
             Err(WorkspaceError::OutsideWorkspace(_))
         ));
+        assert!(workspace.read_to_string("escape/secret.txt").is_err());
     }
 
     #[test]

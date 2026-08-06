@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+cap-std = "3.4"
 clap = { version = "4.5", features = ["derive"] }
 futures-util = "0.3"
 nix = { version = "0.30", features = ["process", "signal"] }
