@@ -14,6 +14,9 @@ use uuid::Uuid;
 
 use crate::protocol::{CommandOutput, OutputStream, ProcessStatus};
 
+const MAX_RETAINED_PROCESSES: usize = 1024;
+const PROCESS_RETENTION: Duration = Duration::from_secs(5 * 60);
+
 #[derive(Debug, Error)]
 pub enum ProcessError {
     #[error("failed to start command: {0}")]
@@ -22,6 +25,8 @@ pub enum ProcessError {
     Unknown(Uuid),
     #[error("process supervisor for {0} stopped unexpectedly")]
     SupervisorStopped(Uuid),
+    #[error("runner already retains the maximum of {MAX_RETAINED_PROCESSES} processes")]
+    Capacity,
 }
 
 #[derive(Clone)]
@@ -94,6 +99,10 @@ impl ProcessManager {
         cwd: &Path,
         timeout: Duration,
     ) -> Result<Uuid, ProcessError> {
+        let mut entries = self.entries.lock().await;
+        if entries.len() >= MAX_RETAINED_PROCESSES {
+            return Err(ProcessError::Capacity);
+        }
         let mut child = Command::new("sh")
             .args(["-c", command])
             .current_dir(cwd)
@@ -113,22 +122,25 @@ impl ProcessManager {
         }));
         let (stop, stop_receiver) = mpsc::channel(1);
 
-        self.entries.lock().await.insert(
+        entries.insert(
             process_id,
             ProcessEntry {
                 state: Arc::clone(&state),
                 stop,
             },
         );
-        tokio::spawn(supervise(
+        drop(entries);
+        tokio::spawn(supervise(Supervisor {
             child,
             stdout,
             stderr,
             state,
-            stop_receiver,
+            stop: stop_receiver,
             timeout,
-            self.max_pending_output_bytes,
-        ));
+            max_pending_output_bytes: self.max_pending_output_bytes,
+            process_id,
+            entries: Arc::clone(&self.entries),
+        }));
 
         Ok(process_id)
     }
@@ -194,15 +206,30 @@ impl ProcessManager {
     }
 }
 
-async fn supervise(
-    mut child: Child,
+struct Supervisor {
+    child: Child,
     stdout: ChildStdout,
     stderr: ChildStderr,
     state: Arc<StdMutex<ProcessState>>,
-    mut stop: mpsc::Receiver<StopReason>,
+    stop: mpsc::Receiver<StopReason>,
     timeout: Duration,
     max_pending_output_bytes: usize,
-) {
+    process_id: Uuid,
+    entries: Arc<Mutex<HashMap<Uuid, ProcessEntry>>>,
+}
+
+async fn supervise(supervisor: Supervisor) {
+    let Supervisor {
+        mut child,
+        stdout,
+        stderr,
+        state,
+        mut stop,
+        timeout,
+        max_pending_output_bytes,
+        process_id,
+        entries,
+    } = supervisor;
     let stdout_reader = spawn_reader(
         stdout,
         OutputStream::Stdout,
@@ -248,6 +275,8 @@ async fn supervise(
     finish_reader(stdout_reader).await;
     finish_reader(stderr_reader).await;
     state.lock().expect("process state lock poisoned").status = status;
+    tokio::time::sleep(PROCESS_RETENTION).await;
+    entries.lock().await.remove(&process_id);
 }
 
 enum SupervisorOutcome {
