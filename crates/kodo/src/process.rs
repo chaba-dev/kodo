@@ -302,33 +302,85 @@ fn spawn_reader(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut bytes = vec![0; 8 * 1024];
+        let mut pending_utf8 = Vec::new();
         loop {
             let read = match reader.read(&mut bytes).await {
-                Ok(0) | Err(_) => return,
+                Ok(0) | Err(_) => {
+                    let content = decode_utf8(&mut pending_utf8, &[], true);
+                    append_output(&state, stream, content, max_pending_output_bytes);
+                    return;
+                }
                 Ok(read) => read,
             };
-            let content = String::from_utf8_lossy(&bytes[..read]).into_owned();
-            let mut state = state.lock().expect("process state lock poisoned");
-            let output = &mut state.output;
-            let (content, truncated) = truncate_utf8(content, max_pending_output_bytes);
-            if !content.is_empty() {
-                while output.bytes + content.len() > max_pending_output_bytes {
-                    let Some(removed) = output.chunks.pop_front() else {
-                        break;
-                    };
-                    output.bytes -= removed.content.len();
-                }
-                output.bytes += content.len();
-                output.chunks.push_back(CommandOutput {
-                    sequence: output.next_sequence,
-                    stream,
-                    content,
-                    truncated,
-                });
-                output.next_sequence += 1;
-            }
+            let content = decode_utf8(&mut pending_utf8, &bytes[..read], false);
+            append_output(&state, stream, content, max_pending_output_bytes);
         }
     })
+}
+
+fn append_output(
+    state: &StdMutex<ProcessState>,
+    stream: OutputStream,
+    content: String,
+    max_pending_output_bytes: usize,
+) {
+    let mut state = state.lock().expect("process state lock poisoned");
+    let output = &mut state.output;
+    let (content, truncated) = truncate_utf8(content, max_pending_output_bytes);
+    if content.is_empty() {
+        return;
+    }
+    while output.bytes + content.len() > max_pending_output_bytes {
+        let Some(removed) = output.chunks.pop_front() else {
+            break;
+        };
+        output.bytes -= removed.content.len();
+    }
+    output.bytes += content.len();
+    output.chunks.push_back(CommandOutput {
+        sequence: output.next_sequence,
+        stream,
+        content,
+        truncated,
+    });
+    output.next_sequence += 1;
+}
+
+fn decode_utf8(pending: &mut Vec<u8>, bytes: &[u8], end_of_stream: bool) -> String {
+    pending.extend_from_slice(bytes);
+    let mut decoded = String::new();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(content) => {
+                decoded.push_str(content);
+                pending.clear();
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                decoded.push_str(
+                    std::str::from_utf8(&pending[..valid])
+                        .expect("UTF-8 validator marked prefix as valid"),
+                );
+                match error.error_len() {
+                    Some(invalid) => {
+                        decoded.push('\u{FFFD}');
+                        pending.drain(..valid + invalid);
+                    }
+                    None => {
+                        pending.drain(..valid);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if end_of_stream && !pending.is_empty() {
+        decoded.push_str(&String::from_utf8_lossy(pending));
+        pending.clear();
+    }
+    decoded
 }
 
 fn truncate_utf8(mut content: String, max_bytes: usize) -> (String, bool) {
@@ -346,7 +398,11 @@ fn truncate_utf8(mut content: String, max_bytes: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
     use tempfile::TempDir;
+    use tokio::io::ReadBuf;
 
     use super::*;
 
@@ -501,6 +557,53 @@ mod tests {
         let replay = manager.poll(process_id, 0).await.unwrap();
 
         assert_eq!(replay.output, first.output);
+    }
+
+    #[tokio::test]
+    async fn preserves_utf8_characters_split_across_reads() {
+        let state = Arc::new(StdMutex::new(ProcessState {
+            output: OutputBuffer::default(),
+            status: ProcessStatus::Running,
+        }));
+        let reader = ChunkReader::new([vec![0xE2, 0x82], vec![0xAC]]);
+
+        spawn_reader(reader, OutputStream::Stdout, Arc::clone(&state), 1024)
+            .await
+            .unwrap();
+
+        let state = state.lock().unwrap();
+        let output: String = state
+            .output
+            .chunks
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect();
+        assert_eq!(output, "€");
+    }
+
+    struct ChunkReader {
+        chunks: VecDeque<Vec<u8>>,
+    }
+
+    impl ChunkReader {
+        fn new(chunks: impl IntoIterator<Item = Vec<u8>>) -> Self {
+            Self {
+                chunks: chunks.into_iter().collect(),
+            }
+        }
+    }
+
+    impl AsyncRead for ChunkReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            if let Some(chunk) = self.chunks.pop_front() {
+                buffer.put_slice(&chunk);
+            }
+            Poll::Ready(Ok(()))
+        }
     }
 
     async fn poll_until_finished(manager: &ProcessManager, process_id: Uuid) -> ProcessPoll {
