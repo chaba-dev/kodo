@@ -1,7 +1,7 @@
 #+title: Kodo MVP Plan
 #+subtitle: A durable coding agent with CLI and web frontends
-#+author: Kodo contributors
-#+startup: overview
+#+author: Darwin Wu
+#+startup: showall
 #+options: toc:2
 
 * Product promise
@@ -198,16 +198,16 @@ approval lifecycle, and runner protocol.
 
 The recommended MVP composition is:
 
-| Concern                              | MVP choice                                      |
-|--------------------------------------+-------------------------------------------------|
-| Provider requests and normalization  | [[https://hexdocs.pm/req_llm/][ReqLLM]]                                          |
-| Agent loop and state transitions     | Kodo-owned explicit state machine               |
-| Active session lifecycle             | OTP ~DynamicSupervisor~ and ~Registry~           |
-| Durable session state                | Kodo PostgreSQL event log                       |
-| Live client delivery                 | Phoenix PubSub                                  |
-| Local tool execution                 | Kodo's typed Rust runner protocol               |
-| Fixed background workflows           | Consider Reactor or Oban after the MVP          |
-| General-purpose agent/graph runtime  | No initial dependency                           |
+| Concern                             | MVP choice                             |
+|-------------------------------------+----------------------------------------|
+| Provider requests and normalization | [[https://hexdocs.pm/req_llm/][ReqLLM]]                                 |
+| Agent loop and state transitions    | Kodo-owned explicit state machine      |
+| Active session lifecycle            | OTP ~DynamicSupervisor~ and ~Registry~ |
+| Durable session state               | Kodo PostgreSQL event log              |
+| Live client delivery                | Phoenix PubSub                         |
+| Local tool execution                | Kodo's typed Rust runner protocol      |
+| Fixed background workflows          | Consider Reactor or Oban after the MVP |
+| General-purpose agent/graph runtime | No initial dependency                  |
 
 This is intentionally not a from-scratch provider implementation. It places a
 small Kodo-owned orchestration layer over an existing inference client while
@@ -639,86 +639,68 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 
 ** TODO Milestone 1: Local tool runner
 
-Deliver:
-
-- Rust daemon and workspace registration.
-- Authenticated WebSocket connection to Phoenix.
-- Read, search, patch, process, and repository-inspection tools.
-- Path confinement and bounded output.
-- Command output streaming and cancellation.
-
-Exit criterion: typed requests issued without a model can inspect and modify a
-fixture repository, run a test, stream its output, and return the resulting
-diff.
+- [ ] Rust daemon and workspace registration.
+- [ ] Authenticated WebSocket connection to Phoenix.
+- [ ] Read, search, patch, process, and repository-inspection tools.
+- [ ] Path confinement and bounded output.
+- [ ] Command output streaming and cancellation.
+- [ ] Exit criterion: typed requests issued without a model can inspect and
+  modify a fixture repository, run a test, stream its output, and return the
+  resulting diff.
 
 ** TODO Milestone 2: Durable primary-agent session
 
-Deliver:
-
-- Session persistence and ordered event log.
-- Supervised active-session process.
-- One model-provider adapter.
-- Primary agent loop with tool dispatch.
-- Turn budgets, cancellation, and explicit failure states.
-- Event replay after client or Phoenix process reconnection.
-
-Exit criterion: an API-driven session can complete a small coding task and be
-reconstructed entirely from persisted events.
+- [ ] Session persistence and ordered event log.
+- [ ] Supervised active-session process.
+- [ ] One model-provider adapter.
+- [ ] Primary agent loop with tool dispatch.
+- [ ] Turn budgets, cancellation, and explicit failure states.
+- [ ] Event replay after client or Phoenix process reconnection.
+- [ ] Exit criterion: an API-driven session can complete a small coding task
+  and be reconstructed entirely from persisted events.
 
 ** TODO Milestone 3: CLI frontend
 
-Deliver:
-
-- Start and resume session commands.
-- Streaming transcript and tool activity.
-- Approval interaction and interrupt control.
-- Final diff and verification summary.
-- Browser handoff URL.
-
-Exit criterion: a developer can complete the core workflow without opening the
-browser.
+- [ ] Start and resume session commands.
+- [ ] Streaming transcript and tool activity.
+- [ ] Approval interaction and interrupt control.
+- [ ] Final diff and verification summary.
+- [ ] Browser handoff URL.
+- [ ] Exit criterion: a developer can complete the core workflow without
+  opening the browser.
 
 ** TODO Milestone 4: LiveView frontend
 
-Deliver:
-
-- Session list and session detail pages.
-- Live messages, tool events, and command output.
-- Composer, stop control, and approvals.
-- Changed-file list and diff viewer.
-- Runner connection status.
-
-Exit criterion: CLI and browser can observe and control the same active session,
-and either can disconnect without terminating it.
+- [ ] Session list and session detail pages.
+- [ ] Live messages, tool events, and command output.
+- [ ] Composer, stop control, and approvals.
+- [ ] Changed-file list and diff viewer.
+- [ ] Runner connection status.
+- [ ] Exit criterion: CLI and browser can observe and control the same active
+  session, and either can disconnect without terminating it.
 
 ** TODO Milestone 5: Roles and recommended mapping
 
-Deliver:
-
-- Versioned primary, search, and review contracts.
-- The versioned ~balanced~ profile.
-- Per-role user and repository overrides.
-- Capability validation and invocation metadata.
-- Search and final-diff review integration.
-- Initial 30-task evaluation suite.
-
-Exit criterion: a user can override one role while inheriting all other
-recommendations, and the default mapping has recorded evaluation results.
+- [ ] Versioned primary, search, and review contracts.
+- [ ] The versioned ~balanced~ profile.
+- [ ] Per-role user and repository overrides.
+- [ ] Capability validation and invocation metadata.
+- [ ] Search and final-diff review integration.
+- [ ] Initial 30-task evaluation suite.
+- [ ] Exit criterion: a user can override one role while inheriting all other
+  recommendations, and the default mapping has recorded evaluation results.
 
 ** TODO Milestone 6: Reliability and release candidate
 
-Deliver:
-
-- Runner reconnect and temporary-disconnection behavior.
-- Phoenix session-process restart recovery.
-- Provider and tool timeout handling.
-- Command and agent cancellation.
-- Clear truncated-output and patch-failure behavior.
-- End-to-end tests for the core workflow.
-- Installation and provider-configuration documentation.
-
-Exit criterion: the acceptance scenario passes repeatedly across supported
-Linux and macOS environments.
+- [ ] Runner reconnect and temporary-disconnection behavior.
+- [ ] Phoenix session-process restart recovery.
+- [ ] Provider and tool timeout handling.
+- [ ] Command and agent cancellation.
+- [ ] Clear truncated-output and patch-failure behavior.
+- [ ] End-to-end tests for the core workflow.
+- [ ] Installation and provider-configuration documentation.
+- [ ] Exit criterion: the acceptance scenario passes repeatedly across
+  supported Linux and macOS environments.
 
 * Acceptance scenario
 
