@@ -2,9 +2,12 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use thiserror::Error;
+use uuid::Uuid;
 
+use crate::process::{ProcessError, ProcessManager};
 use crate::protocol::{SearchMatch, ToolRequest, ToolResult};
 use crate::workspace::{Workspace, WorkspaceError};
 
@@ -29,6 +32,8 @@ pub enum RunnerError {
     Patch(String),
     #[error("path is not valid UTF-8: {0}")]
     NonUtf8Path(PathBuf),
+    #[error(transparent)]
+    Process(#[from] ProcessError),
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +41,7 @@ pub struct Runner {
     workspace: Workspace,
     max_output_bytes: usize,
     max_results: usize,
+    processes: ProcessManager,
 }
 
 impl Runner {
@@ -44,6 +50,7 @@ impl Runner {
             workspace,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_results: DEFAULT_MAX_RESULTS,
+            processes: ProcessManager::new(DEFAULT_MAX_OUTPUT_BYTES),
         }
     }
 
@@ -52,10 +59,11 @@ impl Runner {
             workspace,
             max_output_bytes,
             max_results,
+            processes: ProcessManager::new(max_output_bytes),
         }
     }
 
-    pub fn execute(&self, request: ToolRequest) -> Result<ToolResult, RunnerError> {
+    pub async fn execute(&self, request: ToolRequest) -> Result<ToolResult, RunnerError> {
         match request {
             ToolRequest::ListFiles { path } => self.list_files(&path),
             ToolRequest::SearchCode { query, paths } => self.search_code(&query, &paths),
@@ -67,7 +75,48 @@ impl Runner {
             ToolRequest::GitStatus => self.git_output(["status", "--short"], &[]),
             ToolRequest::GitDiff { paths } => self.git_diff(&paths),
             ToolRequest::ApplyPatch { patch } => self.apply_patch(&patch),
+            ToolRequest::StartCommand {
+                command,
+                cwd,
+                timeout_ms,
+            } => self.start_command(&command, &cwd, timeout_ms).await,
+            ToolRequest::PollCommand { process_id } => self.poll_command(process_id).await,
+            ToolRequest::StopCommand { process_id } => self.stop_command(process_id).await,
         }
+    }
+
+    async fn start_command(
+        &self,
+        command: &str,
+        cwd: &str,
+        timeout_ms: u64,
+    ) -> Result<ToolResult, RunnerError> {
+        let cwd = self.workspace.resolve(cwd)?;
+        let process_id = self
+            .processes
+            .start(command, &cwd, Duration::from_millis(timeout_ms))
+            .await?;
+        Ok(ToolResult::CommandStarted { process_id })
+    }
+
+    async fn poll_command(&self, process_id: Uuid) -> Result<ToolResult, RunnerError> {
+        let poll = self.processes.poll(process_id).await?;
+        Ok(ToolResult::CommandPoll {
+            process_id,
+            status: poll.status,
+            output: poll.output,
+            truncated: poll.truncated,
+        })
+    }
+
+    async fn stop_command(&self, process_id: Uuid) -> Result<ToolResult, RunnerError> {
+        let poll = self.processes.stop(process_id).await?;
+        Ok(ToolResult::CommandPoll {
+            process_id,
+            status: poll.status,
+            output: poll.output,
+            truncated: poll.truncated,
+        })
     }
 
     fn list_files(&self, path: &str) -> Result<ToolResult, RunnerError> {
@@ -328,8 +377,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn reads_lines_with_offsets_and_reports_truncation() {
+    #[tokio::test]
+    async fn reads_lines_with_offsets_and_reports_truncation() {
         let repository = repository();
         fs::write(repository.path().join("notes.txt"), "one\ntwo\nthree\n").unwrap();
         let runner = runner(&repository);
@@ -341,6 +390,7 @@ mod tests {
                     offset: 1,
                     limit: 1,
                 })
+                .await
                 .unwrap(),
             ToolResult::File {
                 content: "two".into(),
@@ -351,8 +401,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn lists_and_searches_tracked_and_untracked_files() {
+    #[tokio::test]
+    async fn lists_and_searches_tracked_and_untracked_files() {
         let repository = repository();
         fs::write(repository.path().join("tracked.txt"), "find me\n").unwrap();
         git(repository.path(), ["add", "tracked.txt"]);
@@ -364,6 +414,7 @@ mod tests {
             .execute(ToolRequest::ListFiles {
                 path: String::new(),
             })
+            .await
             .unwrap()
         else {
             panic!("expected files");
@@ -376,6 +427,7 @@ mod tests {
                 query: "find me".into(),
                 paths: vec![],
             })
+            .await
             .unwrap()
         else {
             panic!("expected matches");
@@ -384,8 +436,8 @@ mod tests {
         assert!(!truncated);
     }
 
-    #[test]
-    fn reports_status_and_the_resulting_diff() {
+    #[tokio::test]
+    async fn reports_status_and_the_resulting_diff() {
         let repository = repository();
         fs::write(repository.path().join("file.txt"), "before\n").unwrap();
         git(repository.path(), ["add", "file.txt"]);
@@ -393,7 +445,8 @@ mod tests {
         fs::write(repository.path().join("file.txt"), "after\n").unwrap();
         let runner = runner(&repository);
 
-        let ToolResult::Output { content, .. } = runner.execute(ToolRequest::GitStatus).unwrap()
+        let ToolResult::Output { content, .. } =
+            runner.execute(ToolRequest::GitStatus).await.unwrap()
         else {
             panic!("expected output");
         };
@@ -401,6 +454,7 @@ mod tests {
 
         let ToolResult::Output { content, .. } = runner
             .execute(ToolRequest::GitDiff { paths: vec![] })
+            .await
             .unwrap()
         else {
             panic!("expected output");
@@ -409,8 +463,8 @@ mod tests {
         assert!(content.contains("+after"));
     }
 
-    #[test]
-    fn applies_a_patch_and_reports_affected_paths() {
+    #[tokio::test]
+    async fn applies_a_patch_and_reports_affected_paths() {
         let repository = repository();
         fs::write(repository.path().join("file.txt"), "before\n").unwrap();
         git(repository.path(), ["add", "file.txt"]);
@@ -421,6 +475,7 @@ mod tests {
             .execute(ToolRequest::ApplyPatch {
                 patch: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n".into(),
             })
+            .await
             .unwrap();
 
         assert_eq!(
@@ -435,8 +490,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rejects_patch_paths_outside_the_workspace() {
+    #[tokio::test]
+    async fn rejects_patch_paths_outside_the_workspace() {
         let repository = repository();
         let runner = runner(&repository);
 
@@ -444,6 +499,7 @@ mod tests {
             .execute(ToolRequest::ApplyPatch {
                 patch: "--- /dev/null\n+++ b/../outside.txt\n@@ -0,0 +1 @@\n+nope\n".into(),
             })
+            .await
             .unwrap_err();
 
         assert!(matches!(
@@ -458,6 +514,54 @@ mod tests {
                 .join("outside.txt")
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn starts_and_polls_a_command_through_typed_dispatch() {
+        let repository = repository();
+        let runner = runner(&repository);
+
+        let ToolResult::CommandStarted { process_id } = runner
+            .execute(ToolRequest::StartCommand {
+                command: "printf runner-output".into(),
+                cwd: String::new(),
+                timeout_ms: 1_000,
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected a process identifier");
+        };
+
+        let output = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut output = String::new();
+            loop {
+                let result = runner
+                    .execute(ToolRequest::PollCommand { process_id })
+                    .await
+                    .unwrap();
+                let ToolResult::CommandPoll {
+                    status,
+                    output: chunks,
+                    ..
+                } = result
+                else {
+                    panic!("expected command output");
+                };
+                output.extend(chunks.into_iter().map(|chunk| chunk.content));
+                if matches!(
+                    status,
+                    crate::protocol::ProcessStatus::Exited { code: Some(0) }
+                ) {
+                    return output;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("command did not finish");
+
+        assert_eq!(output, "runner-output");
     }
 
     fn runner(repository: &TempDir) -> Runner {

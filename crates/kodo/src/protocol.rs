@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "tool", rename_all = "snake_case")]
@@ -21,6 +22,17 @@ pub enum ToolRequest {
     },
     ApplyPatch {
         patch: String,
+    },
+    StartCommand {
+        command: String,
+        cwd: String,
+        timeout_ms: u64,
+    },
+    PollCommand {
+        process_id: Uuid,
+    },
+    StopCommand {
+        process_id: Uuid,
     },
 }
 
@@ -48,6 +60,15 @@ pub enum ToolResult {
     FilesChanged {
         paths: Vec<String>,
     },
+    CommandStarted {
+        process_id: Uuid,
+    },
+    CommandPoll {
+        process_id: Uuid,
+        status: ProcessStatus,
+        output: Vec<CommandOutput>,
+        truncated: bool,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -55,6 +76,28 @@ pub struct SearchMatch {
     pub path: String,
     pub line: usize,
     pub content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessStatus {
+    Running,
+    Exited { code: Option<i32> },
+    TimedOut,
+    Stopped,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CommandOutput {
+    pub stream: OutputStream,
+    pub content: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
 }
 
 #[cfg(test)]
