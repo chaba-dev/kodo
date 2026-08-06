@@ -19,6 +19,9 @@ pub enum ToolRequest {
     GitDiff {
         paths: Vec<String>,
     },
+    ApplyPatch {
+        patch: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -41,6 +44,9 @@ pub enum ToolResult {
     Output {
         content: String,
         truncated: bool,
+    },
+    FilesChanged {
+        paths: Vec<String>,
     },
 }
 

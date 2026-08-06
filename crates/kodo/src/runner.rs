@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use thiserror::Error;
 
@@ -24,6 +25,8 @@ pub enum RunnerError {
     GitIo(#[source] std::io::Error),
     #[error("Git command failed: {0}")]
     Git(String),
+    #[error("patch is invalid: {0}")]
+    Patch(String),
     #[error("path is not valid UTF-8: {0}")]
     NonUtf8Path(PathBuf),
 }
@@ -63,6 +66,7 @@ impl Runner {
             } => self.read_file(&path, offset, limit),
             ToolRequest::GitStatus => self.git_output(["status", "--short"], &[]),
             ToolRequest::GitDiff { paths } => self.git_diff(&paths),
+            ToolRequest::ApplyPatch { patch } => self.apply_patch(&patch),
         }
     }
 
@@ -181,6 +185,43 @@ impl Runner {
         self.git_output(["diff", "HEAD", "--"], &relative_paths)
     }
 
+    fn apply_patch(&self, patch: &str) -> Result<ToolResult, RunnerError> {
+        let paths = self.patch_paths(patch)?;
+        let check = self.git_with_input(["apply", "--check"], patch)?;
+        successful_patch(check)?;
+        let applied = self.git_with_input(["apply"], patch)?;
+        successful_patch(applied)?;
+        Ok(ToolResult::FilesChanged { paths })
+    }
+
+    fn patch_paths(&self, patch: &str) -> Result<Vec<String>, RunnerError> {
+        let output = self.git_with_input(["apply", "--numstat", "-z"], patch)?;
+        let stdout = successful_patch(output)?;
+        let mut paths = Vec::new();
+
+        for record in stdout
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            let path = record
+                .splitn(3, |byte| *byte == b'\t')
+                .nth(2)
+                .ok_or_else(|| RunnerError::Patch("unexpected Git numstat output".into()))?;
+            let path = String::from_utf8(path.to_vec())
+                .map_err(|_| RunnerError::Patch("patch path is not valid UTF-8".into()))?;
+            self.workspace.resolve_new(&path)?;
+            paths.push(path);
+        }
+
+        if paths.is_empty() {
+            return Err(RunnerError::Patch("patch does not affect any files".into()));
+        }
+
+        paths.sort_unstable();
+        paths.dedup();
+        Ok(paths)
+    }
+
     fn git_output<const N: usize>(
         &self,
         args: [&str; N],
@@ -208,6 +249,28 @@ impl Runner {
             .map_err(RunnerError::GitIo)
     }
 
+    fn git_with_input<const N: usize>(
+        &self,
+        args: [&str; N],
+        input: &str,
+    ) -> Result<Output, RunnerError> {
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(self.workspace.root())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(RunnerError::GitIo)?;
+        child
+            .stdin
+            .take()
+            .expect("piped stdin must be available")
+            .write_all(input.as_bytes())
+            .map_err(RunnerError::GitIo)?;
+        child.wait_with_output().map_err(RunnerError::GitIo)
+    }
+
     fn confined_relative(&self, path: &str) -> Result<String, RunnerError> {
         let resolved = self.workspace.resolve(path)?;
         let relative = resolved
@@ -228,6 +291,16 @@ fn successful_stdout(output: Output) -> Result<String, RunnerError> {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
         Err(RunnerError::Git(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ))
+    }
+}
+
+fn successful_patch(output: Output) -> Result<Vec<u8>, RunnerError> {
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(RunnerError::Patch(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ))
     }
@@ -334,6 +407,57 @@ mod tests {
         };
         assert!(content.contains("-before"));
         assert!(content.contains("+after"));
+    }
+
+    #[test]
+    fn applies_a_patch_and_reports_affected_paths() {
+        let repository = repository();
+        fs::write(repository.path().join("file.txt"), "before\n").unwrap();
+        git(repository.path(), ["add", "file.txt"]);
+        git(repository.path(), ["commit", "-m", "fixture"]);
+        let runner = runner(&repository);
+
+        let result = runner
+            .execute(ToolRequest::ApplyPatch {
+                patch: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n".into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            result,
+            ToolResult::FilesChanged {
+                paths: vec!["file.txt".into()]
+            }
+        );
+        assert_eq!(
+            fs::read_to_string(repository.path().join("file.txt")).unwrap(),
+            "after\n"
+        );
+    }
+
+    #[test]
+    fn rejects_patch_paths_outside_the_workspace() {
+        let repository = repository();
+        let runner = runner(&repository);
+
+        let error = runner
+            .execute(ToolRequest::ApplyPatch {
+                patch: "--- /dev/null\n+++ b/../outside.txt\n@@ -0,0 +1 @@\n+nope\n".into(),
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunnerError::Patch(_) | RunnerError::Workspace(_)
+        ));
+        assert!(
+            !repository
+                .path()
+                .parent()
+                .unwrap()
+                .join("outside.txt")
+                .exists()
+        );
     }
 
     fn runner(repository: &TempDir) -> Runner {
