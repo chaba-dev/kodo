@@ -190,6 +190,152 @@ The web application includes three initial views.
 
 The browser is a control and review surface, not a full code editor.
 
+* Server library strategy
+
+Kodo should adopt existing libraries for provider-specific inference behavior,
+but retain ownership of the product-defining agent loop, durable event contract,
+approval lifecycle, and runner protocol.
+
+The recommended MVP composition is:
+
+| Concern                              | MVP choice                                      |
+|--------------------------------------+-------------------------------------------------|
+| Provider requests and normalization  | [[https://hexdocs.pm/req_llm/][ReqLLM]]                                          |
+| Agent loop and state transitions     | Kodo-owned explicit state machine               |
+| Active session lifecycle             | OTP ~DynamicSupervisor~ and ~Registry~           |
+| Durable session state                | Kodo PostgreSQL event log                       |
+| Live client delivery                 | Phoenix PubSub                                  |
+| Local tool execution                 | Kodo's typed Rust runner protocol               |
+| Fixed background workflows           | Consider Reactor or Oban after the MVP          |
+| General-purpose agent/graph runtime  | No initial dependency                           |
+
+This is intentionally not a from-scratch provider implementation. It places a
+small Kodo-owned orchestration layer over an existing inference client while
+avoiding a second framework-owned source of session state.
+
+** ReqLLM
+
+[[https://hexdocs.pm/req_llm/][ReqLLM]] is the preferred provider boundary for the MVP. It provides:
+
+- normalized requests and responses across model providers;
+- streamed text, reasoning, and tool-call events;
+- assembly of fragmented streamed tool arguments;
+- canonical message and content representations;
+- structured output and tool schema validation;
+- model capability metadata;
+- token usage and estimated cost metadata;
+- request cancellation and telemetry.
+
+ReqLLM does not need to own tool execution, approval policy, persistence, or
+loop continuation. Those boundaries align with Kodo's design.
+
+ReqLLM must sit behind a narrow ~Kodo.LLM~ behavior. Provider events are
+translated immediately into versioned Kodo events. ReqLLM contexts, messages,
+and response structs may be used while handling a request, but they are not the
+authoritative persisted session representation. Model context is reconstructed
+from Kodo's event projections.
+
+** Kodo-owned state machine
+
+The interactive coding loop is cyclic, model-directed, and interruptible. It
+can pause for approval, await a disconnected runner, receive cancellation, or
+repeat an unknown number of model/tool iterations. An explicit state machine is
+therefore a better initial abstraction than a static graph or DAG.
+
+The loop should advance through durable phases such as:
+
+#+begin_src text
+ready_for_model
+streaming_model
+awaiting_approval
+awaiting_tool_results
+ready_after_tools
+completed
+failed
+cancelled
+#+end_src
+
+Each transition records intent and observed outcomes in the event log. The OTP
+session process coordinates active work and caches a projection, but it can be
+discarded and reconstructed from PostgreSQL events.
+
+** Jido and Jido AI
+
+[[https://hexdocs.pm/jido/][Jido]] is an OTP-native agent framework with immutable agent state, actions,
+signals, directives, supervised agent processes, child agents, execution
+strategies, persistence, and telemetry. Its architecture and the
+[[https://github.com/agentjido/jido_code][jido_code]] coding agent are useful references for:
+
+- separating decisions from effects;
+- action and tool schema conventions;
+- signal and correlation envelopes;
+- parent-child agent lifecycle;
+- cancellation and child-work events;
+- telemetry naming and testing patterns.
+
+Kodo should not initially make ~Jido.AgentServer~, Jido persistence, or the
+Jido AI recursive agent loop authoritative. Doing so would create both a Jido
+state/checkpoint model and a Kodo event/projection model, making recovery and
+idempotency ambiguous. Stateless Jido components may be adopted later where
+they replace concrete Kodo code without taking ownership of session state or
+local tool execution.
+
+** LangChain for Elixir
+
+[[https://hexdocs.pm/langchain/][LangChain for Elixir]] is the principal alternative to ReqLLM plus a custom
+loop. It includes provider adapters, streaming, tool execution, explicit step
+mode, human-in-the-loop tool decisions, trajectory capture, and telemetry.
+
+Its step APIs could reduce some loop implementation work, but its ~LLMChain~
+structure would introduce another in-memory representation of messages and
+loop state. Kodo would still need to translate that state into its durable
+events, UI protocol, approval records, and remote-runner jobs. It should be
+reconsidered if ReqLLM lacks a provider or interaction Kodo requires, but Kodo
+must continue to own persistence and runner dispatch even if LangChain is used.
+
+Kodo should not add both LangChain and ReqLLM to the primary inference path
+without a specific requirement that needs both layers.
+
+** Reactor
+
+[[https://hexdocs.pm/reactor/][Reactor]] is an asynchronous graph and saga orchestrator with dependency
+resolution, parallel execution, retries, conditional steps, composition, and
+compensation. It is a potential fit for fixed workflows such as:
+
+- running benchmark suites across candidate model mappings;
+- executing independent repository checks in parallel;
+- aggregating evaluation results;
+- release or repository-setup automation.
+
+It is not the initial interactive agent-loop runtime. The primary loop is
+cyclic and externally driven, while Reactor is most valuable when the workflow
+and dependencies can be declared in advance. Saga compensation also does not
+map cleanly to reverting arbitrary changes in a developer's working tree.
+
+** Oban and durable workflow engines
+
+[[https://hexdocs.pm/oban/][Oban]] may be added for bounded asynchronous work such as evaluation jobs,
+cleanup, usage aggregation, or scheduled maintenance. Oban Pro Workflow and
+newer Temporal-style Elixir packages offer durable graphs, signals, retries,
+and human-input waits, but they would add a second persistence model to the MVP.
+
+An active interactive turn should not initially run as a background job. It
+requires low-latency streaming, user steering, approvals, cancellation, and
+runner-presence handling. The Kodo event log and supervised session process
+already provide the required durability boundary.
+
+** Package-boundary rules
+
+Any library adopted for the server loop must preserve these constraints:
+
+1. Kodo events remain the authoritative durable session history.
+2. The Rust runner remains authoritative for local tool execution and results.
+3. Approval and cancellation are explicit Kodo state transitions.
+4. Provider-specific types do not appear in persisted events or client APIs.
+5. Every model and tool invocation retains Kodo correlation identifiers.
+6. An OTP process restart must not require a library-owned in-memory checkpoint.
+7. A package upgrade must not require rewriting historical session events.
+
 * Durable session model
 
 ** Session states
