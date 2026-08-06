@@ -1,0 +1,737 @@
+#+title: Kodo MVP Plan
+#+subtitle: A durable coding agent with CLI and web frontends
+#+author: Darwin Wu
+#+startup: showall
+#+options: toc:2
+
+* Product promise
+
+Kodo's MVP proves one complete workflow:
+
+#+begin_quote
+Start a coding task in a terminal, observe or control the same durable session
+from a browser, and receive a tested, reviewable patch produced inside the
+local repository.
+#+end_quote
+
+The CLI and web UI are clients of one agent runtime. They do not run separate
+agents or maintain separate copies of session state.
+
+* Goals
+
+The MVP must let a developer:
+
+1. Run ~kodo~ inside an existing Git repository.
+2. Describe a coding task from the CLI or web UI.
+3. Let the agent search, read, edit, and run verification in that repository.
+4. Observe the same live transcript, tool activity, and status in both clients.
+5. Approve sensitive operations from either client.
+6. Disconnect a frontend and later resume the session without losing state.
+7. Review the resulting diff and the commands used to verify it.
+8. Use Kodo's recommended role-to-model mapping by default.
+9. Override the model assigned to an individual role without copying the
+   entire recommended mapping.
+
+* Non-goals
+
+The MVP does not include:
+
+- cloud development environments or execution while the developer machine is
+  offline;
+- team administration, multiplayer control, billing, or subscriptions;
+- mobile apps, editor extensions, or pull-request automation;
+- arbitrary plugins, MCP servers, or user-authored agent roles;
+- cross-session semantic memory;
+- automatic routing based on estimated task difficulty;
+- parallel write-capable subagents;
+- browser automation or general web research;
+- automatic provider failover;
+- perfect classification or sandboxing of arbitrary shell commands;
+- Windows support unless it becomes a launch requirement.
+
+* Product principles
+
+** One session, many clients
+
+Every message, model invocation, tool call, approval, status transition, and
+command output belongs to a durable session event stream. The CLI and LiveView
+render that same stream.
+
+** Execution stays local
+
+The Rust runner is authoritative about the workspace. It owns filesystem,
+process, and version-control operations. It connects outbound to the Phoenix
+application so the protocol can later work with a hosted control plane without
+requiring inbound access to a developer machine.
+
+** Roles are stable; model mappings are policy
+
+An agent role defines its responsibility, instructions, tools, budget, and
+output contract. A mapping profile selects the model and reasoning level used
+for that role. Model names must not be embedded in orchestration code.
+
+** Observable and interruptible by default
+
+The user can see each consequential action, stop an active turn, and inspect
+the resulting working-tree changes. Kodo reports what actually happened rather
+than relying on the model's description of its work.
+
+* System architecture
+
+#+begin_example
+                         Model provider
+                               ^
+                               |
+                   inference requests and streams
+                               |
+  +-----------+       +--------+------------------+
+  | Rust CLI  |<----->| Phoenix control plane     |
+  +-----------+       |                           |
+                      | - agent loop              |
+  +-----------+       | - role/model resolution  |
+  | LiveView  |<----->| - event persistence      |
+  +-----------+       | - approvals and PubSub   |
+                      +------------+--------------+
+                                   |
+                         typed tool protocol
+                                   |
+                      +------------v--------------+
+                      | Local Rust runner daemon  |
+                      |                           |
+                      | - files and patches       |
+                      | - shell and processes     |
+                      | - Git/Jujutsu inspection  |
+                      | - local safety policy     |
+                      +------------+--------------+
+                                   |
+                            Local workspace
+#+end_example
+
+The first deployment is single-user and local. Phoenix, PostgreSQL, the Rust
+runner, and both clients run on the developer's machine. The model provider is
+the only required external service.
+
+** Rust runner and CLI
+
+The Rust application may initially ship as one binary with separate execution
+modes, for example ~kodo daemon~ and ~kodo chat~. Running ~kodo~ should connect
+to the existing daemon or start it when necessary.
+
+The runner is responsible for:
+
+- discovering and registering the repository root;
+- canonicalizing paths and confining access to the workspace;
+- executing typed tool requests;
+- applying structured patches;
+- starting, polling, and stopping child processes;
+- streaming standard output and standard error;
+- reporting Git status and the actual resulting diff;
+- reconnecting to the control plane after a temporary interruption;
+- surviving a CLI disconnection.
+
+The CLI is responsible for:
+
+- creating and resuming sessions;
+- submitting user messages;
+- rendering the event stream and Markdown responses;
+- displaying tool calls and command output;
+- handling approval prompts;
+- interrupting the active agent turn;
+- showing the session's browser URL;
+- selecting the active model profile.
+
+The first CLI should be line-oriented and use normal terminal scrollback. A
+full-screen TUI is deferred until the core agent experience is reliable.
+
+** Phoenix control plane
+
+The Phoenix application is responsible for:
+
+- supervising active sessions;
+- persisting session events in PostgreSQL;
+- invoking model providers and streaming their output;
+- resolving roles to concrete models;
+- running the primary agent loop and subagents;
+- dispatching tool calls to the selected runner;
+- evaluating approval policy;
+- enforcing turn, token, cost, and timeout budgets;
+- broadcasting new events to CLI and LiveView clients;
+- recovering durable session state after a process restart.
+
+An OTP process may coordinate each active session, but PostgreSQL remains the
+durable source of truth.
+
+** LiveView frontend
+
+The web application includes three initial views.
+
+*** Session list
+
+- Active and recent sessions.
+- Repository name, status, selected profile, and last activity.
+- Runner online/offline state.
+
+*** Session detail
+
+- User and assistant messages.
+- Collapsible tool activity and live command output.
+- Pending approval controls.
+- Current status and stop control.
+- Changed-file list and diff viewer.
+- Message composer.
+
+*** Model settings
+
+- The recommended mapping and its revision.
+- The resolved model for each role.
+- Per-role user overrides.
+- Provider credential status.
+- An action to restore the recommended mapping.
+
+The browser is a control and review surface, not a full code editor.
+
+* Server library strategy
+
+Kodo should adopt existing libraries for provider-specific inference behavior,
+but retain ownership of the product-defining agent loop, durable event contract,
+approval lifecycle, and runner protocol.
+
+The recommended MVP composition is:
+
+| Concern                             | MVP choice                             |
+|-------------------------------------+----------------------------------------|
+| Provider requests and normalization | [[https://hexdocs.pm/req_llm/][ReqLLM]]                                 |
+| Agent loop and state transitions    | Kodo-owned explicit state machine      |
+| Active session lifecycle            | OTP ~DynamicSupervisor~ and ~Registry~ |
+| Durable session state               | Kodo PostgreSQL event log              |
+| Live client delivery                | Phoenix PubSub                         |
+| Local tool execution                | Kodo's typed Rust runner protocol      |
+| Fixed background workflows          | Consider Reactor or Oban after the MVP |
+| General-purpose agent/graph runtime | No initial dependency                  |
+
+This is intentionally not a from-scratch provider implementation. It places a
+small Kodo-owned orchestration layer over an existing inference client while
+avoiding a second framework-owned source of session state.
+
+** ReqLLM
+
+[[https://hexdocs.pm/req_llm/][ReqLLM]] is the preferred provider boundary for the MVP. It provides:
+
+- normalized requests and responses across model providers;
+- streamed text, reasoning, and tool-call events;
+- assembly of fragmented streamed tool arguments;
+- canonical message and content representations;
+- structured output and tool schema validation;
+- model capability metadata;
+- token usage and estimated cost metadata;
+- request cancellation and telemetry.
+
+ReqLLM does not need to own tool execution, approval policy, persistence, or
+loop continuation. Those boundaries align with Kodo's design.
+
+ReqLLM must sit behind a narrow ~Kodo.LLM~ behavior. Provider events are
+translated immediately into versioned Kodo events. ReqLLM contexts, messages,
+and response structs may be used while handling a request, but they are not the
+authoritative persisted session representation. Model context is reconstructed
+from Kodo's event projections.
+
+** Kodo-owned state machine
+
+The interactive coding loop is cyclic, model-directed, and interruptible. It
+can pause for approval, await a disconnected runner, receive cancellation, or
+repeat an unknown number of model/tool iterations. An explicit state machine is
+therefore a better initial abstraction than a static graph or DAG.
+
+The loop should advance through durable phases such as:
+
+#+begin_src text
+ready_for_model
+streaming_model
+awaiting_approval
+awaiting_tool_results
+ready_after_tools
+completed
+failed
+cancelled
+#+end_src
+
+Each transition records intent and observed outcomes in the event log. The OTP
+session process coordinates active work and caches a projection, but it can be
+discarded and reconstructed from PostgreSQL events.
+
+** Jido and Jido AI
+
+[[https://hexdocs.pm/jido/][Jido]] is an OTP-native agent framework with immutable agent state, actions,
+signals, directives, supervised agent processes, child agents, execution
+strategies, persistence, and telemetry. Its architecture and the
+[[https://github.com/agentjido/jido_code][jido_code]] coding agent are useful references for:
+
+- separating decisions from effects;
+- action and tool schema conventions;
+- signal and correlation envelopes;
+- parent-child agent lifecycle;
+- cancellation and child-work events;
+- telemetry naming and testing patterns.
+
+Kodo should not initially make ~Jido.AgentServer~, Jido persistence, or the
+Jido AI recursive agent loop authoritative. Doing so would create both a Jido
+state/checkpoint model and a Kodo event/projection model, making recovery and
+idempotency ambiguous. Stateless Jido components may be adopted later where
+they replace concrete Kodo code without taking ownership of session state or
+local tool execution.
+
+** LangChain for Elixir
+
+[[https://hexdocs.pm/langchain/][LangChain for Elixir]] is the principal alternative to ReqLLM plus a custom
+loop. It includes provider adapters, streaming, tool execution, explicit step
+mode, human-in-the-loop tool decisions, trajectory capture, and telemetry.
+
+Its step APIs could reduce some loop implementation work, but its ~LLMChain~
+structure would introduce another in-memory representation of messages and
+loop state. Kodo would still need to translate that state into its durable
+events, UI protocol, approval records, and remote-runner jobs. It should be
+reconsidered if ReqLLM lacks a provider or interaction Kodo requires, but Kodo
+must continue to own persistence and runner dispatch even if LangChain is used.
+
+Kodo should not add both LangChain and ReqLLM to the primary inference path
+without a specific requirement that needs both layers.
+
+** Reactor
+
+[[https://hexdocs.pm/reactor/][Reactor]] is an asynchronous graph and saga orchestrator with dependency
+resolution, parallel execution, retries, conditional steps, composition, and
+compensation. It is a potential fit for fixed workflows such as:
+
+- running benchmark suites across candidate model mappings;
+- executing independent repository checks in parallel;
+- aggregating evaluation results;
+- release or repository-setup automation.
+
+It is not the initial interactive agent-loop runtime. The primary loop is
+cyclic and externally driven, while Reactor is most valuable when the workflow
+and dependencies can be declared in advance. Saga compensation also does not
+map cleanly to reverting arbitrary changes in a developer's working tree.
+
+** Oban and durable workflow engines
+
+[[https://hexdocs.pm/oban/][Oban]] may be added for bounded asynchronous work such as evaluation jobs,
+cleanup, usage aggregation, or scheduled maintenance. Oban Pro Workflow and
+newer Temporal-style Elixir packages offer durable graphs, signals, retries,
+and human-input waits, but they would add a second persistence model to the MVP.
+
+An active interactive turn should not initially run as a background job. It
+requires low-latency streaming, user steering, approvals, cancellation, and
+runner-presence handling. The Kodo event log and supervised session process
+already provide the required durability boundary.
+
+** Package-boundary rules
+
+Any library adopted for the server loop must preserve these constraints:
+
+1. Kodo events remain the authoritative durable session history.
+2. The Rust runner remains authoritative for local tool execution and results.
+3. Approval and cancellation are explicit Kodo state transitions.
+4. Provider-specific types do not appear in persisted events or client APIs.
+5. Every model and tool invocation retains Kodo correlation identifiers.
+6. An OTP process restart must not require a library-owned in-memory checkpoint.
+7. A package upgrade must not require rewriting historical session events.
+
+* Durable session model
+
+** Session states
+
+A session uses a small explicit state machine:
+
+#+begin_example
+idle -> running -> awaiting_approval -> running -> idle
+             \-> failed                   \-> cancelled
+#+end_example
+
+A disconnected frontend does not change the session state. A disconnected
+runner pauses tool execution and is represented separately from the agent's
+logical state.
+
+** Event contract
+
+The minimum event types are:
+
+#+begin_src text
+session_created
+user_message
+assistant_message_started
+assistant_text_delta
+assistant_message_completed
+
+subagent_started
+subagent_completed
+subagent_failed
+
+tool_requested
+approval_requested
+approval_resolved
+tool_started
+tool_output
+tool_completed
+tool_failed
+
+files_changed
+session_status_changed
+session_cancelled
+#+end_src
+
+Every event contains:
+
+- a session identifier;
+- a monotonically increasing sequence number within the session;
+- an event type and version;
+- a structured payload;
+- a timestamp and source;
+- a parent model, subagent, or tool invocation identifier when applicable.
+
+Clients reconnect with the last sequence number they observed. Phoenix replays
+later persisted events before subscribing the client to live events.
+
+** Minimum persistence schema
+
+*** Workspaces
+
+- Identifier and display name.
+- Repository remote, when present.
+- Runner identifier.
+- Runner-local workspace identity; a local absolute path is not treated as a
+  globally meaningful identifier.
+
+*** Runners
+
+- Identifier and user-visible name.
+- Platform, architecture, version, and declared capabilities.
+- Connection state and last-seen timestamp.
+
+*** Sessions
+
+- Workspace identifier.
+- Title, status, selected profile, and timestamps.
+
+*** Events
+
+- Session identifier and sequence number.
+- Type, version, structured payload, and timestamp.
+
+*** Model invocations
+
+- Session, parent invocation, and role.
+- Resolved provider, model, reasoning level, and profile revision.
+- Role prompt and toolset versions.
+- Token usage, estimated cost, latency, and status.
+
+Process metadata may be persisted separately if it is required to reconnect to
+commands that outlive a Phoenix process.
+
+* Agent behavior
+
+** Primary loop
+
+For each user turn, Phoenix:
+
+1. Persists the user message.
+2. Builds bounded model context from the session.
+3. Calls the resolved primary model.
+4. Streams assistant text into the event log.
+5. Validates each requested tool against role and approval policy.
+6. Requests approval when required.
+7. Dispatches an approved tool call to the Rust runner.
+8. Persists and returns the tool result to the model.
+9. Repeats until the model completes or a budget, cancellation, or error ends
+   the turn.
+
+The loop must enforce:
+
+- a maximum number of model continuations;
+- token and estimated-cost limits;
+- model and tool timeouts;
+- user cancellation;
+- bounded tool output with explicit truncation metadata;
+- clear handling for runner disconnection and provider failure.
+
+** Initial tools
+
+*** Read-only
+
+#+begin_src text
+list_files(path)
+search_code(query, paths)
+read_file(path, offset, limit)
+git_status()
+git_diff(paths?)
+#+end_src
+
+*** Mutating
+
+#+begin_src text
+apply_patch(patch)
+#+end_src
+
+The runner validates every path in a patch and reports the actual affected
+files. The model does not receive a whole-file overwrite tool in the MVP.
+
+*** Processes
+
+#+begin_src text
+start_command(command, cwd, timeout)
+poll_command(process_id)
+stop_command(process_id)
+#+end_src
+
+Long-running commands receive stable process identifiers and continue when a
+frontend disconnects.
+
+** Approval policy
+
+The MVP supports three user-selectable policies:
+
+- ~read-only~ prohibits workspace mutations;
+- ~safe~ asks before writes and non-read-only commands;
+- ~standard~ allows workspace edits and recognized verification commands.
+
+The default is ~standard~. Regardless of the selected policy:
+
+| Action                                  | MVP treatment       |
+|-----------------------------------------+---------------------|
+| Read/search inside the workspace        | Allow               |
+| Inspect repository status and diff      | Allow               |
+| Modify tracked workspace files          | Record every change |
+| Run recognized verification commands    | Allow in standard   |
+| Run other shell commands                | Ask                 |
+| Read outside the workspace              | Deny                |
+| Use network from a command              | Ask                 |
+| Delete files or install dependencies    | Ask                 |
+| Create a commit                         | Ask                 |
+| Push or rewrite repository history      | Deny                |
+
+Kodo does not claim to perfectly classify arbitrary shell behavior. It uses
+conservative rules and always displays the exact command before approval.
+
+* Roles and model mappings
+
+** Initial roles
+
+The MVP has three model-backed roles:
+
+*** Primary
+
+Owns the user task, invokes tools and subagents, edits the workspace, runs
+verification, and reports the final outcome.
+
+*** Search
+
+Investigates a specific question in the local codebase and returns concise,
+evidence-backed findings. It is read-only.
+
+*** Review
+
+Reviews the final diff for correctness and regressions. It is read-only and
+returns structured findings with severity, location, explanation, and suggested
+fix. Clean diffs are a valid outcome.
+
+Only the primary role may mutate the workspace in the MVP. This avoids
+concurrent edits, merge conflicts, and ambiguous ownership of changes.
+
+** Recommended profile
+
+Kodo ships one versioned recommended profile named ~balanced~. It resolves a
+model and reasoning level for every initial role. Users do not need to make a
+model decision before starting their first session.
+
+Configuration conceptually follows this shape:
+
+#+begin_src toml
+[model_mapping]
+extends = "balanced"
+
+# Optional: replace only this role and continue inheriting other recommendations.
+[model_mapping.roles.search]
+model = "ollama/qwen-coder"
+reasoning = "low"
+#+end_src
+
+Mapping resolution order, from least to most specific, is:
+
+1. Kodo's recommended profile.
+2. User configuration.
+3. Repository configuration.
+4. Temporary session override.
+
+Each invocation records the fully resolved mapping, including provider model
+revision, reasoning level, role prompt version, toolset version, and the source
+of each override. A configuration change affects future invocations and does
+not rewrite historical records.
+
+Before use, Phoenix validates that a mapped model satisfies the role's declared
+capabilities, including tool calling, structured output, context size, and
+multimodal support where applicable.
+
+** Initial subagent workflow
+
+The normal completion path is:
+
+1. The primary investigates directly or delegates a focused question to
+   search.
+2. The primary edits the workspace and runs focused verification.
+3. Review inspects the final diff.
+4. The primary addresses valid findings and reruns affected verification.
+5. The primary reports changed files, verification results, and unresolved
+   concerns.
+
+Search and review receive bounded task-specific context and return structured
+results. The primary sees their final results, not their complete internal
+transcripts.
+
+* Evaluation plan
+
+A full benchmarking platform is outside the MVP. A small, repeatable evaluation
+harness is required to support the recommended mapping and prevent regressions.
+
+** Initial suite
+
+- 10 code-search tasks with known relevant files and evidence.
+- 10 review tasks with known defects, including clean negative controls.
+- 10 implementation tasks with pinned repositories and hidden verification.
+
+Tasks should use recent private or purpose-built fixtures where possible to
+reduce benchmark contamination.
+
+** Metrics
+
+*** Search
+
+- Relevant-file recall.
+- Irrelevant-file count.
+- Evidence correctness and completeness.
+- Latency, token usage, and estimated cost.
+
+*** Review
+
+- Known-defect recall.
+- False-positive count.
+- Severity and location accuracy.
+- Latency, token usage, and estimated cost.
+
+*** Implementation
+
+- Hidden and public test results.
+- Compile, format, lint, or typecheck results as applicable.
+- Files changed outside the requested scope.
+- Prohibited actions.
+- Latency, token usage, and estimated cost.
+
+The evaluated artifact is the combination of model, reasoning level, role
+prompt, tools, budget, and task—not the model name alone. Deterministic tests and
+repository evidence take priority over LLM judges.
+
+** Evaluation output
+
+Each run records the complete configuration and event trace and emits a
+machine-readable result. Candidate mappings are compared on quality, cost,
+latency, and failure rate. The recommended mapping should represent a useful
+Pareto tradeoff rather than simply selecting the highest raw quality score.
+
+* Delivery milestones
+
+** TODO Milestone 1: Local tool runner
+
+- [ ] Rust daemon and workspace registration.
+- [ ] Authenticated WebSocket connection to Phoenix.
+- [ ] Read, search, patch, process, and repository-inspection tools.
+- [ ] Path confinement and bounded output.
+- [ ] Command output streaming and cancellation.
+- [ ] Exit criterion: typed requests issued without a model can inspect and
+  modify a fixture repository, run a test, stream its output, and return the
+  resulting diff.
+
+** TODO Milestone 2: Durable primary-agent session
+
+- [ ] Session persistence and ordered event log.
+- [ ] Supervised active-session process.
+- [ ] One model-provider adapter.
+- [ ] Primary agent loop with tool dispatch.
+- [ ] Turn budgets, cancellation, and explicit failure states.
+- [ ] Event replay after client or Phoenix process reconnection.
+- [ ] Exit criterion: an API-driven session can complete a small coding task
+  and be reconstructed entirely from persisted events.
+
+** TODO Milestone 3: CLI frontend
+
+- [ ] Start and resume session commands.
+- [ ] Streaming transcript and tool activity.
+- [ ] Approval interaction and interrupt control.
+- [ ] Final diff and verification summary.
+- [ ] Browser handoff URL.
+- [ ] Exit criterion: a developer can complete the core workflow without
+  opening the browser.
+
+** TODO Milestone 4: LiveView frontend
+
+- [ ] Session list and session detail pages.
+- [ ] Live messages, tool events, and command output.
+- [ ] Composer, stop control, and approvals.
+- [ ] Changed-file list and diff viewer.
+- [ ] Runner connection status.
+- [ ] Exit criterion: CLI and browser can observe and control the same active
+  session, and either can disconnect without terminating it.
+
+** TODO Milestone 5: Roles and recommended mapping
+
+- [ ] Versioned primary, search, and review contracts.
+- [ ] The versioned ~balanced~ profile.
+- [ ] Per-role user and repository overrides.
+- [ ] Capability validation and invocation metadata.
+- [ ] Search and final-diff review integration.
+- [ ] Initial 30-task evaluation suite.
+- [ ] Exit criterion: a user can override one role while inheriting all other
+  recommendations, and the default mapping has recorded evaluation results.
+
+** TODO Milestone 6: Reliability and release candidate
+
+- [ ] Runner reconnect and temporary-disconnection behavior.
+- [ ] Phoenix session-process restart recovery.
+- [ ] Provider and tool timeout handling.
+- [ ] Command and agent cancellation.
+- [ ] Clear truncated-output and patch-failure behavior.
+- [ ] End-to-end tests for the core workflow.
+- [ ] Installation and provider-configuration documentation.
+- [ ] Exit criterion: the acceptance scenario passes repeatedly across
+  supported Linux and macOS environments.
+
+* Acceptance scenario
+
+Given a small repository containing a failing test caused by a real
+implementation bug:
+
+1. The developer starts Kodo from the repository in a terminal.
+2. Kodo creates a session using the recommended ~balanced~ mapping.
+3. The primary agent locates relevant code, optionally using the search role.
+4. The primary applies a bounded patch and runs focused verification.
+5. Sensitive commands require approval and can be approved from either client.
+6. The review role inspects the resulting diff and reports only supported
+   findings.
+7. The primary addresses valid findings and reports the final result.
+8. CLI and LiveView show consistent messages, tool state, command output, diff,
+   and verification results.
+9. Refreshing the browser or restarting the CLI replays the session without
+   data loss or duplicate execution.
+10. The working tree contains only the intended changes.
+
+The MVP is complete when this scenario is reliable and pleasant, not merely
+when each component exists independently.
+
+* Decisions deferred until after MVP
+
+- Hosted control plane and cloud runners.
+- Authentication, teams, visibility, and collaborative control.
+- Economy, deep, and maximum model profiles.
+- Oracle, librarian, compaction, and multimodal roles.
+- Automatic model routing and provider fallback.
+- Write-capable and parallel subagents.
+- Plugin and custom-role APIs.
+- Full-screen TUI and editor integrations.
+- Production billing and usage quotas.

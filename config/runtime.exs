@@ -20,8 +20,6 @@ if System.get_env("PHX_SERVER") do
   config :kodo, KodoWeb.Endpoint, server: true
 end
 
-config :kodo, KodoWeb.Endpoint, http: [port: String.to_integer(System.get_env("PORT", "4000"))]
-
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :kodo, KodoWeb.Endpoint,
@@ -76,6 +74,7 @@ if config_env() == :prod do
   config :kodo, KodoWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [
+      port: String.to_integer(System.get_env("PORT", "4000")),
       # Enable IPv6 and bind on all interfaces.
       # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
       # See the documentation on https://bandit.hexdocs.pm/Bandit.html#t:options/0
