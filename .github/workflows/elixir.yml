@@ -18,6 +18,76 @@ env:
   ELIXIR_VERSION: "1.20"
 
 jobs:
+  lint:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Cache Mix dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-lint-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            mix-lint-${{ runner.os }}-
+            mix-${{ runner.os }}-
+
+      - name: Install Hex and Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Linter
+        run: mix credo
+
+  format:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Cache Mix dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-format-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            mix-format-${{ runner.os }}-
+            mix-${{ runner.os }}-
+
+      - name: Install Hex and Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
   test:
     runs-on: blacksmith-2vcpu-ubuntu-2404
 
@@ -69,9 +139,6 @@ jobs:
 
       - name: Check unused dependencies
         run: mix deps.unlock --check-unused
-
-      - name: Check formatting
-        run: mix format --check-formatted
 
       - name: Run tests
         run: mix test
