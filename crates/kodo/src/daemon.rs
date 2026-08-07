@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use crate::protocol::{PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope, ToolRequest};
@@ -18,10 +18,10 @@ use crate::runner::Runner;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_CACHED_REQUESTS: usize = 1024;
 const MAX_CACHED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_IN_FLIGHT_REQUESTS: usize = 64;
+pub(crate) const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 #[derive(Clone)]
-struct Dispatcher {
+pub(crate) struct Dispatcher {
     runner: Runner,
     cache: Arc<StdMutex<ResponseCache>>,
 }
@@ -37,24 +37,27 @@ struct ResponseCache {
 struct ResponseSlot {
     // The fingerprint prevents a caller from reusing an id for different tool input.
     fingerprint: [u8; 32],
-    // Holding this lock elects exactly one execution for concurrent retries of the same request.
     response: Mutex<Option<String>>,
+    notify: Notify,
 }
 
 impl Dispatcher {
-    fn new(runner: Runner) -> Self {
+    pub(crate) fn new(runner: Runner) -> Self {
         Self {
             runner,
             cache: Arc::new(StdMutex::new(ResponseCache::default())),
         }
     }
 
-    async fn dispatch(&self, request: RequestEnvelope) -> String {
+    pub(crate) async fn dispatch(&self, request: RequestEnvelope) -> String {
+        if request.protocol_version != PROTOCOL_VERSION {
+            return unsupported_protocol_response(request.request_id, request.protocol_version);
+        }
         let fingerprint = request_fingerprint(&request.request);
-        let slot = {
+        let (slot, elected) = {
             let mut cache = self.cache.lock().expect("response cache lock poisoned");
             if let Some(slot) = cache.slots.get(&request.request_id) {
-                Arc::clone(slot)
+                (Arc::clone(slot), false)
             } else {
                 while cache.slots.len() >= MAX_CACHED_REQUESTS {
                     let Some((expired, response_len)) = cache.order.pop_front() else {
@@ -65,9 +68,10 @@ impl Dispatcher {
                 let slot = Arc::new(ResponseSlot {
                     fingerprint,
                     response: Mutex::new(None),
+                    notify: Notify::new(),
                 });
                 cache.slots.insert(request.request_id, Arc::clone(&slot));
-                slot
+                (slot, true)
             }
         };
         if slot.fingerprint != fingerprint {
@@ -78,44 +82,61 @@ impl Dispatcher {
             });
         }
 
-        let mut cached = slot.response.lock().await;
-        if let Some(response) = cached.as_ref() {
+        if elected {
+            self.spawn_execution(request, Arc::clone(&slot));
+        }
+
+        wait_for_response(slot).await
+    }
+
+    fn spawn_execution(&self, request: RequestEnvelope, slot: Arc<ResponseSlot>) {
+        let runner = self.runner.clone();
+        let cache = Arc::clone(&self.cache);
+        tokio::spawn(async move {
+            // Execution outlives any transport waiter so reconnect retries cannot duplicate a
+            // blocking mutation whose original WebSocket disappeared.
+            let response = match runner.execute(request.request).await {
+                Ok(response) => ResponseEnvelope::Success {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: request.request_id,
+                    response,
+                },
+                Err(error) => ResponseEnvelope::Error {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: Some(request.request_id),
+                    error: error.to_string(),
+                },
+            };
+
+            let response = serialize_response(response);
+            *slot.response.lock().await = Some(response.clone());
+            slot.notify.notify_waiters();
+            let mut cache = cache.lock().expect("response cache lock poisoned");
+            if cache
+                .slots
+                .get(&request.request_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &slot))
+            {
+                cache.response_bytes += response.len();
+                cache.order.push_back((request.request_id, response.len()));
+                while cache.response_bytes > MAX_CACHED_RESPONSE_BYTES {
+                    let Some((expired, response_len)) = cache.order.pop_front() else {
+                        break;
+                    };
+                    remove_cached_response(&mut cache, expired, response_len);
+                }
+            }
+        });
+    }
+}
+
+async fn wait_for_response(slot: Arc<ResponseSlot>) -> String {
+    loop {
+        let notified = slot.notify.notified();
+        if let Some(response) = slot.response.lock().await.as_ref() {
             return response.clone();
         }
-
-        let response = match self.runner.execute(request.request).await {
-            Ok(response) => ResponseEnvelope::Success {
-                protocol_version: PROTOCOL_VERSION,
-                request_id: request.request_id,
-                response,
-            },
-            Err(error) => ResponseEnvelope::Error {
-                protocol_version: PROTOCOL_VERSION,
-                request_id: Some(request.request_id),
-                error: error.to_string(),
-            },
-        };
-
-        let response = serialize_response(response);
-        *cached = Some(response.clone());
-        // Never acquire the cache mutex while holding a slot: eviction follows the opposite order.
-        drop(cached);
-        let mut cache = self.cache.lock().expect("response cache lock poisoned");
-        if cache
-            .slots
-            .get(&request.request_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &slot))
-        {
-            cache.response_bytes += response.len();
-            cache.order.push_back((request.request_id, response.len()));
-            while cache.response_bytes > MAX_CACHED_RESPONSE_BYTES {
-                let Some((expired, response_len)) = cache.order.pop_front() else {
-                    break;
-                };
-                remove_cached_response(&mut cache, expired, response_len);
-            }
-        }
-        response
+        notified.await;
     }
 }
 
@@ -136,6 +157,16 @@ fn cache_capacity_response(request_id: Uuid) -> String {
         protocol_version: PROTOCOL_VERSION,
         request_id: Some(request_id),
         error: "too many requests are currently in flight".into(),
+    })
+}
+
+fn unsupported_protocol_response(request_id: Uuid, protocol_version: u16) -> String {
+    serialize_response(ResponseEnvelope::Error {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: Some(request_id),
+        error: format!(
+            "unsupported protocol version {protocol_version}; expected {PROTOCOL_VERSION}"
+        ),
     })
 }
 
@@ -199,17 +230,7 @@ async fn handle_line(dispatcher: &Dispatcher, line: &str) -> String {
     }
 
     let response = match serde_json::from_str::<RequestEnvelope>(line) {
-        Ok(request) if request.protocol_version == PROTOCOL_VERSION => {
-            return dispatcher.dispatch(request).await;
-        }
-        Ok(request) => ResponseEnvelope::Error {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: Some(request.request_id),
-            error: format!(
-                "unsupported protocol version {}; expected {PROTOCOL_VERSION}",
-                request.protocol_version
-            ),
-        },
+        Ok(request) => return dispatcher.dispatch(request).await,
         Err(error) => ResponseEnvelope::Error {
             protocol_version: PROTOCOL_VERSION,
             request_id: None,
@@ -397,12 +418,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelling_a_waiter_does_not_cancel_or_repeat_execution() {
+        let repository = git_repository();
+        std::fs::write(repository.path().join("file.txt"), "before\n").unwrap();
+        git(repository.path(), ["add", "file.txt"]);
+        git(repository.path(), ["commit", "-m", "fixture"]);
+        let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
+        let dispatcher = Dispatcher::new(runner);
+        let request_id = Uuid::new_v4();
+        let request = RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            request: ToolRequest::ApplyPatch {
+                patch: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n".into(),
+            },
+        };
+        let first = {
+            let dispatcher = dispatcher.clone();
+            let request = request.clone();
+            tokio::spawn(async move { dispatcher.dispatch(request).await })
+        };
+        loop {
+            if dispatcher
+                .cache
+                .lock()
+                .expect("response cache lock poisoned")
+                .slots
+                .contains_key(&request_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        first.abort();
+
+        let retry = dispatcher.dispatch(request).await;
+        let response = serde_json::from_str::<ResponseEnvelope>(&retry).unwrap();
+
+        assert!(matches!(response, ResponseEnvelope::Success { .. }));
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("file.txt")).unwrap(),
+            "after\n"
+        );
+    }
+
+    #[tokio::test]
     async fn completed_cache_entries_remain_evictable_during_replay() {
         let request_id = Uuid::new_v4();
         let response = "response".to_owned();
         let slot = Arc::new(ResponseSlot {
             fingerprint: [0; 32],
             response: Mutex::new(Some(response.clone())),
+            notify: Notify::new(),
         });
         let replay = slot.response.lock().await;
         let mut cache = ResponseCache::default();

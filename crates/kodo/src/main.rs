@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use kodo::control_plane;
 use kodo::daemon;
 use kodo::runner::Runner;
 use kodo::workspace::Workspace;
@@ -19,6 +20,9 @@ enum Commands {
         /// A path inside the Git worktree to register.
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
+        /// Register with a loopback Phoenix control plane and serve over its WebSocket.
+        #[arg(long)]
+        control_plane: Option<String>,
     },
 }
 
@@ -36,9 +40,17 @@ async fn main() -> std::process::ExitCode {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
-        Commands::Daemon { workspace } => {
+        Commands::Daemon {
+            workspace,
+            control_plane: control_plane_url,
+        } => {
             let workspace = Workspace::discover(workspace)?;
-            daemon::serve_stdio(&Runner::new(workspace)).await?;
+            let runner = Runner::new(workspace.clone());
+            if let Some(url) = control_plane_url {
+                control_plane::serve(&url, &workspace, runner).await?;
+            } else {
+                daemon::serve_stdio(&runner).await?;
+            }
         }
     }
     Ok(())
