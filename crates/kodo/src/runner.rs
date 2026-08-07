@@ -21,6 +21,7 @@ const DEFAULT_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 1_000;
 const MAX_PATCH_BYTES: usize = 1024 * 1024;
 const MAX_BLOCKING_TOOLS: usize = 8;
+const MAX_FILE_INPUT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
@@ -231,7 +232,10 @@ impl Runner {
                     continue;
                 }
 
-                let Ok(content) = self.workspace.read_to_string(&path) else {
+                let Ok(content) = self
+                    .workspace
+                    .read_to_string_bounded(&path, MAX_FILE_INPUT_BYTES)
+                else {
                     // Search is best-effort across repository files; binary and unreadable files
                     // should not prevent useful matches from other files.
                     continue;
@@ -280,7 +284,9 @@ impl Runner {
                 "read_file limit must be greater than zero".into(),
             ));
         }
-        let content = self.workspace.read_to_string(path)?;
+        let content = self
+            .workspace
+            .read_to_string_bounded(path, MAX_FILE_INPUT_BYTES)?;
         let lines: Vec<_> = content.lines().collect();
         let selected = lines
             .iter()
@@ -372,6 +378,7 @@ impl Runner {
                     "--no-index",
                     "--binary",
                     "--no-ext-diff",
+                    "--no-textconv",
                     "--",
                     "/dev/null",
                     path,
@@ -465,6 +472,11 @@ impl Runner {
                 self.max_results
             )));
         }
+        if paths.iter().map(String::len).sum::<usize>() > self.max_output_bytes {
+            return Err(RunnerError::Patch(
+                "affected patch paths exceed the output byte limit".into(),
+            ));
+        }
         Ok(paths)
     }
 
@@ -509,7 +521,30 @@ impl Runner {
         S: AsRef<std::ffi::OsStr>,
     {
         let mut command = Command::new("git");
-        command.args(args).current_dir(self.workspace.root());
+        // Ignore ambient Git redirection and user/system configuration. Repository configuration
+        // is still honored and is explicitly outside the MVP's OS-sandbox boundary.
+        command
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(self.workspace.root())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_ATTR_NOSYSTEM", "1");
+        for variable in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+        ] {
+            command.env_remove(variable);
+        }
         run_command(&mut command, input, limit).map_err(RunnerError::GitIo)
     }
 
@@ -839,6 +874,23 @@ mod tests {
             fs::read_to_string(repository.path().join("file.txt")).unwrap(),
             "after\n"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_patch_paths_that_cannot_fit_in_the_result() {
+        let repository = repository();
+        let runner = Runner::with_limits(Workspace::from_root(repository.path()).unwrap(), 4, 100);
+        let patch = "diff --git a/long.txt b/long.txt\nnew file mode 100644\n--- /dev/null\n+++ b/long.txt\n@@ -0,0 +1 @@\n+content\n";
+
+        let error = runner
+            .execute(ToolRequest::ApplyPatch {
+                patch: patch.into(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("affected patch paths"));
+        assert!(!repository.path().join("long.txt").exists());
     }
 
     #[tokio::test]
