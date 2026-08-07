@@ -526,12 +526,13 @@ mod tests {
 
     fn git_repository() -> TempDir {
         let directory = TempDir::new().unwrap();
-        let status = Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap();
-        assert!(status.success());
+        git(directory.path(), ["init", "--quiet"]);
+        // Fixture commits must not depend on developer or CI runner global Git configuration.
+        git(
+            directory.path(),
+            ["config", "user.email", "test@example.com"],
+        );
+        git(directory.path(), ["config", "user.name", "Test"]);
         directory
     }
 
