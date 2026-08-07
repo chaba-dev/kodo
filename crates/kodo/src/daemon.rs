@@ -77,6 +77,7 @@ impl Dispatcher {
                 error: "request_id was already used for a different request".into(),
             });
         }
+
         let mut cached = slot.response.lock().await;
         if let Some(response) = cached.as_ref() {
             return response.clone();
@@ -94,6 +95,7 @@ impl Dispatcher {
                 error: error.to_string(),
             },
         };
+
         let response = serialize_response(response);
         *cached = Some(response.clone());
         // Never acquire the cache mutex while holding a slot: eviction follows the opposite order.

@@ -334,6 +334,7 @@ impl Runner {
                 "--".to_owned(),
             ]
         };
+
         // Disable user-configured diff drivers: inspection must not execute external diff commands
         // or text converters.
         let tracked = self.git(
@@ -350,6 +351,7 @@ impl Runner {
             "-z".to_owned(),
             "--".to_owned(),
         ];
+
         untracked_args.extend(relative_paths);
         let (untracked, untracked_truncated) =
             successful_stdout(self.git_with_limit(untracked_args, MAX_PATCH_BYTES, None)?)?;
