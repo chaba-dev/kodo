@@ -12,6 +12,7 @@ defmodule Kodo.Application do
       Kodo.Repo,
       {DNSCluster, query: Application.get_env(:kodo, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Kodo.PubSub},
+      {Registry, keys: :unique, name: Kodo.RunnerRegistry},
       # Start a worker by calling: Kodo.Worker.start_link(arg)
       # {Kodo.Worker, arg},
       # Start to serve requests, typically the last entry
