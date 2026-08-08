@@ -11,16 +11,19 @@ config :kodo,
   ecto_repos: [Kodo.Repo],
   generators: [timestamp_type: :utc_datetime]
 
+# Phoenix messages are capped at the cross-language protocol limit. Bandit counts the largest
+# possible WebSocket header in its frame size, while fragmented-message size counts payload bytes.
+runner_wire_bytes = 4 * 1024 * 1024
+websocket_header_bytes = 14
+
 # Configure the endpoint
 config :kodo, KodoWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
   http: [
     websocket_options: [
-      # TODO make these configurable
-      # Bandit's frame bound includes the WebSocket header; application messages remain 4 MiB.
-      max_frame_size: 4 * 1024 * 1024 + 14,
-      max_fragmented_message_size: 4 * 1024 * 1024
+      max_frame_size: runner_wire_bytes + websocket_header_bytes,
+      max_fragmented_message_size: runner_wire_bytes
     ]
   ],
   render_errors: [

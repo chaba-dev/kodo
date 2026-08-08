@@ -1,9 +1,14 @@
 defmodule KodoWeb.RunnerRegistrationController do
+  @moduledoc "Issues short-lived runner credentials through the local-only bootstrap endpoint."
+
   use KodoWeb, :controller
 
+  alias Kodo.RunnerProtocol
   alias Kodo.Runners
 
-  @token_max_age 86_400
+  @protocol_version RunnerProtocol.version()
+  @token_salt RunnerProtocol.token_salt()
+  @token_max_age_seconds RunnerProtocol.token_max_age_seconds()
 
   def create(conn, params) do
     # Registration is intentionally an unauthenticated bootstrap boundary limited to this host.
@@ -17,15 +22,15 @@ defmodule KodoWeb.RunnerRegistrationController do
       true ->
         case Runners.register(params) do
           {:ok, runner} ->
-            token = Phoenix.Token.sign(KodoWeb.Endpoint, "runner socket v1", runner.id)
+            token = Phoenix.Token.sign(KodoWeb.Endpoint, @token_salt, runner.id)
 
             json(conn, %{
               runner_id: runner.id,
               token: token,
-              token_expires_in: @token_max_age,
+              token_expires_in: @token_max_age_seconds,
               socket_path: "/runner/websocket",
               topic: "runner:#{runner.id}",
-              protocol_version: 2
+              protocol_version: @protocol_version
             })
 
           {:error, changeset} ->

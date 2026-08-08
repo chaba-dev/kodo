@@ -1,14 +1,21 @@
 defmodule Kodo.Runners do
-  @moduledoc "Durable runner identities and connection metadata."
+  @moduledoc """
+  Owns durable runner identities and routes messages to the current local connection.
+
+  PostgreSQL records identity and last-seen metadata; the unique Registry remains the source of
+  truth for ephemeral online state so crashes cannot leave a stale connected flag.
+  """
 
   alias Kodo.Repo
+  alias Kodo.RunnerProtocol
   alias Kodo.Runners.Runner
 
-  # Reserve room for the Phoenix topic/event envelope inside the 4 MiB wire-message limit.
-  @max_payload_bytes 4 * 1024 * 1024 - 4096
+  @max_payload_bytes RunnerProtocol.max_payload_bytes()
 
+  @doc "Returns a durable runner identity, whether or not it is currently connected."
   def get_runner(id), do: Repo.get(Runner, id)
 
+  @doc "Routes one bounded request directly to the runner's unique live channel."
   def dispatch(runner_id, request) when is_map(request) do
     with {:ok, encoded} <- Jason.encode(request),
          true <- byte_size(encoded) <= @max_payload_bytes do
@@ -26,6 +33,7 @@ defmodule Kodo.Runners do
     end
   end
 
+  @doc "Upserts mutable metadata while preserving the workspace's stable runner UUID."
   def register(attrs) do
     now = DateTime.utc_now()
 
@@ -39,11 +47,13 @@ defmodule Kodo.Runners do
     )
   end
 
+  @doc "Records a successful authenticated channel join."
   def connected(%Runner{} = runner) do
     now = DateTime.utc_now()
     runner |> Ecto.Changeset.change(last_connected_at: now, last_seen_at: now) |> Repo.update()
   end
 
+  @doc "Records response activity without persisting ephemeral channel state."
   def touch(id) do
     case get_runner(id) do
       nil -> {:error, :not_found}
