@@ -3,6 +3,9 @@ defmodule Kodo.SessionsTest do
 
   alias Kodo.Runners
   alias Kodo.Sessions
+  alias Kodo.Sessions.Session
+
+  import Kodo.AccountsFixtures
 
   setup do
     {:ok, runner} =
@@ -15,12 +18,15 @@ defmodule Kodo.SessionsTest do
         capabilities: []
       })
 
-    %{runner: runner}
+    %{runner: runner, scope: user_scope_fixture()}
   end
 
-  test "creates a session with its reconstructible creation event", %{runner: runner} do
+  test "creates a session with its reconstructible creation event", %{
+    runner: runner,
+    scope: scope
+  } do
     assert {:ok, session} =
-             Sessions.create_session(%{
+             Sessions.create_session(scope, %{
                runner_id: runner.id,
                title: "Fix greeting",
                model: "openai:gpt-4o-mini"
@@ -33,9 +39,24 @@ defmodule Kodo.SessionsTest do
     assert event.payload["status"] == "idle"
   end
 
-  test "allocates gap-free event sequences and replays after a cursor", %{runner: runner} do
+  test "rejects a session without an owning user", %{runner: runner} do
+    changeset =
+      Session.create_changeset(%Session{}, %{
+        runner_id: runner.id,
+        title: "Ownerless",
+        model: "test:model"
+      })
+
+    refute changeset.valid?
+    assert "can't be blank" in errors_on(changeset).user_id
+  end
+
+  test "allocates gap-free event sequences and replays after a cursor", %{
+    runner: runner,
+    scope: scope
+  } do
     {:ok, session} =
-      Sessions.create_session(%{
+      Sessions.create_session(scope, %{
         runner_id: runner.id,
         title: "Replay",
         model: "openai:gpt-4o-mini"
@@ -48,9 +69,9 @@ defmodule Kodo.SessionsTest do
     assert Enum.map(Sessions.events_after(session.id), & &1.sequence) == [1, 2, 3]
   end
 
-  test "persists status and its transition atomically", %{runner: runner} do
+  test "persists status and its transition atomically", %{runner: runner, scope: scope} do
     {:ok, session} =
-      Sessions.create_session(%{
+      Sessions.create_session(scope, %{
         runner_id: runner.id,
         title: "Cancel",
         model: "openai:gpt-4o-mini"

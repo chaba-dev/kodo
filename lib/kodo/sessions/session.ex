@@ -27,7 +27,7 @@ defmodule Kodo.Sessions.Session do
   def create_changeset(session, attrs) do
     session
     |> cast(attrs, [:runner_id, :title, :model])
-    |> validate_required([:runner_id, :title, :model])
+    |> validate_required([:runner_id, :user_id, :title, :model])
     |> validate_length(:title, min: @minimum_text_length, max: @display_name_max_length)
     |> validate_length(:model, min: @minimum_text_length, max: @display_name_max_length)
     |> foreign_key_constraint(:runner_id)

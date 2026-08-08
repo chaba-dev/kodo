@@ -3,8 +3,7 @@ defmodule Kodo.Repo.Migrations.AddUserToSessions do
 
   def change do
     alter table(:sessions) do
-      # Existing single-user sessions remain unowned; newly created sessions always set this field.
-      add :user_id, references(:users, on_delete: :delete_all)
+      add :user_id, references(:users, on_delete: :delete_all), null: false
     end
 
     create index(:sessions, [:user_id])

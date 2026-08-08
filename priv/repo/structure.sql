@@ -97,7 +97,7 @@ CREATE TABLE public.sessions (
     next_event_sequence bigint DEFAULT 1 NOT NULL,
     inserted_at timestamp without time zone NOT NULL,
     updated_at timestamp without time zone NOT NULL,
-    user_id bigint,
+    user_id bigint NOT NULL,
     CONSTRAINT sessions_next_event_sequence_positive CHECK ((next_event_sequence > 0))
 );
 

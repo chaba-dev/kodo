@@ -84,10 +84,6 @@ defmodule Kodo.Sessions do
     )
   end
 
-  def create_session(attrs) do
-    do_create_session(nil, attrs)
-  end
-
   def create_session(%Scope{} = scope, attrs) do
     do_create_session(scope.user, attrs)
   end
