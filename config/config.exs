@@ -17,6 +17,7 @@ config :kodo, KodoWeb.Endpoint,
   adapter: Bandit.PhoenixAdapter,
   http: [
     websocket_options: [
+      # TODO make these configurable
       # Bandit's frame bound includes the WebSocket header; application messages remain 4 MiB.
       max_frame_size: 4 * 1024 * 1024 + 14,
       max_fragmented_message_size: 4 * 1024 * 1024
