@@ -19,6 +19,7 @@ defmodule Kodo.Sessions.Session do
     field :next_event_sequence, :integer, default: @first_event_sequence
 
     belongs_to :runner, Kodo.Runners.Runner
+    belongs_to :user, Kodo.Accounts.User, type: :id
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -26,10 +27,11 @@ defmodule Kodo.Sessions.Session do
   def create_changeset(session, attrs) do
     session
     |> cast(attrs, [:runner_id, :title, :model])
-    |> validate_required([:runner_id, :title, :model])
+    |> validate_required([:runner_id, :user_id, :title, :model])
     |> validate_length(:title, min: @minimum_text_length, max: @display_name_max_length)
     |> validate_length(:model, min: @minimum_text_length, max: @display_name_max_length)
     |> foreign_key_constraint(:runner_id)
+    |> foreign_key_constraint(:user_id)
   end
 
   def status_changeset(session, status) when status in @statuses do

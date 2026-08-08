@@ -4,7 +4,9 @@ defmodule KodoWeb.SessionControllerTest do
   alias Kodo.Runners
   alias Kodo.Sessions
 
-  setup do
+  import Kodo.AccountsFixtures
+
+  setup %{conn: conn} do
     previous_adapter = Application.get_env(:kodo, :llm_adapter)
     previous_test_pid = Application.get_env(:kodo, :fake_llm_test_pid)
     Application.put_env(:kodo, :llm_adapter, Kodo.Test.FakeLLM)
@@ -34,7 +36,8 @@ defmodule KodoWeb.SessionControllerTest do
         capabilities: []
       })
 
-    %{runner: runner}
+    user = user_fixture()
+    %{conn: authenticate_agent(conn, user), runner: runner, user: user}
   end
 
   test "an API-driven coding turn dispatches a tool and replays from persisted events", %{
@@ -72,7 +75,7 @@ defmodule KodoWeb.SessionControllerTest do
 
     replay =
       conn
-      |> recycle()
+      |> recycle(["accept", "authorization"])
       |> get(~p"/api/sessions/#{session["id"]}?after_sequence=1")
       |> json_response(200)
 
@@ -102,7 +105,7 @@ defmodule KodoWeb.SessionControllerTest do
 
     response =
       conn
-      |> recycle()
+      |> recycle(["accept", "authorization"])
       |> post_json(~p"/api/sessions/#{session["id"]}/cancel", %{})
       |> json_response(200)
 
@@ -131,9 +134,35 @@ defmodule KodoWeb.SessionControllerTest do
     assert conn |> get(~p"/api/sessions/not-a-uuid") |> json_response(404)
 
     assert conn
-           |> recycle()
+           |> recycle(["accept", "authorization"])
            |> post_json(~p"/api/sessions/not-a-uuid/messages", %{content: 42})
            |> json_response(422)
+  end
+
+  test "sessions are owned by the authenticated account", %{
+    conn: conn,
+    runner: runner,
+    user: user
+  } do
+    session = create_session(conn, runner)
+    assert Sessions.get_session!(session["id"]).user_id == user.id
+
+    other_user = user_fixture()
+
+    assert build_conn()
+           |> authenticate_agent(other_user)
+           |> get(~p"/api/sessions/#{session["id"]}")
+           |> json_response(404)
+
+    assert build_conn()
+           |> authenticate_agent(other_user)
+           |> post_json(~p"/api/sessions/#{session["id"]}/messages", %{content: "intrude"})
+           |> json_response(404)
+
+    assert build_conn()
+           |> authenticate_agent(other_user)
+           |> post_json(~p"/api/sessions/#{session["id"]}/cancel", %{})
+           |> json_response(404)
   end
 
   defp create_session(conn, runner) do

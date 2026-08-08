@@ -7,6 +7,19 @@
 # General application configuration
 import Config
 
+config :kodo, :scopes,
+  user: [
+    default: true,
+    module: Kodo.Accounts.Scope,
+    assign_key: :current_scope,
+    access_path: [:user, :id],
+    schema_key: :user_id,
+    schema_type: :id,
+    schema_table: :users,
+    test_data_fixture: Kodo.AccountsFixtures,
+    test_setup_helper: :register_and_log_in_user
+  ]
+
 default_max_continuations = 8
 default_max_tokens = 100_000
 default_model_timeout_ms = 60_000

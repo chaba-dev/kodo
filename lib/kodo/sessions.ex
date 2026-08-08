@@ -3,6 +3,7 @@ defmodule Kodo.Sessions do
 
   import Ecto.Query
 
+  alias Kodo.Accounts.Scope
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Session
@@ -15,6 +16,13 @@ defmodule Kodo.Sessions do
   def get_session(id) do
     case Ecto.UUID.cast(id) do
       {:ok, id} -> Repo.get(Session, id)
+      :error -> nil
+    end
+  end
+
+  def get_session(%Scope{user: user}, id) do
+    case Ecto.UUID.cast(id) do
+      {:ok, id} -> Repo.get_by(Session, id: id, user_id: user.id)
       :error -> nil
     end
   end
@@ -48,9 +56,23 @@ defmodule Kodo.Sessions do
     end
   end
 
+  def start_turn(%Scope{} = scope, session_id, content) do
+    case get_session(scope, session_id) do
+      %Session{} -> start_turn(session_id, content)
+      nil -> {:error, :not_found}
+    end
+  end
+
   def cancel(session_id) do
     with {:ok, pid} <- ensure_started(session_id) do
       Kodo.Sessions.ActiveSession.cancel(pid)
+    end
+  end
+
+  def cancel(%Scope{} = scope, session_id) do
+    case get_session(scope, session_id) do
+      %Session{} -> cancel(session_id)
+      nil -> {:error, :not_found}
     end
   end
 
@@ -61,8 +83,12 @@ defmodule Kodo.Sessions do
     )
   end
 
-  def create_session(attrs) do
-    case Repo.transaction(fn -> create_session_locked(attrs) end) do
+  def create_session(%Scope{} = scope, attrs) do
+    do_create_session(scope.user, attrs)
+  end
+
+  defp do_create_session(user, attrs) do
+    case Repo.transaction(fn -> create_session_locked(user, attrs) end) do
       {:ok, {session, event}} ->
         broadcast(event)
         {:ok, session}
@@ -84,10 +110,29 @@ defmodule Kodo.Sessions do
     end
   end
 
-  def events_after(session_id, sequence \\ @before_first_event_sequence)
+  def events_after(session_id), do: events_after(session_id, @before_first_event_sequence)
+
+  def events_after(session_id, sequence)
       when is_integer(sequence) and sequence >= @before_first_event_sequence do
     Event
     |> where([event], event.session_id == ^session_id and event.sequence > ^sequence)
+    |> order_by([event], asc: event.sequence)
+    |> Repo.all()
+  end
+
+  def events_after(%Scope{} = scope, session_id) do
+    events_after(scope, session_id, @before_first_event_sequence)
+  end
+
+  def events_after(%Scope{user: user}, session_id, sequence)
+      when is_integer(sequence) and sequence >= @before_first_event_sequence do
+    Event
+    |> join(:inner, [event], session in assoc(event, :session))
+    |> where(
+      [event, session],
+      event.session_id == ^session_id and event.sequence > ^sequence and
+        session.user_id == ^user.id
+    )
     |> order_by([event], asc: event.sequence)
     |> Repo.all()
   end
@@ -154,8 +199,10 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp create_session_locked(attrs) do
-    with {:ok, session} <- %Session{} |> Session.create_changeset(attrs) |> Repo.insert(),
+  defp create_session_locked(user, attrs) do
+    session = if user, do: %Session{user_id: user.id}, else: %Session{}
+
+    with {:ok, session} <- session |> Session.create_changeset(attrs) |> Repo.insert(),
          {:ok, event} <-
            append_locked(
              session,

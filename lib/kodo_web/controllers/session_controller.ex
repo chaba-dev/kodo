@@ -8,7 +8,7 @@ defmodule KodoWeb.SessionController do
   @before_first_event_sequence 0
 
   def create(conn, params) do
-    case Sessions.create_session(params) do
+    case Sessions.create_session(conn.assigns.current_scope, params) do
       {:ok, session} ->
         conn |> put_status(:created) |> json(%{session: session_json(session)})
 
@@ -18,7 +18,7 @@ defmodule KodoWeb.SessionController do
   end
 
   def show(conn, %{"id" => id} = params) do
-    case Sessions.get_session(id) do
+    case Sessions.get_session(conn.assigns.current_scope, id) do
       nil ->
         conn |> put_status(:not_found) |> json(%{error: "session not found"})
 
@@ -31,7 +31,7 @@ defmodule KodoWeb.SessionController do
   end
 
   defp show_session(conn, id, cursor) do
-    all_events = Sessions.events_after(id)
+    all_events = Sessions.events_after(conn.assigns.current_scope, id)
     projection = Kodo.Sessions.Projection.from_events(all_events)
 
     json(conn, %{
@@ -57,24 +57,28 @@ defmodule KodoWeb.SessionController do
     do: conn |> put_status(:unprocessable_entity) |> json(%{error: "content is required"})
 
   defp start_turn(conn, id, content) do
-    if Sessions.get_session(id) do
-      case Sessions.start_turn(id, content) do
-        :ok -> conn |> put_status(:accepted) |> json(%{status: "running"})
-        {:error, reason} -> conn |> put_status(:conflict) |> json(%{error: inspect(reason)})
-      end
-    else
-      conn |> put_status(:not_found) |> json(%{error: "session not found"})
+    case Sessions.start_turn(conn.assigns.current_scope, id, content) do
+      :ok ->
+        conn |> put_status(:accepted) |> json(%{status: "running"})
+
+      {:error, :not_found} ->
+        conn |> put_status(:not_found) |> json(%{error: "session not found"})
+
+      {:error, reason} ->
+        conn |> put_status(:conflict) |> json(%{error: inspect(reason)})
     end
   end
 
   def cancel(conn, %{"id" => id}) do
-    if Sessions.get_session(id) do
-      case Sessions.cancel(id) do
-        :ok -> json(conn, %{status: "cancelled"})
-        {:error, reason} -> conn |> put_status(:conflict) |> json(%{error: inspect(reason)})
-      end
-    else
-      conn |> put_status(:not_found) |> json(%{error: "session not found"})
+    case Sessions.cancel(conn.assigns.current_scope, id) do
+      :ok ->
+        json(conn, %{status: "cancelled"})
+
+      {:error, :not_found} ->
+        conn |> put_status(:not_found) |> json(%{error: "session not found"})
+
+      {:error, reason} ->
+        conn |> put_status(:conflict) |> json(%{error: inspect(reason)})
     end
   end
 

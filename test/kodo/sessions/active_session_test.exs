@@ -5,6 +5,8 @@ defmodule Kodo.Sessions.ActiveSessionTest do
   alias Kodo.Sessions
   alias Kodo.Sessions.ActiveSession
 
+  import Kodo.AccountsFixtures
+
   setup do
     {:ok, runner} =
       Runners.register(%{
@@ -17,7 +19,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
       })
 
     {:ok, session} =
-      Sessions.create_session(%{
+      Sessions.create_session(user_scope_fixture(), %{
         runner_id: runner.id,
         title: "Recover me",
         model: "openai:gpt-4o-mini"

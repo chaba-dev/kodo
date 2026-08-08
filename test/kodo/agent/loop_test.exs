@@ -5,6 +5,8 @@ defmodule Kodo.Agent.LoopTest do
   alias Kodo.Runners
   alias Kodo.Sessions
 
+  import Kodo.AccountsFixtures
+
   setup do
     {:ok, runner} =
       Runners.register(%{
@@ -17,7 +19,7 @@ defmodule Kodo.Agent.LoopTest do
       })
 
     {:ok, session} =
-      Sessions.create_session(%{
+      Sessions.create_session(user_scope_fixture(), %{
         runner_id: runner.id,
         title: "Budgeted turn",
         model: "test:model"

@@ -4,6 +4,8 @@ defmodule Kodo.E2E.HermeticFullStackTest do
   alias Kodo.Sessions
   alias Kodo.Test.FullStackCase, as: Stack
 
+  import Kodo.AccountsFixtures
+
   @moduletag timeout: 120_000
 
   @prompt "KODO_HERMETIC_FULL_STACK_FIX_GREETING"
@@ -25,7 +27,8 @@ defmodule Kodo.E2E.HermeticFullStackTest do
     stack = Stack.start_stack!()
     workspace = Stack.fixture!()
     runner = Stack.start_runner!(stack.base_url, workspace)
-    %{stack: stack, workspace: workspace, runner: runner}
+    token = user_fixture() |> Kodo.Accounts.generate_user_agent_token()
+    %{stack: stack, workspace: workspace, runner: runner, token: token}
   end
 
   test "real HTTP, control plane, and runner complete and reconstruct a coding turn", context do
@@ -38,7 +41,8 @@ defmodule Kodo.E2E.HermeticFullStackTest do
           title: "Hermetic greeting repair",
           model: @model
         },
-        @http_created_status
+        @http_created_status,
+        context.token
       )
 
     session_id = created["session"]["id"]
@@ -50,11 +54,12 @@ defmodule Kodo.E2E.HermeticFullStackTest do
                context.stack.base_url,
                "/api/sessions/#{session_id}/messages",
                %{content: @prompt},
-               @http_accepted_status
+               @http_accepted_status,
+               context.token
              )
 
     Stack.await_completed!(session_id)
-    replay = Stack.replay!(context.stack.base_url, session_id)
+    replay = Stack.replay!(context.stack.base_url, session_id, context.token)
 
     assert replay["session"]["status"] == "completed"
     assert File.read!(Path.join(context.workspace, "greeting.txt")) == "hello\n"
