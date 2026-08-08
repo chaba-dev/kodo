@@ -16,8 +16,8 @@ defmodule Kodo.Application do
       {DNSCluster, query: Application.get_env(:kodo, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Kodo.PubSub},
       {Registry, keys: :unique, name: Kodo.RunnerRegistry},
-      # Start a worker by calling: Kodo.Worker.start_link(arg)
-      # {Kodo.Worker, arg},
+      {Registry, keys: :unique, name: Kodo.SessionRegistry},
+      {DynamicSupervisor, name: Kodo.SessionSupervisor, strategy: :one_for_one},
       # Start to serve requests, typically the last entry
       KodoWeb.Endpoint
     ]

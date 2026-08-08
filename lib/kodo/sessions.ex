@@ -10,6 +10,26 @@ defmodule Kodo.Sessions do
   def get_session(id), do: Repo.get(Session, id)
   def get_session!(id), do: Repo.get!(Session, id)
 
+  @doc "Returns the unique active coordinator, reconstructing it from events when needed."
+  def ensure_started(session_id) do
+    case Registry.lookup(Kodo.SessionRegistry, session_id) do
+      [{pid, _value}] ->
+        {:ok, pid}
+
+      [] ->
+        DynamicSupervisor.start_child(
+          Kodo.SessionSupervisor,
+          {Kodo.Sessions.ActiveSession, session_id}
+        )
+    end
+  end
+
+  def active_state(session_id) do
+    with {:ok, pid} <- ensure_started(session_id) do
+      {:ok, Kodo.Sessions.ActiveSession.state(pid)}
+    end
+  end
+
   def create_session(attrs) do
     case Repo.transaction(fn -> create_session_locked(attrs) end) do
       {:ok, {session, event}} ->
