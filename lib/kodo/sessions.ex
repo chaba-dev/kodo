@@ -7,20 +7,28 @@ defmodule Kodo.Sessions do
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Session
 
-  def get_session(id), do: Repo.get(Session, id)
+  def get_session(id) do
+    with {:ok, id} <- Ecto.UUID.cast(id) do
+      Repo.get(Session, id)
+    else
+      :error -> nil
+    end
+  end
+
   def get_session!(id), do: Repo.get!(Session, id)
 
   @doc "Returns the unique active coordinator, reconstructing it from events when needed."
   def ensure_started(session_id) do
     case Registry.lookup(Kodo.SessionRegistry, session_id) do
       [{pid, _value}] ->
-        {:ok, pid}
+        if Process.info(pid) do
+          {:ok, pid}
+        else
+          start_active_session(session_id)
+        end
 
       [] ->
-        DynamicSupervisor.start_child(
-          Kodo.SessionSupervisor,
-          {Kodo.Sessions.ActiveSession, session_id}
-        )
+        start_active_session(session_id)
     end
   end
 
@@ -28,6 +36,25 @@ defmodule Kodo.Sessions do
     with {:ok, pid} <- ensure_started(session_id) do
       {:ok, Kodo.Sessions.ActiveSession.state(pid)}
     end
+  end
+
+  def start_turn(session_id, content) do
+    with {:ok, pid} <- ensure_started(session_id) do
+      Kodo.Sessions.ActiveSession.start_turn(pid, content)
+    end
+  end
+
+  def cancel(session_id) do
+    with {:ok, pid} <- ensure_started(session_id) do
+      Kodo.Sessions.ActiveSession.cancel(pid)
+    end
+  end
+
+  defp start_active_session(session_id) do
+    DynamicSupervisor.start_child(
+      Kodo.SessionSupervisor,
+      {Kodo.Sessions.ActiveSession, session_id}
+    )
   end
 
   def create_session(attrs) do
@@ -75,6 +102,34 @@ defmodule Kodo.Sessions do
                 {:ok, event} <-
                   append_locked(session, "session_status_changed", %{"status" => status},
                     source: source
+                  ) do
+             {session, event}
+           else
+             {:error, changeset} -> Repo.rollback(changeset)
+           end
+         end) do
+      {:ok, {_session, event}} = result ->
+        broadcast(event)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  @doc "Atomically records cancellation and updates the session's query index."
+  def cancel_session(session_id) do
+    case Repo.transaction(fn ->
+           session = lock_session!(session_id)
+
+           with {:ok, session} <-
+                  session |> Session.status_changeset("cancelled") |> Repo.update(),
+                {:ok, event} <-
+                  append_locked(
+                    session,
+                    "session_cancelled",
+                    %{"reason" => "user_requested"},
+                    source: "user"
                   ) do
              {session, event}
            else
