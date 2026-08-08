@@ -25,6 +25,7 @@ defmodule KodoWeb.UserAuth do
   # token. This can be set to a value greater than `@max_cookie_age_in_days` to disable
   # the reissuing of tokens completely.
   @session_reissue_age_in_days 7
+  @bearer_pattern ~r/\ABearer[ \t]+([^ \t]+)[ \t]*\z/i
 
   @doc """
   Logs the user in.
@@ -77,13 +78,22 @@ defmodule KodoWeb.UserAuth do
 
   @doc "Authenticates an agent from an HTTP Bearer token."
   def fetch_current_scope_for_agent(conn, _opts) do
-    with ["Bearer " <> token] <- get_req_header(conn, "authorization"),
+    with token when is_binary(token) <- agent_bearer_token(conn),
          %{} = user <- Accounts.get_user_by_agent_token(token) do
       conn
       |> assign(:current_scope, Scope.for_user(user))
       |> assign(:current_agent_token, token)
     else
       _ -> assign(conn, :current_scope, Scope.for_user(nil))
+    end
+  end
+
+  defp agent_bearer_token(conn) do
+    with [authorization] <- get_req_header(conn, "authorization"),
+         [token] <- Regex.run(@bearer_pattern, authorization, capture: :all_but_first) do
+      token
+    else
+      _ -> nil
     end
   end
 

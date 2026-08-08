@@ -62,6 +62,37 @@ defmodule KodoWeb.AgentSessionControllerTest do
     assert get_resp_header(conn, "www-authenticate") == ["Bearer"]
   end
 
+  test "accepts the case-insensitive Bearer scheme and flexible separating whitespace", %{
+    user: user
+  } do
+    lowercase_token = Kodo.Accounts.generate_user_agent_token(user)
+    spaced_token = Kodo.Accounts.generate_user_agent_token(user)
+
+    for authorization <- ["bearer #{lowercase_token}", "BEARER   #{spaced_token}"] do
+      assert build_conn()
+             |> put_req_header("authorization", authorization)
+             |> delete(~p"/api/auth/token")
+             |> response(204)
+    end
+  end
+
+  test "rejects blank, malformed, and duplicate bearer credentials", %{user: user} do
+    token = Kodo.Accounts.generate_user_agent_token(user)
+
+    authorizations = [
+      [{"authorization", "Bearer"}],
+      [{"authorization", "Bearer not-base64!"}],
+      [{"authorization", "Bearer #{token}"}, {"authorization", "Bearer #{token}"}]
+    ]
+
+    for headers <- authorizations do
+      assert build_conn()
+             |> prepend_req_headers(headers)
+             |> delete(~p"/api/auth/token")
+             |> json_response(401) == %{"error" => "authentication required"}
+    end
+  end
+
   defp post_json(conn, path, params) do
     conn
     |> put_req_header("content-type", "application/json")
