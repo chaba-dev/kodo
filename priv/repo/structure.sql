@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict gircAqVRz05dGyDbCHktUnyzE1e6ZG6ZmDp6bL1GVP8DyEkEm9kmVKzcTw1Qugk
+\restrict AemFvrw0hdWx316hOzgPxdZlfQMOsMB7QItpP53CDeRPjDgcKclZCO00ecJgfbO
 
 -- Dumped from database version 17.10
 -- Dumped by pg_dump version 18.4
@@ -54,6 +54,40 @@ CREATE TABLE public.schema_migrations (
 
 
 --
+-- Name: session_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.session_events (
+    id uuid NOT NULL,
+    session_id uuid NOT NULL,
+    sequence bigint NOT NULL,
+    type character varying(64) NOT NULL,
+    version integer DEFAULT 1 NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    source character varying(32) NOT NULL,
+    parent_id uuid,
+    inserted_at timestamp without time zone NOT NULL
+);
+
+
+--
+-- Name: sessions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sessions (
+    id uuid NOT NULL,
+    runner_id uuid NOT NULL,
+    title character varying(255) NOT NULL,
+    status character varying(32) NOT NULL,
+    model character varying(255) NOT NULL,
+    next_event_sequence bigint DEFAULT 1 NOT NULL,
+    inserted_at timestamp without time zone NOT NULL,
+    updated_at timestamp without time zone NOT NULL,
+    CONSTRAINT sessions_next_event_sequence_positive CHECK ((next_event_sequence > 0))
+);
+
+
+--
 -- Name: runners runners_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -70,6 +104,22 @@ ALTER TABLE ONLY public.schema_migrations
 
 
 --
+-- Name: session_events session_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.session_events
+    ADD CONSTRAINT session_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sessions sessions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: runners_workspace_root_index; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -77,9 +127,47 @@ CREATE UNIQUE INDEX runners_workspace_root_index ON public.runners USING btree (
 
 
 --
+-- Name: session_events_session_id_inserted_at_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX session_events_session_id_inserted_at_index ON public.session_events USING btree (session_id, inserted_at);
+
+
+--
+-- Name: session_events_session_id_sequence_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX session_events_session_id_sequence_index ON public.session_events USING btree (session_id, sequence);
+
+
+--
+-- Name: sessions_runner_id_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX sessions_runner_id_index ON public.sessions USING btree (runner_id);
+
+
+--
+-- Name: session_events session_events_session_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.session_events
+    ADD CONSTRAINT session_events_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.sessions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: sessions sessions_runner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_runner_id_fkey FOREIGN KEY (runner_id) REFERENCES public.runners(id) ON DELETE RESTRICT;
+
+
+--
 -- PostgreSQL database dump complete
 --
 
-\unrestrict gircAqVRz05dGyDbCHktUnyzE1e6ZG6ZmDp6bL1GVP8DyEkEm9kmVKzcTw1Qugk
+\unrestrict AemFvrw0hdWx316hOzgPxdZlfQMOsMB7QItpP53CDeRPjDgcKclZCO00ecJgfbO
 
 INSERT INTO public."schema_migrations" (version) VALUES (20260807073017);
+INSERT INTO public."schema_migrations" (version) VALUES (20260808062115);

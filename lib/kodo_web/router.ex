@@ -24,6 +24,10 @@ defmodule KodoWeb.Router do
     pipe_through :api
 
     post "/runners", RunnerRegistrationController, :create
+    post "/sessions", SessionController, :create
+    get "/sessions/:id", SessionController, :show
+    post "/sessions/:id/messages", SessionController, :message
+    post "/sessions/:id/cancel", SessionController, :cancel
   end
 
   # Other scopes may use custom stacks.

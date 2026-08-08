@@ -653,15 +653,15 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
   modify a fixture repository, run a test, stream its output, and return the
   resulting diff.
 
-** TODO Milestone 2: Durable primary-agent session
+** DONE Milestone 2: Durable primary-agent session
 
-- [ ] Session persistence and ordered event log.
-- [ ] Supervised active-session process.
-- [ ] One model-provider adapter.
-- [ ] Primary agent loop with tool dispatch.
-- [ ] Turn budgets, cancellation, and explicit failure states.
-- [ ] Event replay after client or Phoenix process reconnection.
-- [ ] Exit criterion: an API-driven session can complete a small coding task
+- [X] Session persistence and ordered event log.
+- [X] Supervised active-session process.
+- [X] One model-provider adapter.
+- [X] Primary agent loop with tool dispatch.
+- [X] Turn budgets, cancellation, and explicit failure states.
+- [X] Event replay after client or Phoenix process reconnection.
+- [X] Exit criterion: an API-driven session can complete a small coding task
   and be reconstructed entirely from persisted events.
 
 ** TODO Milestone 3: CLI frontend
@@ -702,7 +702,8 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 - [ ] Provider and tool timeout handling.
 - [ ] Command and agent cancellation.
 - [ ] Clear truncated-output and patch-failure behavior.
-- [ ] End-to-end tests for the core workflow.
+- [X] Hermetic full-stack coverage on every test run and an intentionally
+  triggered live-provider smoke test for the core workflow.
 - [ ] Installation and provider-configuration documentation.
 - [ ] Exit criterion: the acceptance scenario passes repeatedly across
   supported Linux and macOS environments.

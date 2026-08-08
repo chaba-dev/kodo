@@ -11,6 +11,7 @@ defmodule Kodo.Runners do
   alias Kodo.Runners.Runner
 
   @max_payload_bytes RunnerProtocol.max_payload_bytes()
+  @runner_lifecycle_topic "runners"
 
   @doc "Returns a durable runner identity, whether or not it is currently connected."
   def get_runner(id), do: Repo.get(Runner, id)
@@ -37,20 +38,29 @@ defmodule Kodo.Runners do
   def register(attrs) do
     now = DateTime.utc_now()
 
-    %Runner{}
-    |> Runner.registration_changeset(attrs)
-    |> Ecto.Changeset.put_change(:last_seen_at, now)
-    |> Repo.insert(
-      conflict_target: :workspace_root,
-      on_conflict: {:replace, registration_fields()},
-      returning: true
-    )
+    result =
+      %Runner{}
+      |> Runner.registration_changeset(attrs)
+      |> Ecto.Changeset.put_change(:last_seen_at, now)
+      |> Repo.insert(
+        conflict_target: :workspace_root,
+        on_conflict: {:replace, registration_fields()},
+        returning: true
+      )
+
+    broadcast_lifecycle(result, :runner_registered)
   end
 
   @doc "Records a successful authenticated channel join."
   def connected(%Runner{} = runner) do
     now = DateTime.utc_now()
-    runner |> Ecto.Changeset.change(last_connected_at: now, last_seen_at: now) |> Repo.update()
+
+    result =
+      runner
+      |> Ecto.Changeset.change(last_connected_at: now, last_seen_at: now)
+      |> Repo.update()
+
+    broadcast_lifecycle(result, :runner_connected)
   end
 
   @doc "Records response activity without persisting ephemeral channel state."
@@ -73,4 +83,11 @@ defmodule Kodo.Runners do
       :updated_at
     ]
   end
+
+  defp broadcast_lifecycle({:ok, runner} = result, event) do
+    Phoenix.PubSub.broadcast(Kodo.PubSub, @runner_lifecycle_topic, {event, runner})
+    result
+  end
+
+  defp broadcast_lifecycle(error, _event), do: error
 end
