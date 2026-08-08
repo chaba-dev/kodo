@@ -657,7 +657,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 
 - [X] Session persistence and ordered event log.
 - [X] Supervised active-session process.
-- [ ] One model-provider adapter.
+- [X] One model-provider adapter.
 - [ ] Primary agent loop with tool dispatch.
 - [ ] Turn budgets, cancellation, and explicit failure states.
 - [ ] Event replay after client or Phoenix process reconnection.
