@@ -702,7 +702,8 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 - [ ] Provider and tool timeout handling.
 - [ ] Command and agent cancellation.
 - [ ] Clear truncated-output and patch-failure behavior.
-- [ ] End-to-end tests for the core workflow.
+- [X] Hermetic full-stack coverage on every test run and an intentionally
+  triggered live-provider smoke test for the core workflow.
 - [ ] Installation and provider-configuration documentation.
 - [ ] Exit criterion: the acceptance scenario passes repeatedly across
   supported Linux and macOS environments.
