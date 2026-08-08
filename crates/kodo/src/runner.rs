@@ -402,13 +402,14 @@ impl Runner {
                 None,
             )?;
             if !matches!(output.status.code(), Some(0 | 1)) {
-                return Err(RunnerError::Git(
-                    String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-                ));
+                let (error, _) = lossy_bounded(&output.stderr, output.limit);
+                return Err(RunnerError::Git(error.trim().to_owned()));
             }
-            content.push_str(&String::from_utf8_lossy(&output.stdout));
-            truncated |= output.stdout_truncated;
-            if output.stdout_truncated {
+            let (converted, conversion_truncated) =
+                lossy_bounded(&output.stdout, self.limits.max_output_bytes - content.len());
+            content.push_str(&converted);
+            truncated |= output.stdout_truncated || conversion_truncated;
+            if output.stdout_truncated || conversion_truncated {
                 break;
             }
         }
@@ -594,16 +595,16 @@ struct CapturedOutput {
     stderr: Vec<u8>,
     stdout_truncated: bool,
     stderr_truncated: bool,
+    limit: usize,
 }
 
 fn successful_stdout(output: CapturedOutput) -> Result<(String, bool), RunnerError> {
     if output.status.success() {
-        Ok((
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-            output.stdout_truncated,
-        ))
+        let (content, conversion_truncated) = lossy_bounded(&output.stdout, output.limit);
+        Ok((content, output.stdout_truncated || conversion_truncated))
     } else {
-        let mut error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let (error, _) = lossy_bounded(&output.stderr, output.limit);
+        let mut error = error.trim().to_owned();
         if output.stderr_truncated {
             error.push_str("\n[stderr truncated]");
         }
@@ -620,7 +621,8 @@ fn successful_patch(output: CapturedOutput) -> Result<Vec<u8>, RunnerError> {
         }
         Ok(output.stdout)
     } else {
-        let mut error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let (error, _) = lossy_bounded(&output.stderr, output.limit);
+        let mut error = error.trim().to_owned();
         if output.stderr_truncated {
             error.push_str("\n[stderr truncated]");
         }
@@ -672,7 +674,13 @@ fn run_command(
         stderr,
         stdout_truncated,
         stderr_truncated,
+        limit,
     })
+}
+
+fn lossy_bounded(bytes: &[u8], limit: usize) -> (String, bool) {
+    // Lossy UTF-8 decoding may expand one invalid input byte into a three-byte replacement scalar.
+    truncate_utf8(String::from_utf8_lossy(bytes).into_owned(), limit)
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> Result<(Vec<u8>, bool), std::io::Error> {
@@ -1011,6 +1019,14 @@ mod tests {
         .expect("command did not finish");
 
         assert_eq!(output, "runner-output");
+    }
+
+    #[test]
+    fn lossy_git_output_remains_within_the_logical_byte_limit() {
+        let (content, truncated) = lossy_bounded(&[0xff, 0xff], 4);
+
+        assert!(content.len() <= 4);
+        assert!(truncated);
     }
 
     fn runner(repository: &TempDir) -> Runner {

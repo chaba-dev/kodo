@@ -461,6 +461,8 @@ fn append_output(
     let output = &mut state.output;
     let (content, truncated) = truncate_utf8(content, max_pending_output_bytes);
     if content.is_empty() {
+        // A quota smaller than one scalar still needs to report that output was discarded.
+        output.terminal_truncated |= truncated;
         return;
     }
     while output.bytes + content.len() > max_pending_output_bytes
@@ -813,6 +815,20 @@ mod tests {
         let state = state.lock().unwrap();
         assert_eq!(state.output.chunks.len(), max_output_chunks);
         assert!(state.output.chunks.front().unwrap().sequence > 1);
+    }
+
+    #[test]
+    fn reports_output_that_cannot_fit_one_utf8_scalar() {
+        let state = StdMutex::new(ProcessState {
+            output: OutputBuffer::default(),
+            status: ProcessStatus::Running,
+        });
+
+        append_output(&state, OutputStream::Stdout, "€".into(), 1, 1);
+
+        let state = state.lock().unwrap();
+        assert!(state.output.chunks.is_empty());
+        assert!(state.output.terminal_truncated);
     }
 
     struct ChunkReader {

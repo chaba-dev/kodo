@@ -360,7 +360,7 @@ mod tests {
         let dispatcher = Dispatcher::new(runner);
         let request_id = Uuid::new_v4();
         let request = serde_json::to_string(&RequestEnvelope {
-            protocol_version: PROTOCOL_VERSION + 1,
+            protocol_version: 2,
             request_id,
             request: ToolRequest::GitStatus,
         })

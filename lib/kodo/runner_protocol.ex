@@ -20,7 +20,7 @@ defmodule Kodo.RunnerProtocol do
     version: @limits_version,
     max_output_bytes: 256 * 1024,
     max_results: 1_000,
-    max_patch_input_bytes: 1024 * 1024,
+    max_patch_input_bytes: 512 * 1024,
     max_file_input_bytes: 16 * 1024 * 1024,
     max_blocking_tools: 8,
     max_retained_processes: 1024,

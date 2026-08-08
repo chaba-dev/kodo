@@ -8,6 +8,10 @@ use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u16 = 3;
 pub const LIMITS_VERSION: u16 = 1;
+const MAX_CONNECTED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024 - 4 * 1024;
+const JSON_ESCAPE_EXPANSION: usize = 6;
+const RESPONSE_ENVELOPE_BYTES: usize = 4 * 1024;
+const RESULT_METADATA_BYTES: usize = 512;
 
 /// Phoenix-owned execution policy supplied by the authenticated channel join.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -32,7 +36,7 @@ impl ExecutionLimits {
             version: LIMITS_VERSION,
             max_output_bytes: 256 * 1024,
             max_results: 1_000,
-            max_patch_input_bytes: 1024 * 1024,
+            max_patch_input_bytes: 512 * 1024,
             max_file_input_bytes: 16 * 1024 * 1024,
             max_blocking_tools: 8,
             max_retained_processes: 1024,
@@ -64,8 +68,33 @@ impl ExecutionLimits {
         {
             return Err("runner limits must be nonzero".into());
         }
-        if self.max_cached_response_bytes < self.max_output_bytes {
-            return Err("response cache must retain at least one maximum-sized output".into());
+        let metadata_entries = self
+            .max_results
+            .checked_add(self.max_process_output_chunks)
+            .ok_or("runner limits exceed addressable memory")?;
+        let maximum_response_bytes = self
+            .max_output_bytes
+            .checked_mul(JSON_ESCAPE_EXPANSION)
+            .and_then(|bytes| {
+                metadata_entries
+                    .checked_mul(RESULT_METADATA_BYTES)
+                    .and_then(|metadata| bytes.checked_add(metadata))
+            })
+            .and_then(|bytes| bytes.checked_add(RESPONSE_ENVELOPE_BYTES))
+            .ok_or("runner limits exceed addressable memory")?;
+        if maximum_response_bytes > MAX_CONNECTED_PAYLOAD_BYTES {
+            return Err("maximum encoded response exceeds the connected transport limit".into());
+        }
+        if self.max_cached_response_bytes < maximum_response_bytes {
+            return Err("response cache cannot retain one maximum-sized encoded response".into());
+        }
+        let maximum_patch_bytes = self
+            .max_patch_input_bytes
+            .checked_mul(JSON_ESCAPE_EXPANSION)
+            .and_then(|bytes| bytes.checked_add(RESPONSE_ENVELOPE_BYTES))
+            .ok_or("runner limits exceed addressable memory")?;
+        if maximum_patch_bytes > MAX_CONNECTED_PAYLOAD_BYTES {
+            return Err("maximum encoded patch exceeds the connected transport limit".into());
         }
         Ok(())
     }
@@ -215,6 +244,13 @@ mod tests {
         assert_eq!(
             limits.validate().unwrap_err(),
             "runner limits must be nonzero"
+        );
+
+        let mut limits = ExecutionLimits::standalone();
+        limits.max_cached_response_bytes = limits.max_output_bytes;
+        assert_eq!(
+            limits.validate().unwrap_err(),
+            "response cache cannot retain one maximum-sized encoded response"
         );
 
         let mut value = serde_json::to_value(ExecutionLimits::standalone()).unwrap();
