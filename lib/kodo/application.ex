@@ -7,11 +7,15 @@ defmodule Kodo.Application do
 
   @impl true
   def start(_type, _args) do
+    # Do not advertise a policy that connected runners must reject after authenticating.
+    _limits = Kodo.RunnerProtocol.validate_limits!()
+
     children = [
       KodoWeb.Telemetry,
       Kodo.Repo,
       {DNSCluster, query: Application.get_env(:kodo, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Kodo.PubSub},
+      {Registry, keys: :unique, name: Kodo.RunnerRegistry},
       # Start a worker by calling: Kodo.Worker.start_link(arg)
       # {Kodo.Worker, arg},
       # Start to serve requests, typically the last entry

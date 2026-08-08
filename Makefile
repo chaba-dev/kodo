@@ -2,6 +2,14 @@
 dev:
 	mix phx.server
 
+.PHONY: dev-console
+dev-console:
+	iex -S mix phx.server
+
+.PHONY: dev-agent
+dev-agent:
+	cargo run -p kodo -- daemon --workspace . --control-plane http://127.0.0.1:4451
+
 .PHONY: test
 test: ex-test rs-test
 
@@ -42,4 +50,8 @@ migrate:
 
 .PHONY: db
 db:
-	psql -h 127.0.0.1 -U postgres -d textbin_dev -W
+	psql -h 127.0.0.1 -U postgres -d kodo_dev -p 5435 -W
+
+.PHONY: console
+console:
+	iex -S mix

@@ -20,6 +20,12 @@ defmodule KodoWeb.Router do
     get "/", PageController, :home
   end
 
+  scope "/api", KodoWeb do
+    pipe_through :api
+
+    post "/runners", RunnerRegistrationController, :create
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", KodoWeb do
   #   pipe_through :api
