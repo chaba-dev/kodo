@@ -13,9 +13,8 @@ defmodule Kodo.Sessions do
   @single_updated_row 1
 
   def get_session(id) do
-    with {:ok, id} <- Ecto.UUID.cast(id) do
-      Repo.get(Session, id)
-    else
+    case Ecto.UUID.cast(id) do
+      {:ok, id} -> Repo.get(Session, id)
       :error -> nil
     end
   end
@@ -75,14 +74,7 @@ defmodule Kodo.Sessions do
 
   @doc "Appends an event while locking its session row to allocate exactly one sequence number."
   def append_event(session_id, type, payload, opts \\ []) do
-    case Repo.transaction(fn ->
-           session = lock_session!(session_id)
-
-           case append_locked(session, type, payload, opts) do
-             {:ok, event} -> event
-             {:error, changeset} -> Repo.rollback(changeset)
-           end
-         end) do
+    case Repo.transaction(fn -> append_event_locked(session_id, type, payload, opts) end) do
       {:ok, event} = result ->
         broadcast(event)
         result
@@ -101,19 +93,7 @@ defmodule Kodo.Sessions do
   end
 
   def set_status(session_id, status, source \\ "agent") do
-    case Repo.transaction(fn ->
-           session = lock_session!(session_id)
-
-           with {:ok, session} <- session |> Session.status_changeset(status) |> Repo.update(),
-                {:ok, event} <-
-                  append_locked(session, "session_status_changed", %{"status" => status},
-                    source: source
-                  ) do
-             {session, event}
-           else
-             {:error, changeset} -> Repo.rollback(changeset)
-           end
-         end) do
+    case Repo.transaction(fn -> set_status_locked(session_id, status, source) end) do
       {:ok, {_session, event}} = result ->
         broadcast(event)
         result
@@ -125,29 +105,52 @@ defmodule Kodo.Sessions do
 
   @doc "Atomically records cancellation and updates the session's query index."
   def cancel_session(session_id) do
-    case Repo.transaction(fn ->
-           session = lock_session!(session_id)
-
-           with {:ok, session} <-
-                  session |> Session.status_changeset("cancelled") |> Repo.update(),
-                {:ok, event} <-
-                  append_locked(
-                    session,
-                    "session_cancelled",
-                    %{"reason" => "user_requested"},
-                    source: "user"
-                  ) do
-             {session, event}
-           else
-             {:error, changeset} -> Repo.rollback(changeset)
-           end
-         end) do
+    case Repo.transaction(fn -> cancel_session_locked(session_id) end) do
       {:ok, {_session, event}} = result ->
         broadcast(event)
         result
 
       error ->
         error
+    end
+  end
+
+  defp append_event_locked(session_id, type, payload, opts) do
+    session = lock_session!(session_id)
+
+    case append_locked(session, type, payload, opts) do
+      {:ok, event} -> event
+      {:error, changeset} -> Repo.rollback(changeset)
+    end
+  end
+
+  defp set_status_locked(session_id, status, source) do
+    session = lock_session!(session_id)
+
+    with {:ok, session} <- session |> Session.status_changeset(status) |> Repo.update(),
+         {:ok, event} <-
+           append_locked(session, "session_status_changed", %{"status" => status}, source: source) do
+      {session, event}
+    else
+      {:error, changeset} -> Repo.rollback(changeset)
+    end
+  end
+
+  defp cancel_session_locked(session_id) do
+    session = lock_session!(session_id)
+
+    with {:ok, session} <-
+           session |> Session.status_changeset("cancelled") |> Repo.update(),
+         {:ok, event} <-
+           append_locked(
+             session,
+             "session_cancelled",
+             %{"reason" => "user_requested"},
+             source: "user"
+           ) do
+      {session, event}
+    else
+      {:error, changeset} -> Repo.rollback(changeset)
     end
   end
 

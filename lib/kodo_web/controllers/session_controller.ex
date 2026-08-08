@@ -23,21 +23,24 @@ defmodule KodoWeb.SessionController do
         conn |> put_status(:not_found) |> json(%{error: "session not found"})
 
       _session ->
-        with {:ok, cursor} <- cursor(params["after_sequence"]) do
-          all_events = Sessions.events_after(id)
-          projection = Kodo.Sessions.Projection.from_events(all_events)
-
-          json(conn, %{
-            session: projection_json(projection),
-            events:
-              all_events
-              |> Enum.drop_while(&(&1.sequence <= cursor))
-              |> Enum.map(&event_json/1)
-          })
-        else
+        case cursor(params["after_sequence"]) do
+          {:ok, cursor} -> show_session(conn, id, cursor)
           :error -> conn |> put_status(:bad_request) |> json(%{error: "invalid event cursor"})
         end
     end
+  end
+
+  defp show_session(conn, id, cursor) do
+    all_events = Sessions.events_after(id)
+    projection = Kodo.Sessions.Projection.from_events(all_events)
+
+    json(conn, %{
+      session: projection_json(projection),
+      events:
+        all_events
+        |> Enum.drop_while(&(&1.sequence <= cursor))
+        |> Enum.map(&event_json/1)
+    })
   end
 
   def message(conn, %{"id" => id, "content" => content}) when is_binary(content) do

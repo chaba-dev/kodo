@@ -165,12 +165,23 @@ defmodule Kodo.Agent.Loop do
 
   defp execute_tools(session_id, runner_id, invocation_id, calls, budgets) do
     with :ok <- Phoenix.PubSub.subscribe(Kodo.PubSub, "runner_responses:#{runner_id}") do
-      Enum.reduce_while(calls, {:ok, []}, fn call, {:ok, results} ->
-        case execute_tool(session_id, runner_id, invocation_id, call, budgets[:tool_timeout]) do
-          {:ok, result} -> {:cont, {:ok, results ++ [result]}}
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
+      Enum.reduce_while(calls, {:ok, []}, fn call, result ->
+        execute_next_tool(
+          call,
+          result,
+          session_id,
+          runner_id,
+          invocation_id,
+          budgets[:tool_timeout]
+        )
       end)
+    end
+  end
+
+  defp execute_next_tool(call, {:ok, results}, session_id, runner_id, invocation_id, timeout) do
+    case execute_tool(session_id, runner_id, invocation_id, call, timeout) do
+      {:ok, result} -> {:cont, {:ok, results ++ [result]}}
+      {:error, reason} -> {:halt, {:error, reason}}
     end
   end
 
