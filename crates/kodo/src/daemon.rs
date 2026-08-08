@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::protocol::{PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope, ToolRequest};
 use crate::runner::Runner;
 
+// Transport and cache limits bound untrusted requests independently of per-tool output limits.
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_CACHED_REQUESTS: usize = 1024;
 const MAX_CACHED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -37,6 +38,7 @@ struct ResponseCache {
 struct ResponseSlot {
     // The fingerprint prevents a caller from reusing an id for different tool input.
     fingerprint: [u8; 32],
+    // Execution is elected on insertion; waiters only observe this result and may disconnect safely.
     response: Mutex<Option<String>>,
     notify: Notify,
 }

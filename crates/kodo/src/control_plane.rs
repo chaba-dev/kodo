@@ -17,8 +17,30 @@ use crate::protocol::{PROTOCOL_VERSION, RequestEnvelope};
 use crate::runner::Runner;
 use crate::workspace::Workspace;
 
+// Keep this protocol boundary synchronized with Kodo.RunnerProtocol on the Phoenix side.
 const MAX_WIRE_BYTES: usize = 4 * 1024 * 1024;
+// Registration metadata is tiny; this generous cap bounds a compromised local control plane.
 const MAX_REGISTRATION_BYTES: usize = 256 * 1024;
+// Reconnects back off enough to avoid a hot loop while still recovering promptly for local use.
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const PHOENIX_SERIALIZER_VERSION: &str = "2.0.0";
+// The join consumes the first Phoenix ref; heartbeat refs then remain unique on this connection.
+const JOIN_REFERENCE: &str = "1";
+const FIRST_HEARTBEAT_REFERENCE: u64 = 2;
+const REGISTRATION_PATH: &str = "api/runners";
+const RUNNER_CAPABILITIES: [&str; 9] = [
+    "list_files",
+    "search_code",
+    "read_file",
+    "git_status",
+    "git_diff",
+    "apply_patch",
+    "start_command",
+    "poll_command",
+    "stop_command",
+];
 
 #[derive(Debug, Error)]
 pub enum ControlPlaneError {
@@ -38,7 +60,7 @@ struct RegistrationRequest<'a> {
     architecture: &'static str,
     runner_version: &'static str,
     protocol_version: u16,
-    capabilities: [&'static str; 9],
+    capabilities: &'static [&'static str],
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -51,6 +73,7 @@ struct Registration {
     token_expires_in: u64,
 }
 
+/// Phoenix V2's five-element JSON frame; channel refs are transport-only correlation.
 #[derive(Debug)]
 struct Frame {
     join_ref: Option<String>,
@@ -114,6 +137,7 @@ fn required_string(value: Value, field: &str) -> Result<String, ControlPlaneErro
         .ok_or_else(|| ControlPlaneError::Transport(format!("Phoenix {field} must be a string")))
 }
 
+/// Register the workspace and maintain its authenticated loopback control-plane connection.
 pub async fn serve(
     base: &str,
     workspace: &Workspace,
@@ -128,19 +152,21 @@ pub async fn serve(
         .build()
         .map_err(|e| ControlPlaneError::Registration(e.to_string()))?;
     let dispatcher = Dispatcher::new(runner);
+    // Registration survives ordinary reconnects, while the dispatcher survives every reconnect so
+    // retries with the same request ID observe the original execution.
     let mut registration = None;
-    let mut backoff = Duration::from_secs(1);
+    let mut backoff = INITIAL_RECONNECT_DELAY;
     loop {
         if registration.is_none() {
             match register(&client, &base, root).await {
                 Ok(registered) => {
                     registration = Some(registered);
-                    backoff = Duration::from_secs(1);
+                    backoff = INITIAL_RECONNECT_DELAY;
                 }
                 Err(error) => {
                     eprintln!("kodo: control-plane registration failed: {error}");
                     sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    backoff = (backoff * 2).min(MAX_RECONNECT_DELAY);
                     continue;
                 }
             }
@@ -149,17 +175,17 @@ pub async fn serve(
             .as_ref()
             .expect("registration is established above");
         match connect_once(&base, registered, dispatcher.clone()).await {
-            Ok(()) => backoff = Duration::from_secs(1),
+            Ok(()) => backoff = INITIAL_RECONNECT_DELAY,
             Err(ConnectError::AuthRejected) => {
                 registration = None;
-                backoff = Duration::from_secs(1);
+                backoff = INITIAL_RECONNECT_DELAY;
             }
             Err(ConnectError::Other(error)) => {
                 eprintln!("kodo: control-plane connection lost: {error}")
             }
         }
         sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(30));
+        backoff = (backoff * 2).min(MAX_RECONNECT_DELAY);
     }
 }
 
@@ -174,6 +200,7 @@ fn validate_base_url(input: &str) -> Result<Url, ControlPlaneError> {
             "expected an http(s) base URL without query or fragment".into(),
         ));
     }
+    // Registration is an unauthenticated bootstrap, so a remote URL is never an acceptable typo.
     let loopback = match url.host() {
         Some(Host::Domain("localhost")) => true,
         Some(Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
@@ -195,7 +222,7 @@ async fn register(
 ) -> Result<Registration, ControlPlaneError> {
     let endpoint = base
         .join(&format!(
-            "{}/api/runners",
+            "{}/{REGISTRATION_PATH}",
             base.path().trim_end_matches('/')
         ))
         .map_err(|e| ControlPlaneError::InvalidUrl(e.to_string()))?;
@@ -206,17 +233,7 @@ async fn register(
         architecture: std::env::consts::ARCH,
         runner_version: env!("CARGO_PKG_VERSION"),
         protocol_version: PROTOCOL_VERSION,
-        capabilities: [
-            "list_files",
-            "search_code",
-            "read_file",
-            "git_status",
-            "git_diff",
-            "apply_patch",
-            "start_command",
-            "poll_command",
-            "stop_command",
-        ],
+        capabilities: &RUNNER_CAPABILITIES,
     };
     let mut response = client
         .post(endpoint)
@@ -302,7 +319,7 @@ async fn connect_once(
     socket_url
         .query_pairs_mut()
         .append_pair("token", &registration.token)
-        .append_pair("vsn", "2.0.0");
+        .append_pair("vsn", PHOENIX_SERIALIZER_VERSION);
     let config = tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(MAX_WIRE_BYTES))
         .max_frame_size(Some(MAX_WIRE_BYTES));
@@ -340,12 +357,12 @@ async fn channel_loop<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let join_ref = "1".to_owned();
+    let join_ref = JOIN_REFERENCE.to_owned();
     send(
         &mut socket,
         Frame {
             join_ref: Some(join_ref.clone()),
-            reference: Some("1".into()),
+            reference: Some(JOIN_REFERENCE.into()),
             topic: registration.topic.clone(),
             event: "phx_join".into(),
             payload: json!({"protocol_version": PROTOCOL_VERSION}),
@@ -353,24 +370,23 @@ where
     )
     .await?;
     let mut joined = false;
-    let mut next_ref = 2_u64;
-    let mut heartbeat = interval_at(
-        Instant::now() + Duration::from_secs(30),
-        Duration::from_secs(30),
-    );
+    let mut next_ref = FIRST_HEARTBEAT_REFERENCE;
+    let mut heartbeat = interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
     let mut requests = FuturesUnordered::new();
     loop {
         tokio::select! {
+            // Stop reading at capacity so TCP backpressure replaces silent request loss.
             message = socket.next(), if requests.len() < MAX_IN_FLIGHT_REQUESTS => {
                 let Some(message) = message else { return Ok(()); };
                 let message = message.map_err(|e| ControlPlaneError::Transport(e.to_string()))?;
                 if let tungstenite::Message::Text(text) = message {
                     let frame = Frame::parse(&text)?;
-                    if frame.topic == registration.topic && frame.event == "phx_reply" && frame.reference.as_deref() == Some("1") {
+                    if frame.topic == registration.topic && frame.event == "phx_reply" && frame.reference.as_deref() == Some(JOIN_REFERENCE) {
                         joined = frame.payload.get("status").and_then(Value::as_str) == Some("ok");
                         if !joined { return Err(ControlPlaneError::Transport("channel join rejected".into())); }
                     } else if matches!(frame.event.as_str(), "phx_error" | "phx_close") { return Ok(()); }
                     else if joined && frame.topic == registration.topic && frame.event == "tool_request" {
+                        // The protocol request ID, not the Phoenix ref, provides idempotent replay.
                         let request: RequestEnvelope = serde_json::from_value(frame.payload).map_err(|e| ControlPlaneError::Transport(format!("invalid tool request: {e}")))?;
                         let dispatcher = dispatcher.clone();
                         let reference = frame.reference;
@@ -382,6 +398,7 @@ where
                 let payload = serde_json::from_str(&response).map_err(|e| ControlPlaneError::Transport(e.to_string()))?;
                 send(&mut socket, Frame { join_ref: Some(join_ref.clone()), reference, topic: registration.topic.clone(), event: "tool_response".into(), payload }).await?;
             }
+            // Heartbeats continue while tools run so long-running commands do not look disconnected.
             _ = heartbeat.tick() => {
                 let reference = next_ref.to_string(); next_ref += 1;
                 send(&mut socket, Frame { join_ref: None, reference: Some(reference), topic: "phoenix".into(), event: "heartbeat".into(), payload: json!({}) }).await?;
@@ -466,17 +483,7 @@ mod tests {
             architecture: "x86_64",
             runner_version: "0.1.0",
             protocol_version: 2,
-            capabilities: [
-                "list_files",
-                "search_code",
-                "read_file",
-                "git_status",
-                "git_diff",
-                "apply_patch",
-                "start_command",
-                "poll_command",
-                "stop_command",
-            ],
+            capabilities: &RUNNER_CAPABILITIES,
         })
         .unwrap();
         assert_eq!(request["runner_version"], "0.1.0");

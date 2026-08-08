@@ -17,6 +17,7 @@ use crate::process::{ProcessError, ProcessManager};
 use crate::protocol::{SearchMatch, ToolRequest, ToolResult};
 use crate::workspace::{Workspace, WorkspaceError};
 
+// These are host-resource boundaries, not presentation defaults; callers receive truncation/error.
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 1_000;
 const MAX_PATCH_BYTES: usize = 1024 * 1024;
