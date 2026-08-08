@@ -188,6 +188,33 @@ defmodule Kodo.Accounts do
     Repo.one(query)
   end
 
+  @doc "Generates a revocable bearer token for an agent client."
+  def generate_user_agent_token(user) do
+    {encoded_token, user_token} = UserToken.build_agent_token(user)
+    Repo.insert!(user_token)
+    encoded_token
+  end
+
+  def agent_token_validity_in_seconds, do: UserToken.agent_token_validity_in_seconds()
+
+  @doc "Gets the user authenticated by an agent bearer token."
+  def get_user_by_agent_token(token) when is_binary(token) do
+    with {:ok, query} <- UserToken.verify_agent_token_query(token) do
+      Repo.one(query)
+    else
+      :error -> nil
+    end
+  end
+
+  @doc "Revokes one agent bearer token."
+  def delete_user_agent_token(token) when is_binary(token) do
+    with {:ok, hashed_token} <- UserToken.agent_token_hash(token) do
+      Repo.delete_all(from(UserToken, where: [token: ^hashed_token, context: "agent"]))
+    end
+
+    :ok
+  end
+
   @doc """
   Gets the user with the given magic link token.
   """

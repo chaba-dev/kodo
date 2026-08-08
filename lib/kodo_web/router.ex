@@ -17,6 +17,11 @@ defmodule KodoWeb.Router do
     plug :accepts, ["json"]
   end
 
+  pipeline :authenticated_agent do
+    plug :fetch_current_scope_for_agent
+    plug :require_authenticated_agent
+  end
+
   scope "/", KodoWeb do
     pipe_through :browser
 
@@ -27,6 +32,13 @@ defmodule KodoWeb.Router do
     pipe_through :api
 
     post "/runners", RunnerRegistrationController, :create
+    post "/auth/token", AgentSessionController, :create
+  end
+
+  scope "/api", KodoWeb do
+    pipe_through [:api, :authenticated_agent]
+
+    delete "/auth/token", AgentSessionController, :delete
     post "/sessions", SessionController, :create
     get "/sessions/:id", SessionController, :show
     post "/sessions/:id/messages", SessionController, :message

@@ -4,6 +4,8 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
   alias Kodo.Sessions
   alias Kodo.Test.FullStackCase, as: Stack
 
+  import Kodo.AccountsFixtures
+
   @moduletag live_provider: true, timeout: 240_000
 
   @live_session_timeout 180_000
@@ -28,7 +30,8 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
     stack = Stack.start_stack!()
     workspace = Stack.fixture!()
     runner = Stack.start_runner!(stack.base_url, workspace)
-    %{model: model, stack: stack, workspace: workspace, runner: runner}
+    token = user_fixture() |> Kodo.Accounts.generate_user_agent_token()
+    %{model: model, stack: stack, workspace: workspace, runner: runner, token: token}
   end
 
   test "a configured provider edits and verifies through the real runner", context do
@@ -41,7 +44,8 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
           title: "Live provider greeting repair",
           model: context.model
         },
-        @http_created_status
+        @http_created_status,
+        context.token
       )
 
     session_id = created["session"]["id"]
@@ -53,11 +57,12 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
                context.stack.base_url,
                "/api/sessions/#{session_id}/messages",
                %{content: @prompt},
-               @http_accepted_status
+               @http_accepted_status,
+               context.token
              )
 
     Stack.await_completed!(session_id, @live_session_timeout)
-    replay = Stack.replay!(context.stack.base_url, session_id)
+    replay = Stack.replay!(context.stack.base_url, session_id, context.token)
 
     Stack.assert_live_outcome!(replay, context.workspace)
 

@@ -71,6 +71,12 @@ defmodule KodoWeb.ConnCase do
     |> Plug.Conn.put_session(:user_token, token)
   end
 
+  @doc "Authenticates the connection as an agent API client."
+  def authenticate_agent(conn, user) do
+    token = Kodo.Accounts.generate_user_agent_token(user)
+    Plug.Conn.put_req_header(conn, "authorization", "Bearer #{token}")
+  end
+
   defp maybe_set_token_authenticated_at(_token, nil), do: nil
 
   defp maybe_set_token_authenticated_at(token, authenticated_at) do

@@ -59,14 +59,25 @@ defmodule Kodo.Test.FullStackCase do
     runner
   end
 
-  def post!(base_url, path, body, expected_status) do
-    response = Req.post!(base_url <> path, json: body, receive_timeout: @http_timeout)
+  def post!(base_url, path, body, expected_status, token) do
+    response =
+      Req.post!(base_url <> path,
+        json: body,
+        auth: {:bearer, token},
+        receive_timeout: @http_timeout
+      )
+
     assert response.status == expected_status
     response.body
   end
 
-  def replay!(base_url, session_id) do
-    response = Req.get!(base_url <> "/api/sessions/#{session_id}", receive_timeout: @http_timeout)
+  def replay!(base_url, session_id, token) do
+    response =
+      Req.get!(base_url <> "/api/sessions/#{session_id}",
+        auth: {:bearer, token},
+        receive_timeout: @http_timeout
+      )
+
     assert response.status == @http_ok_status
     response.body
   end

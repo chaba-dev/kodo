@@ -75,6 +75,31 @@ defmodule KodoWeb.UserAuth do
     end
   end
 
+  @doc "Authenticates an agent from an HTTP Bearer token."
+  def fetch_current_scope_for_agent(conn, _opts) do
+    with ["Bearer " <> token] <- get_req_header(conn, "authorization"),
+         %{} = user <- Accounts.get_user_by_agent_token(token) do
+      conn
+      |> assign(:current_scope, Scope.for_user(user))
+      |> assign(:current_agent_token, token)
+    else
+      _ -> assign(conn, :current_scope, Scope.for_user(nil))
+    end
+  end
+
+  @doc "Rejects unauthenticated agent API requests with a JSON response."
+  def require_authenticated_agent(conn, _opts) do
+    if conn.assigns.current_scope && conn.assigns.current_scope.user do
+      conn
+    else
+      conn
+      |> put_resp_header("www-authenticate", "Bearer")
+      |> put_status(:unauthorized)
+      |> json(%{error: "authentication required"})
+      |> halt()
+    end
+  end
+
   defp ensure_user_token(conn) do
     if token = get_session(conn, :user_token) do
       {token, conn}

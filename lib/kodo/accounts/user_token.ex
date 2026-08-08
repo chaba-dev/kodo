@@ -11,6 +11,7 @@ defmodule Kodo.Accounts.UserToken do
   @magic_link_validity_in_minutes 15
   @change_email_validity_in_days 7
   @session_validity_in_days 14
+  @agent_token_validity_in_days 30
 
   schema "users_tokens" do
     field :token, :binary
@@ -63,6 +64,32 @@ defmodule Kodo.Accounts.UserToken do
         select: {%{user | authenticated_at: token.authenticated_at}, token.inserted_at}
 
     {:ok, query}
+  end
+
+  @doc "Builds a bearer token for an agent while storing only its hash."
+  def build_agent_token(user) do
+    build_hashed_token(user, "agent", nil)
+  end
+
+  def agent_token_validity_in_seconds, do: @agent_token_validity_in_days * 24 * 60 * 60
+
+  def agent_token_hash(token) do
+    with {:ok, decoded_token} <- Base.url_decode64(token, padding: false) do
+      {:ok, :crypto.hash(@hash_algorithm, decoded_token)}
+    end
+  end
+
+  @doc "Checks an agent bearer token and returns its user lookup query."
+  def verify_agent_token_query(token) do
+    with {:ok, hashed_token} <- agent_token_hash(token) do
+      query =
+        from token in by_token_and_context_query(hashed_token, "agent"),
+          join: user in assoc(token, :user),
+          where: token.inserted_at > ago(@agent_token_validity_in_days, "day"),
+          select: user
+
+      {:ok, query}
+    end
   end
 
   @doc """

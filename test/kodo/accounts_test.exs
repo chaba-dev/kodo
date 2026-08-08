@@ -307,6 +307,34 @@ defmodule Kodo.AccountsTest do
     end
   end
 
+  describe "agent tokens" do
+    setup do
+      user = user_fixture()
+      token = Accounts.generate_user_agent_token(user)
+      %{user: user, token: token}
+    end
+
+    test "stores only a hash and authenticates the user", %{user: user, token: token} do
+      {:ok, decoded_token} = Base.url_decode64(token, padding: false)
+      hashed_token = :crypto.hash(:sha256, decoded_token)
+
+      assert Repo.get_by(UserToken, token: hashed_token, context: "agent")
+      refute Repo.get_by(UserToken, token: token)
+      assert Accounts.get_user_by_agent_token(token).id == user.id
+    end
+
+    test "rejects invalid and expired tokens", %{token: token} do
+      refute Accounts.get_user_by_agent_token("invalid")
+      {1, nil} = Repo.update_all(UserToken, set: [inserted_at: ~N[2020-01-01 00:00:00]])
+      refute Accounts.get_user_by_agent_token(token)
+    end
+
+    test "revokes the token", %{token: token} do
+      assert :ok = Accounts.delete_user_agent_token(token)
+      refute Accounts.get_user_by_agent_token(token)
+    end
+  end
+
   describe "get_user_by_magic_link_token/1" do
     setup do
       user = user_fixture()
