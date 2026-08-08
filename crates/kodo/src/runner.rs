@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::process::{ProcessError, ProcessManager};
-use crate::protocol::{ExecutionLimits, SearchMatch, ToolRequest, ToolResult};
+use crate::protocol::{ExecutionLimits, MAX_BLOCKING_TOOLS, SearchMatch, ToolRequest, ToolResult};
 use crate::workspace::{Workspace, WorkspaceError};
 
 // Git metadata is an implementation buffer, unlike patch input policy supplied by Phoenix.
@@ -68,7 +68,9 @@ impl Runner {
 
     pub fn from_limits(workspace: Workspace, limits: ExecutionLimits) -> Result<Self, String> {
         limits.validate()?;
-        if limits.max_blocking_tools > Semaphore::MAX_PERMITS {
+        if limits.max_blocking_tools > MAX_BLOCKING_TOOLS
+            || limits.max_blocking_tools > Semaphore::MAX_PERMITS
+        {
             return Err("max_blocking_tools exceeds the runtime semaphore limit".into());
         }
         let processes = ProcessManager::with_limits(

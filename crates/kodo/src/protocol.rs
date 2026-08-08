@@ -12,6 +12,8 @@ const MAX_CONNECTED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024 - 4 * 1024;
 const JSON_ESCAPE_EXPANSION: usize = 6;
 const RESPONSE_ENVELOPE_BYTES: usize = 4 * 1024;
 const RESULT_METADATA_BYTES: usize = 512;
+const MAX_LIMIT_VALUE: usize = u32::MAX as usize;
+pub const MAX_BLOCKING_TOOLS: usize = 1024;
 
 /// Phoenix-owned execution policy supplied by the authenticated channel join.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,7 +55,7 @@ impl ExecutionLimits {
                 self.version
             ));
         }
-        if [
+        let quotas = [
             self.max_output_bytes,
             self.max_results,
             self.max_patch_input_bytes,
@@ -63,10 +65,15 @@ impl ExecutionLimits {
             self.max_process_output_chunks,
             self.max_cached_requests,
             self.max_cached_response_bytes,
-        ]
-        .contains(&0)
-        {
+        ];
+        if quotas.contains(&0) {
             return Err("runner limits must be nonzero".into());
+        }
+        if quotas.into_iter().any(|quota| quota > MAX_LIMIT_VALUE) {
+            return Err("runner limits exceed the platform-independent maximum".into());
+        }
+        if self.max_blocking_tools > MAX_BLOCKING_TOOLS {
+            return Err("max_blocking_tools exceeds the supported maximum".into());
         }
         let maximum_response_bytes = self.maximum_encoded_response_bytes()?;
         if maximum_response_bytes > MAX_CONNECTED_PAYLOAD_BYTES {
@@ -254,6 +261,13 @@ mod tests {
         assert_eq!(
             limits.validate().unwrap_err(),
             "response cache cannot retain one maximum-sized encoded response"
+        );
+
+        let mut limits = ExecutionLimits::standalone();
+        limits.max_blocking_tools = MAX_BLOCKING_TOOLS + 1;
+        assert_eq!(
+            limits.validate().unwrap_err(),
+            "max_blocking_tools exceeds the supported maximum"
         );
 
         let mut value = serde_json::to_value(ExecutionLimits::standalone()).unwrap();

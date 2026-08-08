@@ -38,4 +38,10 @@ defmodule Kodo.RunnersTest do
       RunnerProtocol.validate_limits!(invalid)
     end
   end
+
+  test "runner policy rejects values outside the cross-platform contract" do
+    invalid = %{RunnerProtocol.limits() | max_blocking_tools: 1025}
+
+    assert_raise ArgumentError, fn -> RunnerProtocol.validate_limits!(invalid) end
+  end
 end

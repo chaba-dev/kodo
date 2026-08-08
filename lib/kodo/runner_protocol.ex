@@ -15,6 +15,8 @@ defmodule Kodo.RunnerProtocol do
   @max_payload_bytes @max_wire_bytes - @phoenix_envelope_reserve_bytes
   @json_escape_expansion 6
   @result_metadata_bytes 512
+  @max_limit_value 4_294_967_295
+  @max_blocking_tools 1024
   @limit_keys [
     :version,
     :max_output_bytes,
@@ -54,17 +56,35 @@ defmodule Kodo.RunnerProtocol do
   def validate_limits!(limits \\ @limits)
 
   def validate_limits!(limits) when is_map(limits) do
-    unless Enum.sort(Map.keys(limits)) == Enum.sort(@limit_keys) do
+    unless valid_limit_keys?(limits) do
       raise ArgumentError, "runner limits must contain exactly the versioned contract keys"
     end
 
-    quota_values = limits |> Map.drop([:version]) |> Map.values()
-
-    unless limits.version == @limits_version and
-             Enum.all?(quota_values, &(is_integer(&1) and &1 > 0)) do
+    unless valid_limit_values?(limits) do
       raise ArgumentError, "runner limits must use the supported version and positive integers"
     end
 
+    unless valid_limit_budgets?(limits) do
+      raise ArgumentError, "runner limits exceed transport or replay-cache budgets"
+    end
+
+    limits
+  end
+
+  def validate_limits!(_limits), do: raise(ArgumentError, "runner limits must be a map")
+
+  defp valid_limit_keys?(limits),
+    do: Enum.sort(Map.keys(limits)) == Enum.sort(@limit_keys)
+
+  defp valid_limit_values?(limits) do
+    quota_values = limits |> Map.drop([:version]) |> Map.values()
+
+    limits.version == @limits_version and
+      Enum.all?(quota_values, &(is_integer(&1) and &1 > 0 and &1 <= @max_limit_value)) and
+      limits.max_blocking_tools <= @max_blocking_tools
+  end
+
+  defp valid_limit_budgets?(limits) do
     maximum_response_bytes =
       limits.max_output_bytes * @json_escape_expansion +
         (limits.max_results + limits.max_process_output_chunks) * @result_metadata_bytes +
@@ -73,14 +93,8 @@ defmodule Kodo.RunnerProtocol do
     maximum_patch_bytes =
       limits.max_patch_input_bytes * @json_escape_expansion + @phoenix_envelope_reserve_bytes
 
-    unless maximum_response_bytes <= @max_payload_bytes and
-             maximum_response_bytes <= limits.max_cached_response_bytes and
-             maximum_patch_bytes <= @max_payload_bytes do
-      raise ArgumentError, "runner limits exceed transport or replay-cache budgets"
-    end
-
-    limits
+    maximum_response_bytes <= @max_payload_bytes and
+      maximum_response_bytes <= limits.max_cached_response_bytes and
+      maximum_patch_bytes <= @max_payload_bytes
   end
-
-  def validate_limits!(_limits), do: raise(ArgumentError, "runner limits must be a map")
 end
