@@ -15,16 +15,16 @@ use uuid::Uuid;
 use crate::protocol::{PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope, ToolRequest};
 use crate::runner::Runner;
 
-// Transport and cache limits bound untrusted requests independently of per-tool output limits.
+// Stdio framing and connection scheduling exist before any Phoenix policy is available.
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const MAX_CACHED_REQUESTS: usize = 1024;
-const MAX_CACHED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 #[derive(Clone)]
 pub(crate) struct Dispatcher {
     runner: Runner,
     cache: Arc<StdMutex<ResponseCache>>,
+    max_cached_requests: usize,
+    max_cached_response_bytes: usize,
 }
 
 #[derive(Default)]
@@ -45,9 +45,13 @@ struct ResponseSlot {
 
 impl Dispatcher {
     pub(crate) fn new(runner: Runner) -> Self {
+        let max_cached_requests = runner.limits().max_cached_requests;
+        let max_cached_response_bytes = runner.limits().max_cached_response_bytes;
         Self {
             runner,
             cache: Arc::new(StdMutex::new(ResponseCache::default())),
+            max_cached_requests,
+            max_cached_response_bytes,
         }
     }
 
@@ -61,7 +65,7 @@ impl Dispatcher {
             if let Some(slot) = cache.slots.get(&request.request_id) {
                 (Arc::clone(slot), false)
             } else {
-                while cache.slots.len() >= MAX_CACHED_REQUESTS {
+                while cache.slots.len() >= self.max_cached_requests {
                     let Some((expired, response_len)) = cache.order.pop_front() else {
                         return cache_capacity_response(request.request_id);
                     };
@@ -94,6 +98,7 @@ impl Dispatcher {
     fn spawn_execution(&self, request: RequestEnvelope, slot: Arc<ResponseSlot>) {
         let runner = self.runner.clone();
         let cache = Arc::clone(&self.cache);
+        let max_cached_response_bytes = self.max_cached_response_bytes;
         tokio::spawn(async move {
             // Execution outlives any transport waiter so reconnect retries cannot duplicate a
             // blocking mutation whose original WebSocket disappeared.
@@ -121,7 +126,7 @@ impl Dispatcher {
             {
                 cache.response_bytes += response.len();
                 cache.order.push_back((request.request_id, response.len()));
-                while cache.response_bytes > MAX_CACHED_RESPONSE_BYTES {
+                while cache.response_bytes > max_cached_response_bytes {
                     let Some((expired, response_len)) = cache.order.pop_front() else {
                         break;
                     };

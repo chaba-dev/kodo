@@ -17,10 +17,8 @@ use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
-use crate::protocol::{CommandOutput, OutputStream, ProcessStatus};
+use crate::protocol::{CommandOutput, ExecutionLimits, OutputStream, ProcessStatus};
 
-const MAX_RETAINED_PROCESSES: usize = 1024;
-const MAX_OUTPUT_CHUNKS: usize = 1024;
 const PROCESS_RETENTION: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Error)]
@@ -31,8 +29,8 @@ pub enum ProcessError {
     Unknown(Uuid),
     #[error("process supervisor for {0} stopped unexpectedly")]
     SupervisorStopped(Uuid),
-    #[error("runner already retains the maximum of {MAX_RETAINED_PROCESSES} processes")]
-    Capacity,
+    #[error("runner already retains the maximum of {0} processes")]
+    Capacity(usize),
 }
 
 #[derive(Clone)]
@@ -40,6 +38,8 @@ pub enum ProcessError {
 pub struct ProcessManager {
     entries: Arc<Mutex<HashMap<Uuid, ProcessEntry>>>,
     max_pending_output_bytes: usize,
+    max_retained_processes: usize,
+    max_output_chunks: usize,
 }
 
 impl std::fmt::Debug for ProcessManager {
@@ -97,9 +97,24 @@ enum StopReason {
 
 impl ProcessManager {
     pub fn new(max_pending_output_bytes: usize) -> Self {
+        let defaults = ExecutionLimits::standalone();
+        Self::with_limits(
+            max_pending_output_bytes,
+            defaults.max_retained_processes,
+            defaults.max_process_output_chunks,
+        )
+    }
+
+    pub fn with_limits(
+        max_pending_output_bytes: usize,
+        max_retained_processes: usize,
+        max_output_chunks: usize,
+    ) -> Self {
         Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
             max_pending_output_bytes,
+            max_retained_processes,
+            max_output_chunks,
         }
     }
 
@@ -110,8 +125,8 @@ impl ProcessManager {
         timeout: Duration,
     ) -> Result<Uuid, ProcessError> {
         let mut entries = self.entries.lock().await;
-        if entries.len() >= MAX_RETAINED_PROCESSES {
-            return Err(ProcessError::Capacity);
+        if entries.len() >= self.max_retained_processes {
+            return Err(ProcessError::Capacity(self.max_retained_processes));
         }
         let mut child = Command::new("sh")
             .args(["-c", command])
@@ -152,6 +167,7 @@ impl ProcessManager {
             stop: stop_receiver,
             timeout,
             max_pending_output_bytes: self.max_pending_output_bytes,
+            max_output_chunks: self.max_output_chunks,
             process_id,
             entries: Arc::clone(&self.entries),
             process_group,
@@ -235,6 +251,7 @@ struct Supervisor {
     stop: mpsc::Receiver<StopReason>,
     timeout: Duration,
     max_pending_output_bytes: usize,
+    max_output_chunks: usize,
     process_id: Uuid,
     entries: Arc<Mutex<HashMap<Uuid, ProcessEntry>>>,
     process_group: Option<ProcessGroupGuard>,
@@ -249,6 +266,7 @@ async fn supervise(supervisor: Supervisor) {
         mut stop,
         timeout,
         max_pending_output_bytes,
+        max_output_chunks,
         process_id,
         entries,
         mut process_group,
@@ -258,12 +276,14 @@ async fn supervise(supervisor: Supervisor) {
         OutputStream::Stdout,
         Arc::clone(&state),
         max_pending_output_bytes,
+        max_output_chunks,
     );
     let stderr_reader = spawn_reader(
         stderr,
         OutputStream::Stderr,
         Arc::clone(&state),
         max_pending_output_bytes,
+        max_output_chunks,
     );
     let group = process_group.as_ref().and_then(|guard| guard.group);
 
@@ -398,6 +418,7 @@ fn spawn_reader(
     stream: OutputStream,
     state: Arc<StdMutex<ProcessState>>,
     max_pending_output_bytes: usize,
+    max_output_chunks: usize,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut bytes = vec![0; 8 * 1024];
@@ -406,13 +427,25 @@ fn spawn_reader(
             let read = match reader.read(&mut bytes).await {
                 Ok(0) | Err(_) => {
                     let content = decode_utf8(&mut pending_utf8, &[], true);
-                    append_output(&state, stream, content, max_pending_output_bytes);
+                    append_output(
+                        &state,
+                        stream,
+                        content,
+                        max_pending_output_bytes,
+                        max_output_chunks,
+                    );
                     return;
                 }
                 Ok(read) => read,
             };
             let content = decode_utf8(&mut pending_utf8, &bytes[..read], false);
-            append_output(&state, stream, content, max_pending_output_bytes);
+            append_output(
+                &state,
+                stream,
+                content,
+                max_pending_output_bytes,
+                max_output_chunks,
+            );
         }
     })
 }
@@ -422,6 +455,7 @@ fn append_output(
     stream: OutputStream,
     content: String,
     max_pending_output_bytes: usize,
+    max_output_chunks: usize,
 ) {
     let mut state = state.lock().expect("process state lock poisoned");
     let output = &mut state.output;
@@ -430,7 +464,7 @@ fn append_output(
         return;
     }
     while output.bytes + content.len() > max_pending_output_bytes
-        || output.chunks.len() >= MAX_OUTPUT_CHUNKS
+        || output.chunks.len() >= max_output_chunks
     {
         let Some(removed) = output.chunks.pop_front() else {
             break;
@@ -743,7 +777,7 @@ mod tests {
         }));
         let reader = ChunkReader::new([vec![0xE2, 0x82], vec![0xAC]]);
 
-        spawn_reader(reader, OutputStream::Stdout, Arc::clone(&state), 1024)
+        spawn_reader(reader, OutputStream::Stdout, Arc::clone(&state), 1024, 1024)
             .await
             .unwrap();
 
@@ -759,23 +793,25 @@ mod tests {
 
     #[tokio::test]
     async fn bounds_process_output_chunk_metadata() {
+        let max_output_chunks = 4;
         let state = Arc::new(StdMutex::new(ProcessState {
             output: OutputBuffer::default(),
             status: ProcessStatus::Running,
         }));
-        let reader = ChunkReader::new((0..MAX_OUTPUT_CHUNKS + 10).map(|_| vec![b'x']));
+        let reader = ChunkReader::new((0..max_output_chunks + 10).map(|_| vec![b'x']));
 
         spawn_reader(
             reader,
             OutputStream::Stdout,
             Arc::clone(&state),
             1024 * 1024,
+            max_output_chunks,
         )
         .await
         .unwrap();
 
         let state = state.lock().unwrap();
-        assert_eq!(state.output.chunks.len(), MAX_OUTPUT_CHUNKS);
+        assert_eq!(state.output.chunks.len(), max_output_chunks);
         assert!(state.output.chunks.front().unwrap().sequence > 1);
     }
 

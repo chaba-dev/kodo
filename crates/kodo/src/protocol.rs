@@ -7,6 +7,69 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u16 = 3;
+pub const LIMITS_VERSION: u16 = 1;
+
+/// Phoenix-owned execution policy supplied by the authenticated channel join.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLimits {
+    pub version: u16,
+    pub max_output_bytes: usize,
+    pub max_results: usize,
+    pub max_patch_input_bytes: usize,
+    pub max_file_input_bytes: usize,
+    pub max_blocking_tools: usize,
+    pub max_retained_processes: usize,
+    pub max_process_output_chunks: usize,
+    pub max_cached_requests: usize,
+    pub max_cached_response_bytes: usize,
+}
+
+impl ExecutionLimits {
+    /// Explicit compatibility policy for the standalone stdin/stdout transport.
+    pub fn standalone() -> Self {
+        Self {
+            version: LIMITS_VERSION,
+            max_output_bytes: 256 * 1024,
+            max_results: 1_000,
+            max_patch_input_bytes: 1024 * 1024,
+            max_file_input_bytes: 16 * 1024 * 1024,
+            max_blocking_tools: 8,
+            max_retained_processes: 1024,
+            max_process_output_chunks: 1024,
+            max_cached_requests: 1024,
+            max_cached_response_bytes: 16 * 1024 * 1024,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != LIMITS_VERSION {
+            return Err(format!(
+                "unsupported limits version {}; expected {LIMITS_VERSION}",
+                self.version
+            ));
+        }
+        if [
+            self.max_output_bytes,
+            self.max_results,
+            self.max_patch_input_bytes,
+            self.max_file_input_bytes,
+            self.max_blocking_tools,
+            self.max_retained_processes,
+            self.max_process_output_chunks,
+            self.max_cached_requests,
+            self.max_cached_response_bytes,
+        ]
+        .contains(&0)
+        {
+            return Err("runner limits must be nonzero".into());
+        }
+        if self.max_cached_response_bytes < self.max_output_bytes {
+            return Err("response cache must retain at least one maximum-sized output".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RequestEnvelope {
@@ -140,6 +203,24 @@ pub enum OutputStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_limits_reject_incomplete_or_invalid_policy() {
+        let limits = ExecutionLimits::standalone();
+        assert!(limits.validate().is_ok());
+
+        let mut value = serde_json::to_value(&limits).unwrap();
+        value["max_results"] = 0.into();
+        let limits: ExecutionLimits = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            limits.validate().unwrap_err(),
+            "runner limits must be nonzero"
+        );
+
+        let mut value = serde_json::to_value(ExecutionLimits::standalone()).unwrap();
+        value["unexpected"] = true.into();
+        assert!(serde_json::from_value::<ExecutionLimits>(value).is_err());
+    }
 
     #[test]
     fn request_has_a_stable_tagged_json_shape() {
