@@ -655,7 +655,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 
 ** TODO Milestone 2: Durable primary-agent session
 
-- [ ] Session persistence and ordered event log.
+- [X] Session persistence and ordered event log.
 - [ ] Supervised active-session process.
 - [ ] One model-provider adapter.
 - [ ] Primary agent loop with tool dispatch.

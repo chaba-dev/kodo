@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict gircAqVRz05dGyDbCHktUnyzE1e6ZG6ZmDp6bL1GVP8DyEkEm9kmVKzcTw1Qugk
+\restrict r4Ns2ABShzbthoOr0cMdoj5qxOgdPpqhWi6DbahTzpQ4gCHdWm0Aa7bVd5pVuan
 
 -- Dumped from database version 17.10
 -- Dumped by pg_dump version 18.4
@@ -80,6 +80,7 @@ CREATE UNIQUE INDEX runners_workspace_root_index ON public.runners USING btree (
 -- PostgreSQL database dump complete
 --
 
-\unrestrict gircAqVRz05dGyDbCHktUnyzE1e6ZG6ZmDp6bL1GVP8DyEkEm9kmVKzcTw1Qugk
+\unrestrict r4Ns2ABShzbthoOr0cMdoj5qxOgdPpqhWi6DbahTzpQ4gCHdWm0Aa7bVd5pVuan
 
 INSERT INTO public."schema_migrations" (version) VALUES (20260807073017);
+INSERT INTO public."schema_migrations" (version) VALUES (20260808062115);
