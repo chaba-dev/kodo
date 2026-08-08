@@ -1,6 +1,7 @@
 defmodule KodoWeb.AgentSessionControllerTest do
   use KodoWeb.ConnCase, async: true
 
+  import Ecto.Query
   import Kodo.AccountsFixtures
 
   setup do
@@ -107,6 +108,26 @@ defmodule KodoWeb.AgentSessionControllerTest do
       assert build_conn()
              |> prepend_req_headers(headers)
              |> delete(~p"/api/auth/token")
+             |> json_response(401) == %{"error" => "authentication required"}
+    end
+  end
+
+  test "rejects expired and revoked bearer tokens", %{user: user} do
+    expired_token = Kodo.Accounts.generate_user_agent_token(user)
+    {:ok, expired_hash} = Kodo.Accounts.UserToken.agent_token_hash(expired_token)
+
+    Kodo.Repo.update_all(
+      from(token in Kodo.Accounts.UserToken, where: token.token == ^expired_hash),
+      set: [inserted_at: ~N[2020-01-01 00:00:00]]
+    )
+
+    revoked_token = Kodo.Accounts.generate_user_agent_token(user)
+    :ok = Kodo.Accounts.delete_user_agent_token(revoked_token)
+
+    for token <- [expired_token, revoked_token] do
+      assert build_conn()
+             |> put_req_header("authorization", "Bearer #{token}")
+             |> get(~p"/api/sessions/not-a-uuid")
              |> json_response(401) == %{"error" => "authentication required"}
     end
   end
