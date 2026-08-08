@@ -6,7 +6,7 @@ defmodule KodoWeb.RunnerRegistrationControllerTest do
     platform: "linux",
     architecture: "x86_64",
     runner_version: "0.1.0",
-    protocol_version: 2,
+    protocol_version: 3,
     capabilities: ["shell"]
   }
 
@@ -18,7 +18,7 @@ defmodule KodoWeb.RunnerRegistrationControllerTest do
     assert response["token_expires_in"] == 86_400
     assert response["socket_path"] == "/runner/websocket"
     assert response["topic"] == "runner:#{response["runner_id"]}"
-    assert response["protocol_version"] == 2
+    assert response["protocol_version"] == 3
   end
 
   test "registration rejects non-loopback clients", %{conn: conn} do

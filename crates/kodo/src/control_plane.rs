@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn phoenix_frame_round_trips() {
-        let input = r#"["1","2","runner:abc","tool_request",{"protocol_version":2}]"#;
+        let input = r#"["1","2","runner:abc","tool_request",{"protocol_version":3}]"#;
         let frame = Frame::parse(input).unwrap();
         assert_eq!(frame.topic, "runner:abc");
         assert_eq!(frame.event, "tool_request");
@@ -466,7 +466,7 @@ mod tests {
             token: "secret".into(),
             socket_path: "/socket/websocket".into(),
             topic: format!("runner:{runner_id}"),
-            protocol_version: 2,
+            protocol_version: PROTOCOL_VERSION,
             token_expires_in: 60,
         };
         assert!(validate_registration(&r).is_ok());
@@ -482,7 +482,7 @@ mod tests {
             platform: "linux",
             architecture: "x86_64",
             runner_version: "0.1.0",
-            protocol_version: 2,
+            protocol_version: PROTOCOL_VERSION,
             capabilities: &RUNNER_CAPABILITIES,
         })
         .unwrap();
@@ -495,7 +495,7 @@ mod tests {
             "token": "signed",
             "socket_path": "/runner/websocket",
             "topic": format!("runner:{runner_id}"),
-            "protocol_version": 2,
+            "protocol_version": PROTOCOL_VERSION,
             "token_expires_in": 86_400
         });
         let registration: Registration = serde_json::from_value(response).unwrap();

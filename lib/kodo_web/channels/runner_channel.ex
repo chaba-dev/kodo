@@ -55,7 +55,8 @@ defmodule KodoWeb.RunnerChannel do
   defp connect_runner(runner_id, socket) do
     with %{} = runner <- Runners.get_runner(runner_id),
          {:ok, _runner} <- Runners.connected(runner) do
-      {:ok, socket}
+      # Limits are disclosed only after socket authentication and exact-topic authorization.
+      {:ok, %{limits: RunnerProtocol.limits()}, socket}
     else
       nil -> {:error, %{reason: "runner no longer exists"}}
       {:error, _changeset} -> {:error, %{reason: "runner update failed"}}
