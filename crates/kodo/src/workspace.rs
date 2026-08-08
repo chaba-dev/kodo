@@ -6,6 +6,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::{io::ErrorKind, io::Read};
 
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
@@ -23,6 +24,8 @@ pub enum WorkspaceError {
     OutsideWorkspace(PathBuf),
     #[error("path has no existing ancestor: {0}")]
     NoExistingAncestor(PathBuf),
+    #[error("file exceeds {limit} byte input limit: {path}")]
+    FileTooLarge { path: PathBuf, limit: usize },
     #[error("failed to access {path}: {source}")]
     Io {
         path: PathBuf,
@@ -31,7 +34,7 @@ pub enum WorkspaceError {
     },
 }
 
-/// A canonical Git worktree root used to confine every runner filesystem operation.
+/// A canonical Git worktree root and capability for validating model-supplied file paths.
 #[derive(Clone, Debug)]
 pub struct Workspace {
     root: PathBuf,
@@ -41,15 +44,34 @@ pub struct Workspace {
 impl Workspace {
     pub fn discover(start: impl AsRef<Path>) -> Result<Self, WorkspaceError> {
         let start = canonicalize(start.as_ref())?;
-        let output = Command::new("git")
-            .arg("-C")
+        let mut command = Command::new("git");
+        command
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+            ])
             .arg(&start)
             .args(["rev-parse", "--show-toplevel"])
-            .output()
-            .map_err(|source| WorkspaceError::Io {
-                path: start.clone(),
-                source,
-            })?;
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_ATTR_NOSYSTEM", "1");
+        for variable in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+        ] {
+            command.env_remove(variable);
+        }
+        let output = command.output().map_err(|source| WorkspaceError::Io {
+            path: start.clone(),
+            source,
+        })?;
 
         if !output.status.success() {
             return Err(WorkspaceError::NotARepository { path: start });
@@ -87,6 +109,40 @@ impl Workspace {
                 path: self.root.join(path),
                 source,
             })
+    }
+
+    /// Read at most `limit` bytes through the workspace capability.
+    pub fn read_to_string_bounded(
+        &self,
+        path: impl AsRef<Path>,
+        limit: usize,
+    ) -> Result<String, WorkspaceError> {
+        let path = validate_relative(path.as_ref())?;
+        let display_path = self.root.join(path);
+        let file = self
+            .root_dir
+            .open(path)
+            .map_err(|source| WorkspaceError::Io {
+                path: display_path.clone(),
+                source,
+            })?;
+        let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+        file.take(limit.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|source| WorkspaceError::Io {
+                path: display_path.clone(),
+                source,
+            })?;
+        if bytes.len() > limit {
+            return Err(WorkspaceError::FileTooLarge {
+                path: display_path,
+                limit,
+            });
+        }
+        String::from_utf8(bytes).map_err(|source| WorkspaceError::Io {
+            path: display_path,
+            source: std::io::Error::new(ErrorKind::InvalidData, source),
+        })
     }
 
     pub fn is_file(&self, path: impl AsRef<Path>) -> Result<bool, WorkspaceError> {
@@ -230,6 +286,18 @@ mod tests {
                 .unwrap()
                 .join("src/new/module.rs")
         );
+    }
+
+    #[test]
+    fn bounded_reads_reject_oversized_files() {
+        let repository = git_repository();
+        fs::write(repository.path().join("large.txt"), "12345").unwrap();
+        let workspace = Workspace::from_root(repository.path()).unwrap();
+
+        assert!(matches!(
+            workspace.read_to_string_bounded("large.txt", 4),
+            Err(WorkspaceError::FileTooLarge { limit: 4, .. })
+        ));
     }
 
     fn git_repository() -> TempDir {

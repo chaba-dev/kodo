@@ -6,7 +6,109 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
+pub const LIMITS_VERSION: u16 = 1;
+const MAX_CONNECTED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024 - 4 * 1024;
+const JSON_ESCAPE_EXPANSION: usize = 6;
+const RESPONSE_ENVELOPE_BYTES: usize = 4 * 1024;
+const RESULT_METADATA_BYTES: usize = 512;
+const MAX_LIMIT_VALUE: usize = u32::MAX as usize;
+pub const MAX_BLOCKING_TOOLS: usize = 1024;
+
+/// Phoenix-owned execution policy supplied by the authenticated channel join.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLimits {
+    pub version: u16,
+    pub max_output_bytes: usize,
+    pub max_results: usize,
+    pub max_patch_input_bytes: usize,
+    pub max_file_input_bytes: usize,
+    pub max_blocking_tools: usize,
+    pub max_retained_processes: usize,
+    pub max_process_output_chunks: usize,
+    pub max_cached_requests: usize,
+    pub max_cached_response_bytes: usize,
+}
+
+impl ExecutionLimits {
+    /// Explicit compatibility policy for the standalone stdin/stdout transport.
+    pub fn standalone() -> Self {
+        Self {
+            version: LIMITS_VERSION,
+            max_output_bytes: 256 * 1024,
+            max_results: 1_000,
+            max_patch_input_bytes: 512 * 1024,
+            max_file_input_bytes: 16 * 1024 * 1024,
+            max_blocking_tools: 8,
+            max_retained_processes: 1024,
+            max_process_output_chunks: 1024,
+            max_cached_requests: 1024,
+            max_cached_response_bytes: 16 * 1024 * 1024,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != LIMITS_VERSION {
+            return Err(format!(
+                "unsupported limits version {}; expected {LIMITS_VERSION}",
+                self.version
+            ));
+        }
+        let quotas = [
+            self.max_output_bytes,
+            self.max_results,
+            self.max_patch_input_bytes,
+            self.max_file_input_bytes,
+            self.max_blocking_tools,
+            self.max_retained_processes,
+            self.max_process_output_chunks,
+            self.max_cached_requests,
+            self.max_cached_response_bytes,
+        ];
+        if quotas.contains(&0) {
+            return Err("runner limits must be nonzero".into());
+        }
+        if quotas.into_iter().any(|quota| quota > MAX_LIMIT_VALUE) {
+            return Err("runner limits exceed the platform-independent maximum".into());
+        }
+        if self.max_blocking_tools > MAX_BLOCKING_TOOLS {
+            return Err("max_blocking_tools exceeds the supported maximum".into());
+        }
+        let maximum_response_bytes = self.maximum_encoded_response_bytes()?;
+        if maximum_response_bytes > MAX_CONNECTED_PAYLOAD_BYTES {
+            return Err("maximum encoded response exceeds the connected transport limit".into());
+        }
+        if self.max_cached_response_bytes < maximum_response_bytes {
+            return Err("response cache cannot retain one maximum-sized encoded response".into());
+        }
+        let maximum_patch_bytes = self
+            .max_patch_input_bytes
+            .checked_mul(JSON_ESCAPE_EXPANSION)
+            .and_then(|bytes| bytes.checked_add(RESPONSE_ENVELOPE_BYTES))
+            .ok_or("runner limits exceed addressable memory")?;
+        if maximum_patch_bytes > MAX_CONNECTED_PAYLOAD_BYTES {
+            return Err("maximum encoded patch exceeds the connected transport limit".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn maximum_encoded_response_bytes(&self) -> Result<usize, String> {
+        let metadata_entries = self
+            .max_results
+            .checked_add(self.max_process_output_chunks)
+            .ok_or("runner limits exceed addressable memory")?;
+        self.max_output_bytes
+            .checked_mul(JSON_ESCAPE_EXPANSION)
+            .and_then(|bytes| {
+                metadata_entries
+                    .checked_mul(RESULT_METADATA_BYTES)
+                    .and_then(|metadata| bytes.checked_add(metadata))
+            })
+            .and_then(|bytes| bytes.checked_add(RESPONSE_ENVELOPE_BYTES))
+            .ok_or_else(|| "runner limits exceed addressable memory".into())
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RequestEnvelope {
@@ -140,6 +242,38 @@ pub enum OutputStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_limits_reject_incomplete_or_invalid_policy() {
+        let limits = ExecutionLimits::standalone();
+        assert!(limits.validate().is_ok());
+
+        let mut value = serde_json::to_value(&limits).unwrap();
+        value["max_results"] = 0.into();
+        let limits: ExecutionLimits = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            limits.validate().unwrap_err(),
+            "runner limits must be nonzero"
+        );
+
+        let mut limits = ExecutionLimits::standalone();
+        limits.max_cached_response_bytes = limits.max_output_bytes;
+        assert_eq!(
+            limits.validate().unwrap_err(),
+            "response cache cannot retain one maximum-sized encoded response"
+        );
+
+        let mut limits = ExecutionLimits::standalone();
+        limits.max_blocking_tools = MAX_BLOCKING_TOOLS + 1;
+        assert_eq!(
+            limits.validate().unwrap_err(),
+            "max_blocking_tools exceeds the supported maximum"
+        );
+
+        let mut value = serde_json::to_value(ExecutionLimits::standalone()).unwrap();
+        value["unexpected"] = true.into();
+        assert!(serde_json::from_value::<ExecutionLimits>(value).is_err());
+    }
 
     #[test]
     fn request_has_a_stable_tagged_json_shape() {

@@ -154,6 +154,7 @@ The Phoenix application is responsible for:
 - running the primary agent loop and subagents;
 - dispatching tool calls to the selected runner;
 - evaluating approval policy;
+- publishing versioned runner execution limits after an authenticated channel join;
 - enforcing turn, token, cost, and timeout budgets;
 - broadcasting new events to CLI and LiveView clients;
 - recovering durable session state after a process restart.
@@ -637,12 +638,16 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 
 * Delivery milestones
 
-** TODO Milestone 1: Local tool runner
+** DONE Milestone 1: Local tool runner
 
-- [ ] Rust daemon and workspace registration.
-- [ ] Authenticated WebSocket connection to Phoenix.
+- [X] Rust daemon and workspace registration.
+- [X] Authenticated WebSocket connection to Phoenix.
+- [X] Phoenix-owned runner limits negotiated through the versioned channel join contract.
 - [X] Read, search, patch, process, and repository-inspection tools.
-- [ ] Path confinement and bounded output.
+- [X] Capability-confined direct file access, validation of model-supplied
+  filesystem, patch, and repository paths, and bounded tool and transport
+  output. Git and shell subprocesses are not OS-sandboxed and may execute
+  repository or user configuration outside the workspace security boundary.
 - [X] Command output streaming and cancellation.
 - [X] Exit criterion: typed requests issued without a model can inspect and
   modify a fixture repository, run a test, stream its output, and return the

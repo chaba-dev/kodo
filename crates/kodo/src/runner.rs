@@ -14,13 +14,11 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::process::{ProcessError, ProcessManager};
-use crate::protocol::{SearchMatch, ToolRequest, ToolResult};
+use crate::protocol::{ExecutionLimits, MAX_BLOCKING_TOOLS, SearchMatch, ToolRequest, ToolResult};
 use crate::workspace::{Workspace, WorkspaceError};
 
-const DEFAULT_MAX_OUTPUT_BYTES: usize = 256 * 1024;
-const DEFAULT_MAX_RESULTS: usize = 1_000;
-const MAX_PATCH_BYTES: usize = 1024 * 1024;
-const MAX_BLOCKING_TOOLS: usize = 8;
+// Git metadata is an implementation buffer, unlike patch input policy supplied by Phoenix.
+const MAX_GIT_METADATA_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
@@ -46,8 +44,7 @@ pub enum RunnerError {
 /// Executes the protocol tool surface within one workspace and one process registry.
 pub struct Runner {
     workspace: Workspace,
-    max_output_bytes: usize,
-    max_results: usize,
+    limits: ExecutionLimits,
     processes: ProcessManager,
     // Keep patch validation and application atomic with respect to other runner patch requests.
     mutation_lock: Arc<Mutex<()>>,
@@ -57,25 +54,43 @@ pub struct Runner {
 
 impl Runner {
     pub fn new(workspace: Workspace) -> Self {
-        Self {
-            workspace,
-            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
-            max_results: DEFAULT_MAX_RESULTS,
-            processes: ProcessManager::new(DEFAULT_MAX_OUTPUT_BYTES),
-            mutation_lock: Arc::new(Mutex::new(())),
-            blocking_tools: Arc::new(Semaphore::new(MAX_BLOCKING_TOOLS)),
-        }
+        Self::from_limits(workspace, ExecutionLimits::standalone())
+            .expect("standalone runner limits must be valid")
     }
 
+    #[cfg(test)]
     pub fn with_limits(workspace: Workspace, max_output_bytes: usize, max_results: usize) -> Self {
-        Self {
-            workspace,
-            max_output_bytes,
-            max_results,
-            processes: ProcessManager::new(max_output_bytes),
-            mutation_lock: Arc::new(Mutex::new(())),
-            blocking_tools: Arc::new(Semaphore::new(MAX_BLOCKING_TOOLS)),
+        let mut limits = ExecutionLimits::standalone();
+        limits.max_output_bytes = max_output_bytes;
+        limits.max_results = max_results;
+        Self::from_limits(workspace, limits).expect("test runner limits must be valid")
+    }
+
+    pub fn from_limits(workspace: Workspace, limits: ExecutionLimits) -> Result<Self, String> {
+        limits.validate()?;
+        if limits.max_blocking_tools > MAX_BLOCKING_TOOLS
+            || limits.max_blocking_tools > Semaphore::MAX_PERMITS
+        {
+            return Err("max_blocking_tools exceeds the runtime semaphore limit".into());
         }
+        let processes = ProcessManager::with_limits(
+            limits.max_output_bytes,
+            limits.max_retained_processes,
+            limits.max_process_output_chunks,
+        );
+        let max_blocking_tools = limits.max_blocking_tools;
+
+        Ok(Self {
+            workspace,
+            limits,
+            processes,
+            mutation_lock: Arc::new(Mutex::new(())),
+            blocking_tools: Arc::new(Semaphore::new(max_blocking_tools)),
+        })
+    }
+
+    pub(crate) fn limits(&self) -> &ExecutionLimits {
+        &self.limits
     }
 
     pub async fn execute(&self, request: ToolRequest) -> Result<ToolResult, RunnerError> {
@@ -191,10 +206,10 @@ impl Runner {
         let mut paths: Vec<_> = files.lines().map(str::to_owned).collect();
         paths.sort_unstable();
         let mut bytes = 0;
-        let mut truncated = output_truncated || paths.len() > self.max_results;
-        paths.truncate(self.max_results);
+        let mut truncated = output_truncated || paths.len() > self.limits.max_results;
+        paths.truncate(self.limits.max_results);
         paths.retain(|path| {
-            if bytes + path.len() > self.max_output_bytes {
+            if bytes + path.len() > self.limits.max_output_bytes {
                 truncated = true;
                 false
             } else {
@@ -231,7 +246,10 @@ impl Runner {
                     continue;
                 }
 
-                let Ok(content) = self.workspace.read_to_string(&path) else {
+                let Ok(content) = self
+                    .workspace
+                    .read_to_string_bounded(&path, self.limits.max_file_input_bytes)
+                else {
                     // Search is best-effort across repository files; binary and unreadable files
                     // should not prevent useful matches from other files.
                     continue;
@@ -239,16 +257,16 @@ impl Runner {
 
                 for (index, line) in content.lines().enumerate() {
                     if line.contains(query) {
-                        if matches.len() == self.max_results {
+                        if matches.len() == self.limits.max_results {
                             truncated = true;
                             break 'search;
                         }
                         let path_bytes = path.len();
-                        if output_bytes + path_bytes >= self.max_output_bytes {
+                        if output_bytes + path_bytes >= self.limits.max_output_bytes {
                             truncated = true;
                             break 'search;
                         }
-                        let remaining = self.max_output_bytes - output_bytes - path_bytes;
+                        let remaining = self.limits.max_output_bytes - output_bytes - path_bytes;
                         let (content, content_truncated) =
                             truncate_utf8(line.to_owned(), remaining);
                         matches.push(SearchMatch {
@@ -280,7 +298,9 @@ impl Runner {
                 "read_file limit must be greater than zero".into(),
             ));
         }
-        let content = self.workspace.read_to_string(path)?;
+        let content = self
+            .workspace
+            .read_to_string_bounded(path, self.limits.max_file_input_bytes)?;
         let lines: Vec<_> = content.lines().collect();
         let selected = lines
             .iter()
@@ -289,10 +309,10 @@ impl Runner {
             .copied()
             .collect::<Vec<_>>()
             .join("\n");
-        if selected.len() > self.max_output_bytes {
+        if selected.len() > self.limits.max_output_bytes {
             return Err(RunnerError::OutputLimit(format!(
                 "requested file lines exceed {} byte output limit",
-                self.max_output_bytes
+                self.limits.max_output_bytes
             )));
         }
         let next_line = offset.saturating_add(limit);
@@ -353,15 +373,18 @@ impl Runner {
         ];
 
         untracked_args.extend(relative_paths);
-        let (untracked, untracked_truncated) =
-            successful_stdout(self.git_with_limit(untracked_args, MAX_PATCH_BYTES, None)?)?;
+        let (untracked, untracked_truncated) = successful_stdout(self.git_with_limit(
+            untracked_args,
+            MAX_GIT_METADATA_BYTES,
+            None,
+        )?)?;
         if untracked_truncated {
             return Err(RunnerError::OutputLimit(
                 "untracked file list exceeds internal byte limit".into(),
             ));
         }
         for path in untracked.split('\0').filter(|path| !path.is_empty()) {
-            if content.len() >= self.max_output_bytes {
+            if content.len() >= self.limits.max_output_bytes {
                 truncated = true;
                 break;
             }
@@ -372,21 +395,23 @@ impl Runner {
                     "--no-index",
                     "--binary",
                     "--no-ext-diff",
+                    "--no-textconv",
                     "--",
                     "/dev/null",
                     path,
                 ],
-                self.max_output_bytes - content.len(),
+                self.limits.max_output_bytes - content.len(),
                 None,
             )?;
             if !matches!(output.status.code(), Some(0 | 1)) {
-                return Err(RunnerError::Git(
-                    String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-                ));
+                let (error, _) = lossy_bounded(&output.stderr, output.limit);
+                return Err(RunnerError::Git(error.trim().to_owned()));
             }
-            content.push_str(&String::from_utf8_lossy(&output.stdout));
-            truncated |= output.stdout_truncated;
-            if output.stdout_truncated {
+            let (converted, conversion_truncated) =
+                lossy_bounded(&output.stdout, self.limits.max_output_bytes - content.len());
+            content.push_str(&converted);
+            truncated |= output.stdout_truncated || conversion_truncated;
+            if output.stdout_truncated || conversion_truncated {
                 break;
             }
         }
@@ -395,9 +420,10 @@ impl Runner {
     }
 
     fn apply_patch(&self, patch: &str) -> Result<ToolResult, RunnerError> {
-        if patch.len() > MAX_PATCH_BYTES {
+        if patch.len() > self.limits.max_patch_input_bytes {
             return Err(RunnerError::Patch(format!(
-                "patch exceeds {MAX_PATCH_BYTES} byte limit"
+                "patch exceeds {} byte limit",
+                self.limits.max_patch_input_bytes
             )));
         }
         let _mutation = self
@@ -417,7 +443,7 @@ impl Runner {
     fn patch_paths(&self, patch: &str) -> Result<Vec<String>, RunnerError> {
         let output = self.git_with_limit(
             ["apply", "--numstat", "-z"],
-            MAX_PATCH_BYTES,
+            self.limits.max_patch_input_bytes,
             Some(patch.as_bytes()),
         )?;
         let stdout = successful_patch(output)?;
@@ -459,11 +485,16 @@ impl Runner {
 
         paths.sort_unstable();
         paths.dedup();
-        if paths.len() > self.max_results {
+        if paths.len() > self.limits.max_results {
             return Err(RunnerError::Patch(format!(
                 "patch affects more than {} files",
-                self.max_results
+                self.limits.max_results
             )));
+        }
+        if paths.iter().map(String::len).sum::<usize>() > self.limits.max_output_bytes {
+            return Err(RunnerError::Patch(
+                "affected patch paths exceed the output byte limit".into(),
+            ));
         }
         Ok(paths)
     }
@@ -487,7 +518,7 @@ impl Runner {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
-        self.git_with_limit(args, self.max_output_bytes, None)
+        self.git_with_limit(args, self.limits.max_output_bytes, None)
     }
 
     fn git_with_input<const N: usize>(
@@ -495,7 +526,7 @@ impl Runner {
         args: [&str; N],
         input: &str,
     ) -> Result<CapturedOutput, RunnerError> {
-        self.git_with_limit(args, self.max_output_bytes, Some(input.as_bytes()))
+        self.git_with_limit(args, self.limits.max_output_bytes, Some(input.as_bytes()))
     }
 
     fn git_with_limit<I, S>(
@@ -509,7 +540,30 @@ impl Runner {
         S: AsRef<std::ffi::OsStr>,
     {
         let mut command = Command::new("git");
-        command.args(args).current_dir(self.workspace.root());
+        // Ignore ambient Git redirection and user/system configuration. Repository configuration
+        // is still honored and is explicitly outside the MVP's OS-sandbox boundary.
+        command
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(self.workspace.root())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_ATTR_NOSYSTEM", "1");
+        for variable in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+        ] {
+            command.env_remove(variable);
+        }
         run_command(&mut command, input, limit).map_err(RunnerError::GitIo)
     }
 
@@ -543,16 +597,16 @@ struct CapturedOutput {
     stderr: Vec<u8>,
     stdout_truncated: bool,
     stderr_truncated: bool,
+    limit: usize,
 }
 
 fn successful_stdout(output: CapturedOutput) -> Result<(String, bool), RunnerError> {
     if output.status.success() {
-        Ok((
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-            output.stdout_truncated,
-        ))
+        let (content, conversion_truncated) = lossy_bounded(&output.stdout, output.limit);
+        Ok((content, output.stdout_truncated || conversion_truncated))
     } else {
-        let mut error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let (error, _) = lossy_bounded(&output.stderr, output.limit);
+        let mut error = error.trim().to_owned();
         if output.stderr_truncated {
             error.push_str("\n[stderr truncated]");
         }
@@ -569,7 +623,8 @@ fn successful_patch(output: CapturedOutput) -> Result<Vec<u8>, RunnerError> {
         }
         Ok(output.stdout)
     } else {
-        let mut error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let (error, _) = lossy_bounded(&output.stderr, output.limit);
+        let mut error = error.trim().to_owned();
         if output.stderr_truncated {
             error.push_str("\n[stderr truncated]");
         }
@@ -621,7 +676,13 @@ fn run_command(
         stderr,
         stdout_truncated,
         stderr_truncated,
+        limit,
     })
+}
+
+fn lossy_bounded(bytes: &[u8], limit: usize) -> (String, bool) {
+    // Lossy UTF-8 decoding may expand one invalid input byte into a three-byte replacement scalar.
+    truncate_utf8(String::from_utf8_lossy(bytes).into_owned(), limit)
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> Result<(Vec<u8>, bool), std::io::Error> {
@@ -842,6 +903,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_patch_paths_that_cannot_fit_in_the_result() {
+        let repository = repository();
+        let runner = Runner::with_limits(Workspace::from_root(repository.path()).unwrap(), 4, 100);
+        let patch = "diff --git a/long.txt b/long.txt\nnew file mode 100644\n--- /dev/null\n+++ b/long.txt\n@@ -0,0 +1 @@\n+content\n";
+
+        let error = runner
+            .execute(ToolRequest::ApplyPatch {
+                patch: patch.into(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("affected patch paths"));
+        assert!(!repository.path().join("long.txt").exists());
+    }
+
+    #[tokio::test]
     async fn applying_a_rename_reports_source_and_destination_paths() {
         let repository = repository();
         fs::write(repository.path().join("old.txt"), "content\n").unwrap();
@@ -943,6 +1021,14 @@ mod tests {
         .expect("command did not finish");
 
         assert_eq!(output, "runner-output");
+    }
+
+    #[test]
+    fn lossy_git_output_remains_within_the_logical_byte_limit() {
+        let (content, truncated) = lossy_bounded(&[0xff, 0xff], 4);
+
+        assert!(content.len() <= 4);
+        assert!(truncated);
     }
 
     fn runner(repository: &TempDir) -> Runner {
