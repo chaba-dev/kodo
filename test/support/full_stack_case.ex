@@ -8,6 +8,7 @@ defmodule Kodo.Test.FullStackCase do
   @session_timeout 30_000
   @http_timeout 10_000
   @http_ok_status 200
+  @successful_command_exit_code 0
 
   def start_stack! do
     port = free_port!()
@@ -84,7 +85,10 @@ defmodule Kodo.Test.FullStackCase do
 
     assert Enum.any?(completed_tools, fn payload ->
              payload["name"] in ["poll_command", "stop_command"] and
-               match?(%{"exited" => %{"code" => 0}}, payload["output"]["status"])
+               match?(
+                 %{"exited" => %{"code" => @successful_command_exit_code}},
+                 payload["output"]["status"]
+               )
            end)
   end
 
