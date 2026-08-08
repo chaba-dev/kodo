@@ -1,4 +1,6 @@
 defmodule KodoWeb.UserAuth do
+  @moduledoc "Authenticates browser sessions, LiveViews, and agent API requests."
+
   use KodoWeb, :verified_routes
 
   import Plug.Conn

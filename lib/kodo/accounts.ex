@@ -199,9 +199,8 @@ defmodule Kodo.Accounts do
 
   @doc "Gets the user authenticated by an agent bearer token."
   def get_user_by_agent_token(token) when is_binary(token) do
-    with {:ok, query} <- UserToken.verify_agent_token_query(token) do
-      Repo.one(query)
-    else
+    case UserToken.verify_agent_token_query(token) do
+      {:ok, query} -> Repo.one(query)
       :error -> nil
     end
   end

@@ -1,4 +1,6 @@
 defmodule Kodo.Accounts.UserNotifier do
+  @moduledoc "Delivers transactional account emails."
+
   import Swoosh.Email
 
   alias Kodo.Mailer

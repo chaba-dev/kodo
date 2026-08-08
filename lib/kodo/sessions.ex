@@ -21,9 +21,8 @@ defmodule Kodo.Sessions do
   end
 
   def get_session(%Scope{user: user}, id) do
-    with {:ok, id} <- Ecto.UUID.cast(id) do
-      Repo.get_by(Session, id: id, user_id: user.id)
-    else
+    case Ecto.UUID.cast(id) do
+      {:ok, id} -> Repo.get_by(Session, id: id, user_id: user.id)
       :error -> nil
     end
   end
