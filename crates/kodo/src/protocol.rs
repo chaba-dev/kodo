@@ -68,20 +68,7 @@ impl ExecutionLimits {
         {
             return Err("runner limits must be nonzero".into());
         }
-        let metadata_entries = self
-            .max_results
-            .checked_add(self.max_process_output_chunks)
-            .ok_or("runner limits exceed addressable memory")?;
-        let maximum_response_bytes = self
-            .max_output_bytes
-            .checked_mul(JSON_ESCAPE_EXPANSION)
-            .and_then(|bytes| {
-                metadata_entries
-                    .checked_mul(RESULT_METADATA_BYTES)
-                    .and_then(|metadata| bytes.checked_add(metadata))
-            })
-            .and_then(|bytes| bytes.checked_add(RESPONSE_ENVELOPE_BYTES))
-            .ok_or("runner limits exceed addressable memory")?;
+        let maximum_response_bytes = self.maximum_encoded_response_bytes()?;
         if maximum_response_bytes > MAX_CONNECTED_PAYLOAD_BYTES {
             return Err("maximum encoded response exceeds the connected transport limit".into());
         }
@@ -97,6 +84,22 @@ impl ExecutionLimits {
             return Err("maximum encoded patch exceeds the connected transport limit".into());
         }
         Ok(())
+    }
+
+    pub(crate) fn maximum_encoded_response_bytes(&self) -> Result<usize, String> {
+        let metadata_entries = self
+            .max_results
+            .checked_add(self.max_process_output_chunks)
+            .ok_or("runner limits exceed addressable memory")?;
+        self.max_output_bytes
+            .checked_mul(JSON_ESCAPE_EXPANSION)
+            .and_then(|bytes| {
+                metadata_entries
+                    .checked_mul(RESULT_METADATA_BYTES)
+                    .and_then(|metadata| bytes.checked_add(metadata))
+            })
+            .and_then(|bytes| bytes.checked_add(RESPONSE_ENVELOPE_BYTES))
+            .ok_or_else(|| "runner limits exceed addressable memory".into())
     }
 }
 

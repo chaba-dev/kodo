@@ -25,6 +25,7 @@ pub(crate) struct Dispatcher {
     cache: Arc<StdMutex<ResponseCache>>,
     max_cached_requests: usize,
     max_cached_response_bytes: usize,
+    max_error_bytes: usize,
 }
 
 #[derive(Default)]
@@ -47,11 +48,13 @@ impl Dispatcher {
     pub(crate) fn new(runner: Runner) -> Self {
         let max_cached_requests = runner.limits().max_cached_requests;
         let max_cached_response_bytes = runner.limits().max_cached_response_bytes;
+        let max_error_bytes = runner.limits().max_output_bytes;
         Self {
             runner,
             cache: Arc::new(StdMutex::new(ResponseCache::default())),
             max_cached_requests,
             max_cached_response_bytes,
+            max_error_bytes,
         }
     }
 
@@ -99,6 +102,7 @@ impl Dispatcher {
         let runner = self.runner.clone();
         let cache = Arc::clone(&self.cache);
         let max_cached_response_bytes = self.max_cached_response_bytes;
+        let max_error_bytes = self.max_error_bytes;
         tokio::spawn(async move {
             // Execution outlives any transport waiter so reconnect retries cannot duplicate a
             // blocking mutation whose original WebSocket disappeared.
@@ -111,7 +115,9 @@ impl Dispatcher {
                 Err(error) => ResponseEnvelope::Error {
                     protocol_version: PROTOCOL_VERSION,
                     request_id: Some(request.request_id),
-                    error: error.to_string(),
+                    // Request-derived paths can make errors arbitrarily large; keep failures under
+                    // the same policy budget as successful tool content before caching/transport.
+                    error: truncate_utf8(error.to_string(), max_error_bytes),
                 },
             };
 
@@ -135,6 +141,18 @@ impl Dispatcher {
             }
         });
     }
+}
+
+fn truncate_utf8(mut content: String, max_bytes: usize) -> String {
+    if content.len() <= max_bytes {
+        return content;
+    }
+    let mut end = max_bytes;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content.truncate(end);
+    content
 }
 
 async fn wait_for_response(slot: Arc<ResponseSlot>) -> String {
@@ -320,7 +338,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::protocol::{ToolRequest, ToolResult};
+    use crate::protocol::{ExecutionLimits, ToolRequest, ToolResult};
     use crate::workspace::Workspace;
 
     #[tokio::test]
@@ -422,6 +440,48 @@ mod tests {
         let retry = handle_line(&dispatcher, &request).await;
 
         assert_eq!(retry, first);
+    }
+
+    #[tokio::test]
+    async fn bounded_errors_remain_in_the_smallest_valid_replay_cache() {
+        let repository = git_repository();
+        let mut limits = ExecutionLimits::standalone();
+        limits.max_output_bytes = 32;
+        limits.max_results = 1;
+        limits.max_process_output_chunks = 1;
+        limits.max_cached_response_bytes = limits.maximum_encoded_response_bytes().unwrap();
+        let runner =
+            Runner::from_limits(Workspace::from_root(repository.path()).unwrap(), limits).unwrap();
+        let dispatcher = Dispatcher::new(runner);
+        let request_id = Uuid::new_v4();
+        let request = RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            request: ToolRequest::ReadFile {
+                path: format!("/{}", "x".repeat(10_000)),
+                offset: 0,
+                limit: 1,
+            },
+        };
+
+        let response = dispatcher.dispatch(request.clone()).await;
+        let retry = dispatcher.dispatch(request).await;
+        let ResponseEnvelope::Error { error, .. } =
+            serde_json::from_str::<ResponseEnvelope>(&response).unwrap()
+        else {
+            panic!("expected path validation error");
+        };
+
+        assert!(error.len() <= 32);
+        assert_eq!(retry, response);
+        assert!(
+            dispatcher
+                .cache
+                .lock()
+                .unwrap()
+                .slots
+                .contains_key(&request_id)
+        );
     }
 
     #[tokio::test]
