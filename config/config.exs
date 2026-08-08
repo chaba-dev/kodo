@@ -9,7 +9,13 @@ import Config
 
 config :kodo,
   ecto_repos: [Kodo.Repo],
-  generators: [timestamp_type: :utc_datetime]
+  generators: [timestamp_type: :utc_datetime],
+  agent_budgets: [
+    max_continuations: 8,
+    max_tokens: 100_000,
+    model_timeout: 60_000,
+    tool_timeout: 60_000
+  ]
 
 # Phoenix messages are capped at the cross-language protocol limit. Bandit counts the largest
 # possible WebSocket header in its frame size, while fragmented-message size counts payload bytes.
