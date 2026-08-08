@@ -9,6 +9,9 @@ defmodule Kodo.Agent.Loop do
   alias Kodo.Sessions.Projection
 
   @protocol_version RunnerProtocol.version()
+  @first_continuation 1
+  @continuation_step 1
+  @no_tokens 0
 
   def run(session_id, opts \\ []) do
     projection = session_id |> Sessions.events_after() |> Projection.from_events()
@@ -16,12 +19,21 @@ defmodule Kodo.Agent.Loop do
     adapter = Keyword.get(opts, :adapter, LLM.adapter())
     messages = [%{"role" => "system", "content" => system_prompt()} | projection.messages]
 
-    with {:ok, invocation_id} <- start_invocation(session_id, 1),
+    with {:ok, invocation_id} <- start_invocation(session_id, @first_continuation),
          {:ok, response} <-
            adapter.generate(projection.model, messages, Tools.definitions(),
              timeout: budgets[:model_timeout]
            ) do
-      continue(session_id, projection, adapter, response, invocation_id, budgets, 1, 0)
+      continue(
+        session_id,
+        projection,
+        adapter,
+        response,
+        invocation_id,
+        budgets,
+        @first_continuation,
+        @no_tokens
+      )
     end
   end
 
@@ -75,6 +87,8 @@ defmodule Kodo.Agent.Loop do
          continuation,
          tokens
        ) do
+    next_continuation = continuation + @continuation_step
+
     with {:ok, results} <-
            execute_tools(
              session_id,
@@ -83,7 +97,7 @@ defmodule Kodo.Agent.Loop do
              response.tool_calls,
              budgets
            ),
-         {:ok, next_invocation_id} <- start_invocation(session_id, continuation + 1),
+         {:ok, next_invocation_id} <- start_invocation(session_id, next_continuation),
          {:ok, next_response} <-
            adapter.continue(
              projection.model,
@@ -99,7 +113,7 @@ defmodule Kodo.Agent.Loop do
         next_response,
         next_invocation_id,
         budgets,
-        continuation + 1,
+        next_continuation,
         tokens
       )
     end
@@ -285,8 +299,10 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp token_count(nil), do: 0
-  defp token_count(usage), do: usage[:total_tokens] || usage["total_tokens"] || 0
+  defp token_count(nil), do: @no_tokens
+
+  defp token_count(usage),
+    do: usage[:total_tokens] || usage["total_tokens"] || @no_tokens
 
   defp system_prompt do
     "You are Kodo's primary coding agent. Inspect evidence, make the smallest correct patch, and verify it."

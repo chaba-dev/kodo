@@ -4,13 +4,19 @@ defmodule Kodo.Sessions.Event do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @event_type_max_length 64
+  @event_source_max_length 32
+  @initial_event_version 1
+  @minimum_positive_value 0
+  @minimum_text_length 1
+
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
 
   schema "session_events" do
     field :sequence, :integer
     field :type, :string
-    field :version, :integer, default: 1
+    field :version, :integer, default: @initial_event_version
     field :payload, :map, default: %{}
     field :source, :string
     field :parent_id, :binary_id
@@ -24,10 +30,10 @@ defmodule Kodo.Sessions.Event do
     event
     |> cast(attrs, [:session_id, :sequence, :type, :version, :payload, :source, :parent_id])
     |> validate_required([:session_id, :sequence, :type, :version, :payload, :source])
-    |> validate_number(:sequence, greater_than: 0)
-    |> validate_number(:version, greater_than: 0)
-    |> validate_length(:type, min: 1, max: 64)
-    |> validate_length(:source, min: 1, max: 32)
+    |> validate_number(:sequence, greater_than: @minimum_positive_value)
+    |> validate_number(:version, greater_than: @minimum_positive_value)
+    |> validate_length(:type, min: @minimum_text_length, max: @event_type_max_length)
+    |> validate_length(:source, min: @minimum_text_length, max: @event_source_max_length)
     |> foreign_key_constraint(:session_id)
     |> unique_constraint([:session_id, :sequence])
   end

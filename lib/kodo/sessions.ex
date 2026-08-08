@@ -7,6 +7,11 @@ defmodule Kodo.Sessions do
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Session
 
+  @before_first_event_sequence 0
+  @initial_event_version 1
+  @single_event_increment 1
+  @single_updated_row 1
+
   def get_session(id) do
     with {:ok, id} <- Ecto.UUID.cast(id) do
       Repo.get(Session, id)
@@ -87,7 +92,8 @@ defmodule Kodo.Sessions do
     end
   end
 
-  def events_after(session_id, sequence \\ 0) when is_integer(sequence) and sequence >= 0 do
+  def events_after(session_id, sequence \\ @before_first_event_sequence)
+      when is_integer(sequence) and sequence >= @before_first_event_sequence do
     Event
     |> where([event], event.session_id == ^session_id and event.sequence > ^sequence)
     |> order_by([event], asc: event.sequence)
@@ -177,17 +183,17 @@ defmodule Kodo.Sessions do
       session_id: session.id,
       sequence: session.next_event_sequence,
       type: type,
-      version: Keyword.get(opts, :version, 1),
+      version: Keyword.get(opts, :version, @initial_event_version),
       payload: payload,
       source: Keyword.get(opts, :source, "agent"),
       parent_id: Keyword.get(opts, :parent_id)
     }
 
     with {:ok, event} <- %Event{} |> Event.changeset(attrs) |> Repo.insert(),
-         {1, nil} <-
+         {@single_updated_row, nil} <-
            Session
            |> where([record], record.id == ^session.id)
-           |> Repo.update_all(inc: [next_event_sequence: 1]) do
+           |> Repo.update_all(inc: [next_event_sequence: @single_event_increment]) do
       {:ok, event}
     end
   end

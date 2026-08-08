@@ -1,13 +1,15 @@
 defmodule Kodo.Sessions.Projection do
   @moduledoc "Reconstructs all agent-visible session state solely from persisted events."
 
+  @before_first_event_sequence 0
+
   defstruct [
     :id,
     :title,
     :runner_id,
     :model,
     status: "idle",
-    last_sequence: 0,
+    last_sequence: @before_first_event_sequence,
     messages: [],
     tool_calls: %{}
   ]

@@ -5,6 +5,8 @@ defmodule KodoWeb.SessionController do
 
   alias Kodo.Sessions
 
+  @before_first_event_sequence 0
+
   def create(conn, params) do
     case Sessions.create_session(params) do
       {:ok, session} ->
@@ -38,8 +40,7 @@ defmodule KodoWeb.SessionController do
     end
   end
 
-  def message(conn, %{"id" => id, "content" => content})
-      when is_binary(content) and byte_size(content) > 0 do
+  def message(conn, %{"id" => id, "content" => content}) when is_binary(content) do
     content = String.trim(content)
 
     if content == "" do
@@ -107,11 +108,11 @@ defmodule KodoWeb.SessionController do
     }
   end
 
-  defp cursor(nil), do: {:ok, 0}
+  defp cursor(nil), do: {:ok, @before_first_event_sequence}
 
   defp cursor(value) when is_binary(value) do
     case Integer.parse(value) do
-      {cursor, ""} when cursor >= 0 -> {:ok, cursor}
+      {cursor, ""} when cursor >= @before_first_event_sequence -> {:ok, cursor}
       _ -> :error
     end
   end

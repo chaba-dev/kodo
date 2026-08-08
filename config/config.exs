@@ -7,14 +7,19 @@
 # General application configuration
 import Config
 
+default_max_continuations = 8
+default_max_tokens = 100_000
+default_model_timeout_ms = 60_000
+default_tool_timeout_ms = 60_000
+
 config :kodo,
   ecto_repos: [Kodo.Repo],
   generators: [timestamp_type: :utc_datetime],
   agent_budgets: [
-    max_continuations: 8,
-    max_tokens: 100_000,
-    model_timeout: 60_000,
-    tool_timeout: 60_000
+    max_continuations: default_max_continuations,
+    max_tokens: default_max_tokens,
+    model_timeout: default_model_timeout_ms,
+    tool_timeout: default_tool_timeout_ms
   ]
 
 # Phoenix messages are capped at the cross-language protocol limit. Bandit counts the largest

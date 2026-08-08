@@ -5,6 +5,9 @@ defmodule Kodo.Sessions.Session do
   import Ecto.Changeset
 
   @statuses ~w(idle running awaiting_approval completed failed cancelled)
+  @display_name_max_length 255
+  @minimum_text_length 1
+  @first_event_sequence 1
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
@@ -13,7 +16,7 @@ defmodule Kodo.Sessions.Session do
     field :title, :string
     field :status, :string, default: "idle"
     field :model, :string
-    field :next_event_sequence, :integer, default: 1
+    field :next_event_sequence, :integer, default: @first_event_sequence
 
     belongs_to :runner, Kodo.Runners.Runner
 
@@ -24,8 +27,8 @@ defmodule Kodo.Sessions.Session do
     session
     |> cast(attrs, [:runner_id, :title, :model])
     |> validate_required([:runner_id, :title, :model])
-    |> validate_length(:title, min: 1, max: 255)
-    |> validate_length(:model, min: 1, max: 255)
+    |> validate_length(:title, min: @minimum_text_length, max: @display_name_max_length)
+    |> validate_length(:model, min: @minimum_text_length, max: @display_name_max_length)
     |> foreign_key_constraint(:runner_id)
   end
 

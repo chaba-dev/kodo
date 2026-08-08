@@ -3,7 +3,9 @@ defmodule Kodo.Agent.Tools do
 
   @object %{"type" => "object", "additionalProperties" => false}
   @string %{"type" => "string"}
-  @integer %{"type" => "integer", "minimum" => 0}
+  @minimum_zero_based_value 0
+  @minimum_positive_count 1
+  @integer %{"type" => "integer", "minimum" => @minimum_zero_based_value}
 
   def definitions do
     [
@@ -63,8 +65,8 @@ defmodule Kodo.Agent.Tools do
        do: strings(paths, args, ["paths", "query"], "search_code")
 
   defp translate("read_file", %{"path" => path, "offset" => offset, "limit" => limit} = args)
-       when is_binary(path) and is_integer(offset) and offset >= 0 and is_integer(limit) and
-              limit > 0,
+       when is_binary(path) and is_integer(offset) and offset >= @minimum_zero_based_value and
+              is_integer(limit) and limit >= @minimum_positive_count,
        do: exact(args, ["limit", "offset", "path"], "read_file")
 
   defp translate("git_status", args), do: exact(args, [], "git_status")
@@ -79,12 +81,13 @@ defmodule Kodo.Agent.Tools do
          "start_command",
          %{"command" => command, "cwd" => cwd, "timeout_ms" => timeout} = args
        )
-       when is_binary(command) and is_binary(cwd) and is_integer(timeout) and timeout >= 0,
+       when is_binary(command) and is_binary(cwd) and is_integer(timeout) and
+              timeout >= @minimum_zero_based_value,
        do: exact(args, ["command", "cwd", "timeout_ms"], "start_command")
 
   defp translate(name, %{"process_id" => process_id, "after_sequence" => sequence} = args)
        when name in ["poll_command", "stop_command"] and is_binary(process_id) and
-              is_integer(sequence) and sequence >= 0 do
+              is_integer(sequence) and sequence >= @minimum_zero_based_value do
     with {:ok, process_id} <- Ecto.UUID.cast(process_id),
          {:ok, request} <- exact(args, ["after_sequence", "process_id"], name) do
       {:ok, %{request | "process_id" => process_id}}
