@@ -45,10 +45,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             control_plane: control_plane_url,
         } => {
             let workspace = Workspace::discover(workspace)?;
-            let runner = Runner::new(workspace.clone());
             if let Some(url) = control_plane_url {
-                control_plane::serve(&url, &workspace, runner).await?;
+                control_plane::serve(&url, &workspace).await?;
             } else {
+                let runner = Runner::new(workspace);
                 daemon::serve_stdio(&runner).await?;
             }
         }

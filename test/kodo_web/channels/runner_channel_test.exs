@@ -56,7 +56,7 @@ defmodule KodoWeb.RunnerChannelTest do
     assert {:ok, socket} = connect(RunnerSocket, %{"token" => token}, connect_options())
 
     assert {:error, %{reason: _}} =
-             subscribe_and_join(socket, "runner:#{runner.id}", %{"protocol_version" => 1})
+             subscribe_and_join(socket, "runner:#{runner.id}", %{"protocol_version" => 2})
   end
 
   test "duplicate active connection is rejected", %{runner: runner, token: token} do

@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::time::{Instant, interval_at, sleep};
-use tokio_tungstenite::{connect_async_with_config, tungstenite};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite};
 use url::{Host, Url};
 
 use crate::daemon::{Dispatcher, MAX_IN_FLIGHT_REQUESTS};
-use crate::protocol::{PROTOCOL_VERSION, RequestEnvelope};
+use crate::protocol::{ExecutionLimits, PROTOCOL_VERSION, RequestEnvelope};
 use crate::runner::Runner;
 use crate::workspace::Workspace;
 
@@ -50,6 +50,10 @@ pub enum ControlPlaneError {
     Registration(String),
     #[error("control-plane transport failed: {0}")]
     Transport(String),
+    #[error("control-plane supplied invalid runner limits: {0}")]
+    Configuration(String),
+    #[error("runner limits changed; restart the daemon to begin a new policy epoch")]
+    PolicyChanged,
 }
 
 #[derive(Serialize)]
@@ -138,11 +142,7 @@ fn required_string(value: Value, field: &str) -> Result<String, ControlPlaneErro
 }
 
 /// Register the workspace and maintain its authenticated loopback control-plane connection.
-pub async fn serve(
-    base: &str,
-    workspace: &Workspace,
-    runner: Runner,
-) -> Result<(), ControlPlaneError> {
+pub async fn serve(base: &str, workspace: &Workspace) -> Result<(), ControlPlaneError> {
     let base = validate_base_url(base)?;
     let root = workspace.root().to_str().ok_or_else(|| {
         ControlPlaneError::Registration("canonical workspace root is not UTF-8".into())
@@ -151,10 +151,10 @@ pub async fn serve(
         .https_only(base.scheme() == "https")
         .build()
         .map_err(|e| ControlPlaneError::Registration(e.to_string()))?;
-    let dispatcher = Dispatcher::new(runner);
-    // Registration survives ordinary reconnects, while the dispatcher survives every reconnect so
-    // retries with the same request ID observe the original execution.
+    // Registration and policy are separate: credentials may refresh without discarding running
+    // commands, request elections, or cached mutation responses from the current policy epoch.
     let mut registration = None;
+    let mut runtime: Option<(ExecutionLimits, Dispatcher)> = None;
     let mut backoff = INITIAL_RECONNECT_DELAY;
     loop {
         if registration.is_none() {
@@ -174,16 +174,40 @@ pub async fn serve(
         let registered = registration
             .as_ref()
             .expect("registration is established above");
-        match connect_once(&base, registered, dispatcher.clone()).await {
-            Ok(()) => backoff = INITIAL_RECONNECT_DELAY,
+        let (socket, limits) = match connect_and_join(&base, registered).await {
+            Ok(joined) => joined,
             Err(ConnectError::AuthRejected) => {
                 registration = None;
                 backoff = INITIAL_RECONNECT_DELAY;
+                // Avoid a tight register/auth loop if the control plane persistently rejects tokens.
+                sleep(backoff).await;
+                continue;
+            }
+            Err(ConnectError::Other(error @ ControlPlaneError::Configuration(_))) => {
+                return Err(error);
             }
             Err(ConnectError::Other(error)) => {
-                eprintln!("kodo: control-plane connection lost: {error}")
+                eprintln!("kodo: control-plane connection lost: {error}");
+                sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_RECONNECT_DELAY);
+                continue;
             }
+        };
+        let dispatcher = match &runtime {
+            Some((current, dispatcher)) if current == &limits => dispatcher.clone(),
+            Some(_) => return Err(ControlPlaneError::PolicyChanged),
+            None => {
+                let runner = Runner::from_limits(workspace.clone(), limits.clone())
+                    .map_err(ControlPlaneError::Configuration)?;
+                let dispatcher = Dispatcher::new(runner);
+                runtime = Some((limits, dispatcher.clone()));
+                dispatcher
+            }
+        };
+        if let Err(error) = channel_loop(socket, registered, dispatcher).await {
+            eprintln!("kodo: control-plane connection lost: {error}");
         }
+        backoff = INITIAL_RECONNECT_DELAY;
         sleep(backoff).await;
         backoff = (backoff * 2).min(MAX_RECONNECT_DELAY);
     }
@@ -297,11 +321,12 @@ enum ConnectError {
     Other(ControlPlaneError),
 }
 
-async fn connect_once(
+type ControlSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn connect_and_join(
     base: &Url,
     registration: &Registration,
-    dispatcher: Dispatcher,
-) -> Result<(), ConnectError> {
+) -> Result<(ControlSocket, ExecutionLimits), ConnectError> {
     let mut socket_url = base.clone();
     socket_url
         .set_scheme(if base.scheme() == "https" {
@@ -340,13 +365,68 @@ async fn connect_once(
             )));
         }
     };
-    channel_loop(socket, registration, dispatcher)
+    join(socket, registration)
         .await
         .map_err(ConnectError::Other)
 }
 
 fn redact_error(error: impl std::fmt::Display, token: &str) -> String {
     error.to_string().replace(token, "[REDACTED]")
+}
+
+async fn join<S>(
+    mut socket: WebSocketStream<S>,
+    registration: &Registration,
+) -> Result<(WebSocketStream<S>, ExecutionLimits), ControlPlaneError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    send(
+        &mut socket,
+        Frame {
+            join_ref: Some(JOIN_REFERENCE.into()),
+            reference: Some(JOIN_REFERENCE.into()),
+            topic: registration.topic.clone(),
+            event: "phx_join".into(),
+            payload: json!({"protocol_version": PROTOCOL_VERSION}),
+        },
+    )
+    .await?;
+
+    while let Some(message) = socket.next().await {
+        let message = message.map_err(|error| ControlPlaneError::Transport(error.to_string()))?;
+        if let tungstenite::Message::Text(text) = message {
+            let frame = Frame::parse(&text)?;
+            if frame.topic == registration.topic
+                && frame.event == "phx_reply"
+                && frame.reference.as_deref() == Some(JOIN_REFERENCE)
+            {
+                return Ok((socket, parse_join_limits(frame.payload)?));
+            }
+            if matches!(frame.event.as_str(), "phx_error" | "phx_close") {
+                return Err(ControlPlaneError::Transport("channel join rejected".into()));
+            }
+        }
+    }
+    Err(ControlPlaneError::Transport(
+        "connection closed before channel join completed".into(),
+    ))
+}
+
+fn parse_join_limits(payload: Value) -> Result<ExecutionLimits, ControlPlaneError> {
+    if payload.get("status").and_then(Value::as_str) != Some("ok") {
+        return Err(ControlPlaneError::Transport("channel join rejected".into()));
+    }
+    let value = payload
+        .pointer("/response/limits")
+        .cloned()
+        .ok_or_else(|| ControlPlaneError::Configuration("join response omitted limits".into()))?;
+    let limits: ExecutionLimits = serde_json::from_value(value)
+        .map_err(|error| ControlPlaneError::Configuration(error.to_string()))?;
+    limits
+        .validate()
+        .map_err(ControlPlaneError::Configuration)?;
+    Ok(limits)
 }
 
 async fn channel_loop<S>(
@@ -358,18 +438,6 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let join_ref = JOIN_REFERENCE.to_owned();
-    send(
-        &mut socket,
-        Frame {
-            join_ref: Some(join_ref.clone()),
-            reference: Some(JOIN_REFERENCE.into()),
-            topic: registration.topic.clone(),
-            event: "phx_join".into(),
-            payload: json!({"protocol_version": PROTOCOL_VERSION}),
-        },
-    )
-    .await?;
-    let mut joined = false;
     let mut next_ref = FIRST_HEARTBEAT_REFERENCE;
     let mut heartbeat = interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
     let mut requests = FuturesUnordered::new();
@@ -381,11 +449,8 @@ where
                 let message = message.map_err(|e| ControlPlaneError::Transport(e.to_string()))?;
                 if let tungstenite::Message::Text(text) = message {
                     let frame = Frame::parse(&text)?;
-                    if frame.topic == registration.topic && frame.event == "phx_reply" && frame.reference.as_deref() == Some(JOIN_REFERENCE) {
-                        joined = frame.payload.get("status").and_then(Value::as_str) == Some("ok");
-                        if !joined { return Err(ControlPlaneError::Transport("channel join rejected".into())); }
-                    } else if matches!(frame.event.as_str(), "phx_error" | "phx_close") { return Ok(()); }
-                    else if joined && frame.topic == registration.topic && frame.event == "tool_request" {
+                    if matches!(frame.event.as_str(), "phx_error" | "phx_close") { return Ok(()); }
+                    else if frame.topic == registration.topic && frame.event == "tool_request" {
                         // The protocol request ID, not the Phoenix ref, provides idempotent replay.
                         let request: RequestEnvelope = serde_json::from_value(frame.payload).map_err(|e| ControlPlaneError::Transport(format!("invalid tool request: {e}")))?;
                         let dispatcher = dispatcher.clone();
@@ -456,6 +521,30 @@ mod tests {
                 .as_deref(),
             Some("2")
         );
+    }
+
+    #[test]
+    fn join_requires_a_complete_valid_limits_contract() {
+        let expected = ExecutionLimits::standalone();
+        let payload = json!({
+            "status": "ok",
+            "response": {"limits": expected}
+        });
+        assert_eq!(parse_join_limits(payload).unwrap(), expected);
+
+        let missing = json!({"status": "ok", "response": {}});
+        assert!(matches!(
+            parse_join_limits(missing),
+            Err(ControlPlaneError::Configuration(_))
+        ));
+
+        let mut invalid = serde_json::to_value(ExecutionLimits::standalone()).unwrap();
+        invalid["max_output_bytes"] = 0.into();
+        let invalid = json!({"status": "ok", "response": {"limits": invalid}});
+        assert!(matches!(
+            parse_join_limits(invalid),
+            Err(ControlPlaneError::Configuration(_))
+        ));
     }
 
     #[test]

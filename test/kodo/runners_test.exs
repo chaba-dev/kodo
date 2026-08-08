@@ -20,7 +20,7 @@ defmodule Kodo.RunnersTest do
   end
 
   test "registration rejects unsupported protocol versions" do
-    assert {:error, changeset} = Runners.register(%{@valid | protocol_version: 1})
+    assert {:error, changeset} = Runners.register(%{@valid | protocol_version: 2})
     assert "must be equal to 3" in errors_on(changeset).protocol_version
   end
 

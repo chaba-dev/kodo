@@ -154,6 +154,7 @@ The Phoenix application is responsible for:
 - running the primary agent loop and subagents;
 - dispatching tool calls to the selected runner;
 - evaluating approval policy;
+- publishing versioned runner execution limits after an authenticated channel join;
 - enforcing turn, token, cost, and timeout budgets;
 - broadcasting new events to CLI and LiveView clients;
 - recovering durable session state after a process restart.
@@ -641,6 +642,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 
 - [X] Rust daemon and workspace registration.
 - [X] Authenticated WebSocket connection to Phoenix.
+- [X] Phoenix-owned runner limits negotiated through the versioned channel join contract.
 - [X] Read, search, patch, process, and repository-inspection tools.
 - [X] Capability-confined direct file access, validation of model-supplied
   filesystem, patch, and repository paths, and bounded tool and transport
