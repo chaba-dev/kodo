@@ -14,10 +14,25 @@ defmodule Kodo.RunnersTest do
   }
 
   test "registration upserts the reported workspace identity with a stable id" do
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "runners")
+
     assert {:ok, first} = Runners.register(@valid)
+    assert_receive {:runner_registered, ^first}
+
     assert {:ok, second} = Runners.register(%{@valid | runner_version: "0.2.0"})
+    assert_receive {:runner_registered, ^second}
     assert first.id == second.id
     assert second.runner_version == "0.2.0"
+  end
+
+  test "connection updates publish runner readiness" do
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "runners")
+    {:ok, runner} = Runners.register(%{@valid | workspace_root: "/work/connected"})
+    assert_receive {:runner_registered, ^runner}
+
+    assert {:ok, connected} = Runners.connected(runner)
+    assert_receive {:runner_connected, ^connected}
+    assert connected.last_connected_at
   end
 
   test "registration rejects unsupported protocol versions" do
