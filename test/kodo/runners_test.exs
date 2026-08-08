@@ -1,6 +1,7 @@
 defmodule Kodo.RunnersTest do
   use Kodo.DataCase
 
+  alias Kodo.RunnerProtocol
   alias Kodo.Runners
 
   @valid %{
@@ -28,5 +29,13 @@ defmodule Kodo.RunnersTest do
     payload = %{"content" => String.duplicate("x", 4 * 1024 * 1024)}
 
     assert {:error, :invalid_request} = Runners.dispatch(Ecto.UUID.generate(), payload)
+  end
+
+  test "runner policy fails fast when its replay cache cannot retain a response" do
+    invalid = %{RunnerProtocol.limits() | max_cached_response_bytes: 1}
+
+    assert_raise ArgumentError, "runner limits exceed transport or replay-cache budgets", fn ->
+      RunnerProtocol.validate_limits!(invalid)
+    end
   end
 end

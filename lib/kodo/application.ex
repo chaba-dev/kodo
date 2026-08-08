@@ -7,6 +7,9 @@ defmodule Kodo.Application do
 
   @impl true
   def start(_type, _args) do
+    # Do not advertise a policy that connected runners must reject after authenticating.
+    _limits = Kodo.RunnerProtocol.validate_limits!()
+
     children = [
       KodoWeb.Telemetry,
       Kodo.Repo,
