@@ -147,8 +147,22 @@ defmodule KodoWeb.SessionControllerTest do
     session = create_session(conn, runner)
     assert Sessions.get_session!(session["id"]).user_id == user.id
 
-    other_conn = authenticate_agent(build_conn(), user_fixture())
-    assert other_conn |> get(~p"/api/sessions/#{session["id"]}") |> json_response(404)
+    other_user = user_fixture()
+
+    assert build_conn()
+           |> authenticate_agent(other_user)
+           |> get(~p"/api/sessions/#{session["id"]}")
+           |> json_response(404)
+
+    assert build_conn()
+           |> authenticate_agent(other_user)
+           |> post_json(~p"/api/sessions/#{session["id"]}/messages", %{content: "intrude"})
+           |> json_response(404)
+
+    assert build_conn()
+           |> authenticate_agent(other_user)
+           |> post_json(~p"/api/sessions/#{session["id"]}/cancel", %{})
+           |> json_response(404)
   end
 
   defp create_session(conn, runner) do
