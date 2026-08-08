@@ -8,17 +8,17 @@ defmodule KodoWeb.AgentSessionController do
   def create(conn, %{"email" => email, "password" => password})
       when is_binary(email) and is_binary(password) do
     case Accounts.get_user_by_email_and_password(email, password) do
-      nil ->
-        conn
-        |> put_status(:unauthorized)
-        |> json(%{error: "invalid email or password"})
-
-      user ->
+      %{confirmed_at: confirmed_at} = user when not is_nil(confirmed_at) ->
         json(conn, %{
           token: Accounts.generate_user_agent_token(user),
           token_type: "Bearer",
           expires_in: Accounts.agent_token_validity_in_seconds()
         })
+
+      _ ->
+        conn
+        |> put_status(:unauthorized)
+        |> json(%{error: "invalid email or password"})
     end
   end
 

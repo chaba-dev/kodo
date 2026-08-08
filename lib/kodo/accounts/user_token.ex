@@ -86,6 +86,7 @@ defmodule Kodo.Accounts.UserToken do
         from token in by_token_and_context_query(hashed_token, "agent"),
           join: user in assoc(token, :user),
           where: token.inserted_at > ago(@agent_token_validity_in_days, "day"),
+          where: not is_nil(user.confirmed_at),
           select: user
 
       {:ok, query}
