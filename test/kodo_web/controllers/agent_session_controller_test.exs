@@ -32,6 +32,19 @@ defmodule KodoWeb.AgentSessionControllerTest do
            |> json_response(422) == %{"error" => "email and password are required"}
   end
 
+  test "rejects non-string credentials", %{user: user} do
+    for credentials <- [
+          %{email: nil, password: valid_user_password()},
+          %{email: user.email, password: %{value: valid_user_password()}},
+          %{email: [user.email], password: valid_user_password()},
+          %{email: user.email, password: 12_345}
+        ] do
+      assert build_conn()
+             |> post_json(~p"/api/auth/token", credentials)
+             |> json_response(422) == %{"error" => "email and password are required"}
+    end
+  end
+
   test "revokes the presented token", %{conn: conn, user: user} do
     token = Kodo.Accounts.generate_user_agent_token(user)
 

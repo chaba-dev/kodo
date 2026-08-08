@@ -5,7 +5,8 @@ defmodule KodoWeb.AgentSessionController do
 
   alias Kodo.Accounts
 
-  def create(conn, %{"email" => email, "password" => password}) do
+  def create(conn, %{"email" => email, "password" => password})
+      when is_binary(email) and is_binary(password) do
     case Accounts.get_user_by_email_and_password(email, password) do
       nil ->
         conn
