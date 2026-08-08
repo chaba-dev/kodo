@@ -70,6 +70,24 @@ defmodule Kodo.Test.FullStackCase do
     response.body
   end
 
+  def assert_live_outcome!(replay, workspace) do
+    assert replay["session"]["status"] == "completed"
+    assert File.read!(Path.join(workspace, "greeting.txt")) == "hello\n"
+    assert Enum.any?(replay["events"], &(&1["type"] == "assistant_message_completed"))
+
+    sequences = Enum.map(replay["events"], & &1["sequence"])
+    assert sequences == Enum.to_list(1..length(sequences))
+
+    completed_tools =
+      for %{"type" => "tool_completed", "payload" => payload} <- replay["events"],
+          do: payload
+
+    assert Enum.any?(completed_tools, fn payload ->
+             payload["name"] in ["poll_command", "stop_command"] and
+               match?(%{"exited" => %{"code" => 0}}, payload["output"]["status"])
+           end)
+  end
+
   def subscribe_session!(session_id) do
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session_id}")
   end

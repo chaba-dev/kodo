@@ -59,23 +59,7 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
     Stack.await_completed!(session_id, @live_session_timeout)
     replay = Stack.replay!(context.stack.base_url, session_id)
 
-    assert replay["session"]["status"] == "completed"
-    assert File.read!(Path.join(context.workspace, "greeting.txt")) == "hello\n"
-    assert Enum.any?(replay["events"], &(&1["type"] == "assistant_message_completed"))
-
-    sequences = Enum.map(replay["events"], & &1["sequence"])
-    assert sequences == Enum.to_list(1..length(sequences))
-
-    completed_tools =
-      for %{"type" => "tool_completed", "payload" => payload} <- replay["events"],
-          do: payload
-
-    assert Enum.any?(completed_tools, &(&1["name"] == "apply_patch"))
-
-    assert Enum.any?(completed_tools, fn payload ->
-             payload["name"] in ["poll_command", "stop_command"] and
-               match?(%{"exited" => %{"code" => 0}}, payload["output"]["status"])
-           end)
+    Stack.assert_live_outcome!(replay, context.workspace)
 
     Stack.terminate_session!(session_id)
     assert {:ok, projection} = Sessions.active_state(session_id)
