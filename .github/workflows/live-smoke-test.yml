@@ -7,8 +7,6 @@ name: Live provider smoke test
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: read
 
 concurrency:
   group: live-smoke-${{ github.event.issue.number }}
@@ -22,6 +20,10 @@ jobs:
       github.event.comment.body == '/live-smoke-test' &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
     outputs:
       repository: ${{ steps.pull-request.outputs.repository }}
       revision: ${{ steps.pull-request.outputs.revision }}
@@ -55,6 +57,8 @@ jobs:
     needs: resolve
     environment: live-smoke
     runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: read
     env:
       MIX_ENV: test
       DATABASE_USER: postgres
@@ -123,12 +127,19 @@ jobs:
       - name: Run live provider test
         run: mix test test/e2e/live_provider_full_stack_test.exs --include live_provider
 
+  report:
+    name: Report live smoke result
+    needs: [resolve, smoke]
+    if: ${{ always() && needs.resolve.result == 'success' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      issues: write
+    steps:
       - name: Report result
-        if: always()
         uses: actions/github-script@v7
         with:
           script: |
-            const outcome = '${{ job.status }}';
+            const outcome = '${{ needs.smoke.result }}';
             const icon = outcome === 'success' ? '✅' : '❌';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
