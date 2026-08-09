@@ -26,8 +26,11 @@ defmodule KodoWeb.SessionControllerTest do
       end
     end)
 
+    user = user_fixture()
+    scope = Kodo.Accounts.Scope.for_user(user)
+
     {:ok, runner} =
-      Runners.register(%{
+      Runners.register(scope, %{
         workspace_root: "/work/#{Ecto.UUID.generate()}",
         platform: "linux",
         architecture: "x86_64",
@@ -36,7 +39,6 @@ defmodule KodoWeb.SessionControllerTest do
         capabilities: []
       })
 
-    user = user_fixture()
     %{conn: authenticate_agent(conn, user), runner: runner, user: user}
   end
 
@@ -82,13 +84,32 @@ defmodule KodoWeb.SessionControllerTest do
     assert replay["session"]["status"] == "completed"
     sequences = Enum.map(replay["events"], & &1["sequence"])
     assert sequences == Enum.to_list(2..List.last(sequences))
-    assert Enum.any?(replay["events"], &(&1["type"] == "tool_completed"))
+    assert replay["has_more"]
+
+    remaining = replay_pages(conn, session["id"], List.last(sequences))
+    assert Enum.any?(remaining, &(&1["type"] == "tool_completed"))
 
     {:ok, active} = Sessions.ensure_started(session["id"])
     :ok = DynamicSupervisor.terminate_child(Kodo.SessionSupervisor, active)
     assert {:ok, projection} = Sessions.active_state(session["id"])
     assert projection.status == "completed"
     assert List.last(projection.messages)["content"] == "The fix is complete."
+  end
+
+  defp replay_pages(conn, session_id, cursor, events \\ []) do
+    replay =
+      conn
+      |> recycle(["accept", "authorization"])
+      |> get(~p"/api/sessions/#{session_id}?after_sequence=#{cursor}")
+      |> json_response(200)
+
+    events = events ++ replay["events"]
+
+    if replay["has_more"] do
+      replay_pages(conn, session_id, List.last(replay["events"])["sequence"], events)
+    else
+      events
+    end
   end
 
   test "cancelling an active model call records a durable terminal state", %{
@@ -111,7 +132,14 @@ defmodule KodoWeb.SessionControllerTest do
 
     assert response == %{"status" => "cancelled"}
     assert Sessions.get_session!(session["id"]).status == "cancelled"
-    assert Enum.any?(Sessions.events_after(session["id"]), &(&1.type == "session_cancelled"))
+
+    assert conn
+           |> recycle(["accept", "authorization"])
+           |> post_json(~p"/api/sessions/#{session["id"]}/cancel", %{})
+           |> json_response(200) == %{"status" => "cancelled"}
+
+    assert Enum.count(Sessions.events_after(session["id"]), &(&1.type == "session_cancelled")) ==
+             1
   end
 
   test "a safe-policy tool waits for an authenticated approval", %{

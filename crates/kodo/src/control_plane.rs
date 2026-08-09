@@ -149,22 +149,28 @@ fn required_string(value: Value, field: &str) -> Result<String, ControlPlaneErro
 }
 
 /// Register the workspace and maintain its authenticated loopback control-plane connection.
-pub async fn serve(base: &str, workspace: &Workspace) -> Result<(), ControlPlaneError> {
-    serve_inner(base, workspace, None).await
+pub async fn serve(
+    base: &str,
+    workspace: &Workspace,
+    agent_token: &str,
+) -> Result<(), ControlPlaneError> {
+    serve_inner(base, workspace, agent_token, None).await
 }
 
 /// Serve like [`serve`], notifying an in-process client once sessions can target this runner.
 pub async fn serve_with_ready(
     base: &str,
     workspace: &Workspace,
+    agent_token: &str,
     ready: oneshot::Sender<RunnerReady>,
 ) -> Result<(), ControlPlaneError> {
-    serve_inner(base, workspace, Some(ready)).await
+    serve_inner(base, workspace, agent_token, Some(ready)).await
 }
 
 async fn serve_inner(
     base: &str,
     workspace: &Workspace,
+    agent_token: &str,
     mut ready: Option<oneshot::Sender<RunnerReady>>,
 ) -> Result<(), ControlPlaneError> {
     let base = validate_base_url(base)?;
@@ -182,7 +188,7 @@ async fn serve_inner(
     let mut backoff = INITIAL_RECONNECT_DELAY;
     loop {
         if registration.is_none() {
-            match register(&client, &base, root).await {
+            match register(&client, &base, root, agent_token).await {
                 Ok(registered) => {
                     registration = Some(registered);
                     backoff = INITIAL_RECONNECT_DELAY;
@@ -272,6 +278,7 @@ async fn register(
     client: &reqwest::Client,
     base: &Url,
     root: &str,
+    agent_token: &str,
 ) -> Result<Registration, ControlPlaneError> {
     let endpoint = base
         .join(&format!(
@@ -290,6 +297,7 @@ async fn register(
     };
     let mut response = client
         .post(endpoint)
+        .bearer_auth(agent_token)
         .json(&request)
         .send()
         .await

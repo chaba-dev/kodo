@@ -61,6 +61,8 @@ enum Commands {
         /// Register with a loopback Phoenix control plane and serve over its WebSocket.
         #[arg(long)]
         control_plane: Option<String>,
+        #[arg(long, env = "KODO_TOKEN", hide_env_values = true)]
+        token: Option<String>,
     },
 }
 
@@ -121,10 +123,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Daemon {
             workspace,
             control_plane: control_plane_url,
+            token,
         } => {
             let workspace = Workspace::discover(workspace)?;
             if let Some(url) = control_plane_url {
-                control_plane::serve(&url, &workspace).await?;
+                let token = token.ok_or("KODO_TOKEN is required with --control-plane")?;
+                control_plane::serve(&url, &workspace, &token).await?;
             } else {
                 let runner = Runner::new(workspace);
                 daemon::serve_stdio(&runner).await?;

@@ -90,10 +90,10 @@ defmodule Kodo.Agent.Tools do
       do: :allow
 
   defp verification_command?(command) when is_binary(command) do
-    normalized = command |> String.trim() |> String.replace(~r/\s+/, " ")
+    unsafe? = Regex.match?(@shell_metacharacters, command)
+    normalized = command |> String.trim() |> String.replace(~r/[ \t]+/, " ")
 
-    not Regex.match?(@shell_metacharacters, normalized) and
-      normalized in @verification_commands
+    not unsafe? and normalized in @verification_commands
   end
 
   defp verification_command?(_command), do: false

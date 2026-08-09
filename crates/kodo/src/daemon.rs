@@ -31,6 +31,9 @@ pub(crate) struct Dispatcher {
 #[derive(Default)]
 struct ResponseCache {
     slots: HashMap<Uuid, Arc<ResponseSlot>>,
+    // Evicted IDs remain tombstoned for this runner lifetime so a stale retry can never execute
+    // the same mutation again after its response is no longer replayable.
+    expired: HashMap<Uuid, [u8; 32]>,
     // Store completed response sizes here so eviction never locks a slot while holding the cache.
     order: VecDeque<(Uuid, usize)>,
     response_bytes: usize,
@@ -67,6 +70,11 @@ impl Dispatcher {
             let mut cache = self.cache.lock().expect("response cache lock poisoned");
             if let Some(slot) = cache.slots.get(&request.request_id) {
                 (Arc::clone(slot), false)
+            } else if let Some(expired_fingerprint) = cache.expired.get(&request.request_id) {
+                return expired_request_response(
+                    request.request_id,
+                    *expired_fingerprint == fingerprint,
+                );
             } else {
                 while cache.slots.len() >= self.max_cached_requests {
                     let Some((expired, response_len)) = cache.order.pop_front() else {
@@ -173,8 +181,23 @@ fn request_fingerprint(request: &ToolRequest) -> [u8; 32] {
 }
 
 fn remove_cached_response(cache: &mut ResponseCache, request_id: Uuid, response_len: usize) {
-    cache.slots.remove(&request_id);
+    if let Some(slot) = cache.slots.remove(&request_id) {
+        cache.expired.insert(request_id, slot.fingerprint);
+    }
     cache.response_bytes = cache.response_bytes.saturating_sub(response_len);
+}
+
+fn expired_request_response(request_id: Uuid, fingerprint_matches: bool) -> String {
+    let error = if fingerprint_matches {
+        "request completed previously, but its response is no longer available; it was not re-executed"
+    } else {
+        "request_id was already used for a different request"
+    };
+    serialize_response(ResponseEnvelope::Error {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: Some(request_id),
+        error: error.into(),
+    })
 }
 
 fn cache_capacity_response(request_id: Uuid) -> String {
@@ -547,8 +570,45 @@ mod tests {
         remove_cached_response(&mut cache, request_id, response.len());
 
         assert!(!cache.slots.contains_key(&request_id));
+        assert!(cache.expired.contains_key(&request_id));
         assert_eq!(cache.response_bytes, 0);
         assert_eq!(replay.as_deref(), Some("response"));
+    }
+
+    #[tokio::test]
+    async fn evicted_request_ids_are_never_executed_again() {
+        let repository = git_repository();
+        std::fs::write(repository.path().join("file.txt"), "before\n").unwrap();
+        git(repository.path(), ["add", "file.txt"]);
+        git(repository.path(), ["commit", "-m", "fixture"]);
+        let mut limits = ExecutionLimits::standalone();
+        limits.max_cached_requests = 1;
+        let runner =
+            Runner::from_limits(Workspace::from_root(repository.path()).unwrap(), limits).unwrap();
+        let dispatcher = Dispatcher::new(runner);
+        let request = RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            request: ToolRequest::ApplyPatch {
+                patch: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n".into(),
+            },
+        };
+
+        let first = dispatcher.dispatch(request.clone()).await;
+        let ResponseEnvelope::Success { .. } = serde_json::from_str(&first).unwrap() else {
+            panic!("expected the initial mutation to succeed");
+        };
+        dispatch(&dispatcher, ToolRequest::GitStatus).await;
+
+        let retry = dispatcher.dispatch(request).await;
+        let ResponseEnvelope::Error { error, .. } = serde_json::from_str(&retry).unwrap() else {
+            panic!("expected an expired replay error");
+        };
+        assert!(error.contains("was not re-executed"));
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("file.txt")).unwrap(),
+            "after\n"
+        );
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 //! Authenticated, line-oriented client for durable Phoenix sessions.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,6 +30,8 @@ pub enum SessionCliError {
     MissingToken,
     #[error("API request failed: {0}")]
     Api(String),
+    #[error("API temporarily unavailable: {0}")]
+    ApiUnavailable(String),
     #[error("workspace runner stopped before becoming ready: {0}")]
     Runner(String),
     #[error("terminal input failed: {0}")]
@@ -63,6 +66,7 @@ struct Session {
     id: String,
     runner_id: String,
     status: String,
+    pending_approval_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,33 +82,43 @@ struct SessionResponse {
     session: Session,
     #[serde(default)]
     events: Vec<Event>,
+    #[serde(default)]
+    has_more: bool,
 }
 
 pub async fn start(options: StartOptions) -> Result<(), SessionCliError> {
-    let (client, base, runner, runner_task) = host_runner(&options.common).await?;
+    let (client, base, runner, mut runner_task) = host_runner(&options.common).await?;
     let title = options.title.as_deref().unwrap_or(&options.task);
-    let response = request_json(
-        client
-            .post(endpoint(&base, "api/sessions")?)
-            .bearer_auth(&options.common.token)
-            .json(&json!({
-                "runner_id": runner.runner_id,
-                "title": title,
-                "model": options.model,
-                "approval_policy": options.approval_policy
-            })),
-        &options.common.token,
-    )
+    let create_request_id = Uuid::new_v4().to_string();
+    let response = retry_api(&mut runner_task, || {
+        request_json(
+            client
+                .post(endpoint(&base, "api/sessions").expect("validated base URL"))
+                .bearer_auth(&options.common.token)
+                .json(&json!({
+                    "runner_id": runner.runner_id,
+                    "title": title,
+                    "model": options.model,
+                    "approval_policy": options.approval_policy,
+                    "client_request_id": create_request_id
+                })),
+            &options.common.token,
+        )
+    })
     .await?;
     let session: Session = serde_json::from_value(response["session"].clone())
         .map_err(|e| SessionCliError::Api(format!("invalid create response: {e}")))?;
-    submit_message(
-        &client,
-        &base,
-        &options.common.token,
-        &session.id,
-        &options.task,
-    )
+    let message_request_id = Uuid::new_v4().to_string();
+    retry_api(&mut runner_task, || {
+        submit_message(
+            &client,
+            &base,
+            &options.common.token,
+            &session.id,
+            &options.task,
+            &message_request_id,
+        )
+    })
     .await?;
     println!("Session: {}", browser_url(&base, &session.id)?);
     drive(client, base, options.common.token, session.id, runner_task).await
@@ -112,8 +126,11 @@ pub async fn start(options: StartOptions) -> Result<(), SessionCliError> {
 
 pub async fn resume(options: ResumeOptions) -> Result<(), SessionCliError> {
     let session_id = parse_id(&options.session_id, "session")?;
-    let (client, base, runner, runner_task) = host_runner(&options.common).await?;
-    let replay = fetch_session(&client, &base, &options.common.token, &session_id, 0).await?;
+    let (client, base, runner, mut runner_task) = host_runner(&options.common).await?;
+    let replay = retry_api(&mut runner_task, || {
+        fetch_session(&client, &base, &options.common.token, &session_id, 0)
+    })
+    .await?;
     if replay.session.runner_id != runner.runner_id {
         runner_task.abort();
         return Err(SessionCliError::Runner(
@@ -121,7 +138,18 @@ pub async fn resume(options: ResumeOptions) -> Result<(), SessionCliError> {
         ));
     }
     if let Some(message) = &options.message {
-        submit_message(&client, &base, &options.common.token, &session_id, message).await?;
+        let message_request_id = Uuid::new_v4().to_string();
+        retry_api(&mut runner_task, || {
+            submit_message(
+                &client,
+                &base,
+                &options.common.token,
+                &session_id,
+                message,
+                &message_request_id,
+            )
+        })
+        .await?;
     }
     println!("Session: {}", browser_url(&base, &session_id)?);
     drive(client, base, options.common.token, session_id, runner_task).await
@@ -146,8 +174,9 @@ async fn host_runner(
         .map_err(|e| SessionCliError::Runner(e.to_string()))?;
     let (ready_tx, ready_rx) = oneshot::channel();
     let runner_base = options.control_plane.clone();
+    let runner_token = options.token.clone();
     let runner_task = tokio::spawn(async move {
-        control_plane::serve_with_ready(&runner_base, &workspace, ready_tx).await
+        control_plane::serve_with_ready(&runner_base, &workspace, &runner_token, ready_tx).await
     });
     let ready = match tokio::time::timeout(RUNNER_BOOTSTRAP_TIMEOUT, ready_rx).await {
         Ok(Ok(ready)) => ready,
@@ -181,7 +210,7 @@ async fn drive(
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                cancel_session(&client, &base, &token, &session_id).await?;
+                retry_api(&mut runner_task, || cancel_session(&client, &base, &token, &session_id)).await?;
                 println!("Cancelled session {session_id}");
                 runner_task.abort();
                 return Ok(());
@@ -197,12 +226,16 @@ async fn drive(
         }
         let replay = tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                cancel_session(&client, &base, &token, &session_id).await?;
+                retry_api(&mut runner_task, || cancel_session(&client, &base, &token, &session_id)).await?;
                 println!("Cancelled session {session_id}");
                 runner_task.abort();
                 return Ok(());
             }
-            result = fetch_session(&client, &base, &token, &session_id, cursor) => result?,
+            result = fetch_session(&client, &base, &token, &session_id, cursor) => match result {
+                Ok(replay) => replay,
+                Err(SessionCliError::ApiUnavailable(_)) => continue,
+                Err(error) => return Err(error),
+            },
         };
         let resolved_approvals: HashSet<String> = replay
             .events
@@ -216,27 +249,47 @@ async fn drive(
                     .map(str::to_owned)
             })
             .collect();
+        let mut retry_poll = false;
         for event in replay.events {
-            cursor = cursor.max(event.sequence);
             println!("{}", format_event(&event));
             let pending_approval = event
                 .payload
                 .get("approval_id")
                 .and_then(Value::as_str)
-                .is_none_or(|id| !resolved_approvals.contains(id));
-            if event.kind == "approval_requested"
-                && pending_approval
-                && !resolve_approval(&client, &base, &token, &session_id, &event).await?
-            {
-                runner_task.abort();
-                println!("Cancelled session {session_id}");
-                return Ok(());
+                .is_some_and(|id| {
+                    replay.session.pending_approval_id.as_deref() == Some(id)
+                        && !resolved_approvals.contains(id)
+                });
+            if event.kind == "approval_requested" && pending_approval {
+                match resolve_approval(&client, &base, &token, &session_id, &event).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        retry_api(&mut runner_task, || {
+                            cancel_session(&client, &base, &token, &session_id)
+                        })
+                        .await?;
+                        runner_task.abort();
+                        println!("Cancelled session {session_id}");
+                        return Ok(());
+                    }
+                    Err(SessionCliError::ApiUnavailable(_)) => {
+                        retry_poll = true;
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
+            cursor = cursor.max(event.sequence);
         }
-        if matches!(
-            replay.session.status.as_str(),
-            "idle" | "completed" | "failed" | "cancelled"
-        ) {
+        if retry_poll {
+            continue;
+        }
+        if !replay.has_more
+            && matches!(
+                replay.session.status.as_str(),
+                "idle" | "completed" | "failed" | "cancelled"
+            )
+        {
             runner_task.abort();
             return Ok(());
         }
@@ -265,7 +318,6 @@ async fn resolve_approval(
             result?;
         }
         _ = tokio::signal::ctrl_c() => {
-            cancel_session(client, base, token, session_id).await?;
             return Ok(false);
         }
     }
@@ -294,12 +346,16 @@ async fn submit_message(
     token: &str,
     id: &str,
     content: &str,
+    client_request_id: &str,
 ) -> Result<(), SessionCliError> {
     request_json(
         client
             .post(endpoint(base, &format!("api/sessions/{id}/messages"))?)
             .bearer_auth(token)
-            .json(&json!({"content": content})),
+            .json(&json!({
+                "content": content,
+                "client_request_id": client_request_id
+            })),
         token,
     )
     .await?;
@@ -351,11 +407,13 @@ async fn request_json(
     let response = builder
         .send()
         .await
-        .map_err(|e| api_error(e.to_string(), token))?;
+        .map_err(|e| api_unavailable(e.to_string(), token))?;
     let status = response.status();
-    let bytes = bounded_body(response)
-        .await
-        .map_err(|e| api_error(e, token))?;
+    let bytes = match bounded_body(response).await {
+        Ok(bytes) => bytes,
+        Err(BodyError::Transport(error)) => return Err(api_unavailable(error, token)),
+        Err(BodyError::TooLarge) => return Err(api_error("response exceeds 4 MiB".into(), token)),
+    };
     if !status.is_success() {
         let detail = String::from_utf8_lossy(&bytes);
         return Err(api_error(format!("HTTP {status}: {detail}"), token));
@@ -364,23 +422,76 @@ async fn request_json(
         .map_err(|e| api_error(format!("invalid JSON response: {e}"), token))
 }
 
-async fn bounded_body(mut response: Response) -> Result<Vec<u8>, String> {
+enum BodyError {
+    Transport(String),
+    TooLarge,
+}
+
+async fn bounded_body(mut response: Response) -> Result<Vec<u8>, BodyError> {
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| BodyError::Transport(error.to_string()))?
+    {
         if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err("response exceeds 4 MiB".into());
+            return Err(BodyError::TooLarge);
         }
         body.extend_from_slice(&chunk);
     }
     Ok(body)
 }
 
+async fn retry_api<T, F, Fut>(
+    runner_task: &mut tokio::task::JoinHandle<Result<(), control_plane::ControlPlaneError>>,
+    mut operation: F,
+) -> Result<T, SessionCliError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, SessionCliError>>,
+{
+    loop {
+        let result = tokio::select! {
+            result = &mut *runner_task => return Err(runner_error(result)),
+            result = operation() => result,
+        };
+        match result {
+            Ok(value) => return Ok(value),
+            Err(SessionCliError::ApiUnavailable(_)) => {
+                tokio::select! {
+                    result = &mut *runner_task => return Err(runner_error(result)),
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn runner_error(
+    result: Result<Result<(), control_plane::ControlPlaneError>, tokio::task::JoinError>,
+) -> SessionCliError {
+    SessionCliError::Runner(match result {
+        Ok(Ok(())) => "runner exited unexpectedly".into(),
+        Ok(Err(error)) => error.to_string(),
+        Err(error) => error.to_string(),
+    })
+}
+
 fn api_error(message: String, token: &str) -> SessionCliError {
-    SessionCliError::Api(if token.is_empty() {
+    SessionCliError::Api(redact(message, token))
+}
+
+fn api_unavailable(message: String, token: &str) -> SessionCliError {
+    SessionCliError::ApiUnavailable(redact(message, token))
+}
+
+fn redact(message: String, token: &str) -> String {
+    if token.is_empty() {
         message
     } else {
         message.replace(token, "[REDACTED]")
-    })
+    }
 }
 
 fn validate_base_url(input: &str) -> Result<Url, SessionCliError> {
@@ -459,15 +570,48 @@ fn format_event(event: &Event) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error")
         ),
-        "approval_requested" => format!(
-            "[approval requested] {}",
-            payload
-                .get("description")
-                .or_else(|| payload.get("command"))
-                .and_then(Value::as_str)
-                .unwrap_or("tool execution")
-        ),
+        "approval_requested" => format!("[approval requested] {}", approval_summary(payload)),
         _ => format!("[{}]", event.kind),
+    }
+}
+
+fn approval_summary(payload: &Value) -> String {
+    let name = payload
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("tool");
+    let arguments = payload.get("arguments").unwrap_or(&Value::Null);
+    match name {
+        "start_command" => {
+            let command = arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing command>");
+            let cwd = arguments
+                .get("cwd")
+                .and_then(Value::as_str)
+                .unwrap_or("workspace root");
+            let timeout = arguments
+                .get("timeout_ms")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "default".into());
+            format!("start_command\ncommand: {command}\ncwd: {cwd}\ntimeout_ms: {timeout}")
+        }
+        "apply_patch" => format!(
+            "apply_patch\n{}",
+            arguments
+                .get("patch")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing patch>")
+        ),
+        "stop_command" => format!(
+            "stop_command\nprocess_id: {}",
+            arguments
+                .get("process_id")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "<missing process id>".into())
+        ),
+        _ => format!("{name}\narguments: {arguments}"),
     }
 }
 
@@ -554,6 +698,8 @@ fn format_status(status: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn validates_and_joins_base_urls() {
@@ -602,6 +748,26 @@ mod tests {
     }
 
     #[test]
+    fn approval_prompt_shows_the_exact_mutation() {
+        let command = Event {
+            sequence: 3,
+            kind: "approval_requested".into(),
+            payload: json!({
+                "name": "start_command",
+                "arguments": {
+                    "command": "mix test test/kodo/sessions_test.exs",
+                    "cwd": "apps/kodo",
+                    "timeout_ms": 30_000
+                }
+            }),
+        };
+        let rendered = format_event(&command);
+        assert!(rendered.contains("mix test test/kodo/sessions_test.exs"));
+        assert!(rendered.contains("cwd: apps/kodo"));
+        assert!(rendered.contains("timeout_ms: 30000"));
+    }
+
+    #[test]
     fn bearer_secrets_are_redacted() {
         assert_eq!(
             api_error("Bearer top-secret".into(), "top-secret").to_string(),
@@ -616,5 +782,49 @@ mod tests {
             parse_id("d4d35f9f-055f-41a8-bca6-76c17f84d720", "session").unwrap(),
             "d4d35f9f-055f-41a8-bca6-76c17f84d720"
         );
+    }
+
+    #[tokio::test]
+    async fn drive_keeps_runner_alive_across_a_poll_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            second.read(&mut request).await.unwrap();
+            let body = json!({
+                "session": {
+                    "id": "d4d35f9f-055f-41a8-bca6-76c17f84d720",
+                    "runner_id": "1e51c85e-7fe3-4d45-ae1f-401badc2851a",
+                    "status": "completed",
+                    "pending_approval_id": null
+                },
+                "events": []
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            second.write_all(response.as_bytes()).await.unwrap();
+        });
+        let runner_task = tokio::spawn(async {
+            std::future::pending::<Result<(), control_plane::ControlPlaneError>>().await
+        });
+
+        let result = drive(
+            Client::new(),
+            validate_base_url(&format!("http://{address}")).unwrap(),
+            "token".into(),
+            "d4d35f9f-055f-41a8-bca6-76c17f84d720".into(),
+            runner_task,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        server.await.unwrap();
     }
 }

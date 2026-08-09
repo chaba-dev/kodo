@@ -13,9 +13,10 @@ defmodule KodoWeb.PageControllerTest do
 
   test "authenticated browser handoff shows an owned session", %{conn: conn} do
     user = user_fixture()
+    scope = Kodo.Accounts.Scope.for_user(user)
 
     {:ok, runner} =
-      Runners.register(%{
+      Runners.register(scope, %{
         workspace_root: "/work/#{Ecto.UUID.generate()}",
         platform: "linux",
         architecture: "x86_64",
@@ -25,7 +26,7 @@ defmodule KodoWeb.PageControllerTest do
       })
 
     {:ok, session} =
-      Sessions.create_session(Kodo.Accounts.Scope.for_user(user), %{
+      Sessions.create_session(scope, %{
         runner_id: runner.id,
         title: "CLI handoff",
         model: "test:model"

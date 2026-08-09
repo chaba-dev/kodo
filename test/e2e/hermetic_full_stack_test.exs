@@ -26,8 +26,8 @@ defmodule Kodo.E2E.HermeticFullStackTest do
 
     stack = Stack.start_stack!()
     workspace = Stack.fixture!()
-    runner = Stack.start_runner!(stack.base_url, workspace)
     token = user_fixture() |> Kodo.Accounts.generate_user_agent_token()
+    runner = Stack.start_runner!(stack.base_url, workspace, token)
     %{stack: stack, workspace: workspace, runner: runner, token: token}
   end
 

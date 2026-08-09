@@ -31,13 +31,13 @@ defmodule KodoWeb.Router do
   scope "/api", KodoWeb do
     pipe_through :api
 
-    post "/runners", RunnerRegistrationController, :create
     post "/auth/token", AgentSessionController, :create
   end
 
   scope "/api", KodoWeb do
     pipe_through [:api, :authenticated_agent]
 
+    post "/runners", RunnerRegistrationController, :create
     delete "/auth/token", AgentSessionController, :delete
     post "/sessions", SessionController, :create
     get "/sessions/:id", SessionController, :show

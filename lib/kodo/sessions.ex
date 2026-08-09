@@ -7,11 +7,13 @@ defmodule Kodo.Sessions do
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Session
+  alias Kodo.Runners.Runner
 
   @before_first_event_sequence 0
   @initial_event_version 1
   @single_event_increment 1
   @single_updated_row 1
+  @stale_coordinator_shutdown_timeout 5_000
 
   def get_session(id) do
     case Ecto.UUID.cast(id) do
@@ -29,18 +31,43 @@ defmodule Kodo.Sessions do
 
   def get_session!(id), do: Repo.get!(Session, id)
 
+  def list_active_sessions do
+    Session
+    |> where([session], session.status in ["running", "awaiting_approval"])
+    |> Repo.all()
+  end
+
   @doc "Returns the unique active coordinator, reconstructing it from events when needed."
   def ensure_started(session_id) do
     case Registry.lookup(Kodo.SessionRegistry, session_id) do
       [{pid, _value}] ->
-        if Process.info(pid) do
+        if supervised_session?(pid) do
           {:ok, pid}
         else
-          start_active_session(session_id)
+          await_stale_coordinator(pid, session_id)
         end
 
       [] ->
         start_active_session(session_id)
+    end
+  end
+
+  defp supervised_session?(pid) do
+    Enum.any?(DynamicSupervisor.which_children(Kodo.SessionSupervisor), fn
+      {_id, ^pid, _type, _modules} -> true
+      _child -> false
+    end)
+  end
+
+  defp await_stale_coordinator(pid, session_id) do
+    ref = Process.monitor(pid)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} -> start_active_session(session_id)
+    after
+      @stale_coordinator_shutdown_timeout ->
+        Process.demonitor(ref, [:flush])
+        {:error, :stale_coordinator_did_not_stop}
     end
   end
 
@@ -50,16 +77,40 @@ defmodule Kodo.Sessions do
     end
   end
 
-  def start_turn(session_id, content) do
+  def start_turn(session_id, content), do: start_turn(session_id, content, nil)
+
+  def start_turn(%Scope{} = scope, session_id, content),
+    do: start_turn(scope, session_id, content, nil)
+
+  def start_turn(session_id, content, client_request_id) do
     with {:ok, pid} <- ensure_started(session_id) do
-      Kodo.Sessions.ActiveSession.start_turn(pid, content)
+      Kodo.Sessions.ActiveSession.start_turn(pid, content, client_request_id)
     end
   end
 
-  def start_turn(%Scope{} = scope, session_id, content) do
+  def begin_turn(session_id, content, client_request_id \\ nil)
+      when is_binary(content) and content != "" do
+    case Repo.transaction(fn -> begin_turn_locked(session_id, content, client_request_id) end) do
+      {:ok, events} = result ->
+        Enum.each(events, &broadcast/1)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  def start_turn(%Scope{} = scope, session_id, content, client_request_id) do
     case get_session(scope, session_id) do
-      %Session{} -> start_turn(session_id, content)
-      nil -> {:error, :not_found}
+      %Session{} ->
+        if turn_request_recorded?(session_id, client_request_id) do
+          :ok
+        else
+          start_turn(session_id, content, client_request_id)
+        end
+
+      nil ->
+        {:error, :not_found}
     end
   end
 
@@ -71,8 +122,22 @@ defmodule Kodo.Sessions do
 
   def cancel(%Scope{} = scope, session_id) do
     case get_session(scope, session_id) do
-      %Session{} -> cancel(session_id)
-      nil -> {:error, :not_found}
+      %Session{status: "cancelled"} ->
+        :ok
+
+      %Session{} ->
+        case cancel(session_id) do
+          {:error, reason} when reason in [:not_running, :already_finished] ->
+            if get_session(scope, session_id).status == "cancelled",
+              do: :ok,
+              else: {:error, reason}
+
+          result ->
+            result
+        end
+
+      nil ->
+        {:error, :not_found}
     end
   end
 
@@ -100,10 +165,13 @@ defmodule Kodo.Sessions do
   end
 
   defp start_active_session(session_id) do
-    DynamicSupervisor.start_child(
-      Kodo.SessionSupervisor,
-      {Kodo.Sessions.ActiveSession, session_id}
-    )
+    case DynamicSupervisor.start_child(
+           Kodo.SessionSupervisor,
+           {Kodo.Sessions.ActiveSession, session_id}
+         ) do
+      {:error, {:already_started, pid}} -> {:ok, pid}
+      result -> result
+    end
   end
 
   def create_session(%Scope{} = scope, attrs) do
@@ -111,13 +179,34 @@ defmodule Kodo.Sessions do
   end
 
   defp do_create_session(user, attrs) do
-    case Repo.transaction(fn -> create_session_locked(user, attrs) end) do
+    request_id = attrs[:client_request_id] || attrs["client_request_id"]
+
+    case existing_requested_session(user, request_id) ||
+           Repo.transaction(fn -> create_session_locked(user, attrs) end) do
+      %Session{} = session ->
+        {:ok, session}
+
       {:ok, {session, event}} ->
         broadcast(event)
         {:ok, session}
 
+      {:error, %Ecto.Changeset{}} = error ->
+        case existing_requested_session(user, request_id) do
+          %Session{} = session -> {:ok, session}
+          nil -> error
+        end
+
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp existing_requested_session(_user, request_id) when not is_binary(request_id), do: nil
+
+  defp existing_requested_session(user, request_id) do
+    case Ecto.UUID.cast(request_id) do
+      {:ok, request_id} -> Repo.get_by(Session, user_id: user.id, client_request_id: request_id)
+      :error -> nil
     end
   end
 
@@ -143,6 +232,24 @@ defmodule Kodo.Sessions do
       error ->
         error
     end
+  end
+
+  @doc "Atomically appends an ordered group of events under one session lock."
+  def append_events(session_id, event_specs) when is_list(event_specs) and event_specs != [] do
+    case Repo.transaction(fn -> append_events_locked(session_id, event_specs) end) do
+      {:ok, events} = result ->
+        Enum.each(events, &broadcast/1)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  def complete_session(session_id), do: finalize_session(session_id, "completed", nil)
+
+  def fail_session(session_id, reason) do
+    finalize_session(session_id, "failed", {"session_failed", %{"reason" => inspect(reason)}})
   end
 
   def events_after(session_id), do: events_after(session_id, @before_first_event_sequence)
@@ -204,6 +311,123 @@ defmodule Kodo.Sessions do
     end
   end
 
+  defp begin_turn_locked(session_id, content, client_request_id) do
+    session = lock_session!(session_id)
+
+    if turn_request_recorded?(session_id, client_request_id) do
+      []
+    else
+      do_begin_turn_locked(session, content, client_request_id)
+    end
+  end
+
+  defp do_begin_turn_locked(session, content, client_request_id) do
+    if session.status in ["running", "awaiting_approval"] do
+      Repo.rollback(:turn_in_progress)
+    else
+      payload =
+        %{"role" => "user", "content" => content}
+        |> maybe_put_request_id(client_request_id)
+
+      with {:ok, message} <-
+             append_locked(
+               session,
+               "user_message",
+               payload,
+               []
+             ),
+           session = %{session | next_event_sequence: session.next_event_sequence + 1},
+           {:ok, session} <- session |> Session.status_changeset("running") |> Repo.update(),
+           {:ok, status_event} <-
+             append_locked(session, "session_status_changed", %{"status" => "running"}, []) do
+        [message, status_event]
+      else
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    end
+  end
+
+  defp turn_request_recorded?(_session_id, request_id) when not is_binary(request_id), do: false
+
+  defp turn_request_recorded?(session_id, request_id) do
+    Repo.exists?(
+      from(event in Event,
+        where:
+          event.session_id == ^session_id and event.type == "user_message" and
+            fragment("?->>'client_request_id'", event.payload) == ^request_id
+      )
+    )
+  end
+
+  defp maybe_put_request_id(payload, request_id) when is_binary(request_id),
+    do: Map.put(payload, "client_request_id", request_id)
+
+  defp maybe_put_request_id(payload, _request_id), do: payload
+
+  defp append_events_locked(session_id, event_specs) do
+    session = lock_session!(session_id)
+
+    {events, _session} =
+      Enum.map_reduce(event_specs, session, fn {type, payload, opts}, current_session ->
+        case append_locked(current_session, type, payload, opts) do
+          {:ok, event} ->
+            {event,
+             %{current_session | next_event_sequence: current_session.next_event_sequence + 1}}
+
+          {:error, changeset} ->
+            Repo.rollback(changeset)
+        end
+      end)
+
+    events
+  end
+
+  defp finalize_session(session_id, status, terminal_event) do
+    case Repo.transaction(fn -> finalize_session_locked(session_id, status, terminal_event) end) do
+      {:ok, events} = result ->
+        Enum.each(events, &broadcast/1)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  defp finalize_session_locked(session_id, status, terminal_event) do
+    session = lock_session!(session_id)
+
+    if session.status in ["running", "awaiting_approval"] do
+      {events, session} = append_terminal_event(session, terminal_event)
+
+      with {:ok, session} <- session |> Session.status_changeset(status) |> Repo.update(),
+           {:ok, status_event} <-
+             append_locked(
+               session,
+               "session_status_changed",
+               %{"status" => status},
+               source: "agent"
+             ) do
+        events ++ [status_event]
+      else
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    else
+      Repo.rollback(:session_not_active)
+    end
+  end
+
+  defp append_terminal_event(session, nil), do: {[], session}
+
+  defp append_terminal_event(session, {type, payload}) do
+    case append_locked(session, type, payload, []) do
+      {:ok, event} ->
+        {[event], %{session | next_event_sequence: session.next_event_sequence + 1}}
+
+      {:error, changeset} ->
+        Repo.rollback(changeset)
+    end
+  end
+
   defp set_status_locked(session_id, status, source) do
     session = lock_session!(session_id)
 
@@ -240,7 +464,7 @@ defmodule Kodo.Sessions do
 
     pending? =
       session.status == "awaiting_approval" and
-        approval_requested?(session_id, approval_id) and
+        current_approval_id(session_id) == approval_id and
         is_nil(existing_decision)
 
     cond do
@@ -290,9 +514,14 @@ defmodule Kodo.Sessions do
            {:ok, refreshed} <-
              refreshed |> Session.status_changeset("awaiting_approval") |> Repo.update(),
            {:ok, status_event} <-
-             append_locked(refreshed, "session_status_changed", %{
-               "status" => "awaiting_approval"
-             }) do
+             append_locked(
+               refreshed,
+               "session_status_changed",
+               %{
+                 "status" => "awaiting_approval"
+               },
+               []
+             ) do
         {requested, status_event}
       else
         {:error, changeset} -> Repo.rollback(changeset)
@@ -302,12 +531,13 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp approval_requested?(session_id, approval_id) do
-    Repo.exists?(
+  defp current_approval_id(session_id) do
+    Repo.one(
       from(event in Event,
-        where:
-          event.session_id == ^session_id and event.type == "approval_requested" and
-            fragment("?->>'approval_id'", event.payload) == ^approval_id
+        where: event.session_id == ^session_id and event.type == "approval_requested",
+        order_by: [desc: event.sequence],
+        select: fragment("?->>'approval_id'", event.payload),
+        limit: 1
       )
     )
   end
@@ -325,6 +555,7 @@ defmodule Kodo.Sessions do
   end
 
   defp create_session_locked(user, attrs) do
+    _runner = authorize_runner!(user, attrs[:runner_id] || attrs["runner_id"])
     session = if user, do: %Session{user_id: user.id}, else: %Session{}
 
     with {:ok, session} <- session |> Session.create_changeset(attrs) |> Repo.insert(),
@@ -344,6 +575,31 @@ defmodule Kodo.Sessions do
       {Repo.get!(Session, session.id), event}
     else
       {:error, changeset} -> Repo.rollback(changeset)
+    end
+  end
+
+  defp authorize_runner!(user, runner_id) do
+    runner =
+      case Ecto.UUID.cast(runner_id) do
+        {:ok, runner_id} ->
+          Runner
+          |> where([runner], runner.id == ^runner_id)
+          |> lock("FOR UPDATE")
+          |> Repo.one()
+
+        :error ->
+          nil
+      end
+
+    cond do
+      is_nil(runner) ->
+        Repo.rollback(:runner_not_found)
+
+      runner.user_id == user.id ->
+        runner
+
+      true ->
+        Repo.rollback(:runner_not_authorized)
     end
   end
 

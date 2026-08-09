@@ -18,13 +18,14 @@ defmodule Kodo.Application do
       {Registry, keys: :unique, name: Kodo.RunnerRegistry},
       {Registry, keys: :unique, name: Kodo.SessionRegistry},
       {DynamicSupervisor, name: Kodo.SessionSupervisor, strategy: :one_for_one},
+      Kodo.Sessions.Recovery,
       # Start to serve requests, typically the last entry
       KodoWeb.Endpoint
     ]
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
-    opts = [strategy: :one_for_one, name: Kodo.Supervisor]
+    opts = [strategy: :rest_for_one, name: Kodo.Supervisor]
     Supervisor.start_link(children, opts)
   end
 

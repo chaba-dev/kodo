@@ -37,6 +37,12 @@ defmodule Kodo.Agent.ToolsTest do
     assert Tools.authorization("standard", "start_command", %{"command" => "mix test; curl x"}) ==
              :approval
 
+    assert Tools.authorization("standard", "start_command", %{"command" => "mix\ntest"}) ==
+             :approval
+
+    assert Tools.authorization("standard", "start_command", %{"command" => "mix\rtest"}) ==
+             :approval
+
     assert Tools.authorization("standard", "start_command", %{"command" => "rm file"}) ==
              :approval
   end

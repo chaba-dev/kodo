@@ -10,6 +10,7 @@ defmodule Kodo.Sessions.Projection do
     :model,
     approval_policy: "standard",
     status: "idle",
+    pending_approval_id: nil,
     last_sequence: @before_first_event_sequence,
     messages: [],
     tool_calls: %{}
@@ -41,6 +42,18 @@ defmodule Kodo.Sessions.Projection do
 
   defp reduce(projection, "session_cancelled", _payload) do
     %{projection | status: "cancelled"}
+  end
+
+  defp reduce(projection, "approval_requested", payload) do
+    %{projection | pending_approval_id: payload["approval_id"]}
+  end
+
+  defp reduce(projection, "approval_resolved", payload) do
+    if projection.pending_approval_id == payload["approval_id"] do
+      %{projection | pending_approval_id: nil}
+    else
+      projection
+    end
   end
 
   defp reduce(projection, type, payload)

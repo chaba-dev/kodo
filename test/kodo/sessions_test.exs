@@ -8,8 +8,10 @@ defmodule Kodo.SessionsTest do
   import Kodo.AccountsFixtures
 
   setup do
+    scope = user_scope_fixture()
+
     {:ok, runner} =
-      Runners.register(%{
+      Runners.register(scope, %{
         workspace_root: "/work/#{Ecto.UUID.generate()}",
         platform: "linux",
         architecture: "x86_64",
@@ -18,7 +20,7 @@ defmodule Kodo.SessionsTest do
         capabilities: []
       })
 
-    %{runner: runner, scope: user_scope_fixture()}
+    %{runner: runner, scope: scope}
   end
 
   test "creates a session with its reconstructible creation event", %{
@@ -65,6 +67,36 @@ defmodule Kodo.SessionsTest do
     assert "can't be blank" in errors_on(changeset).user_id
   end
 
+  test "rejects another user's owned runner", %{runner: runner} do
+    other_scope = user_scope_fixture()
+
+    assert {:error, :runner_not_authorized} =
+             Sessions.create_session(other_scope, %{
+               runner_id: runner.id,
+               title: "Unauthorized workspace",
+               model: "test:model"
+             })
+  end
+
+  test "rejects an ownerless legacy runner", %{scope: scope} do
+    {:ok, runner} =
+      Runners.register(%{
+        workspace_root: "/work/#{Ecto.UUID.generate()}",
+        platform: "linux",
+        architecture: "x86_64",
+        runner_version: "0.1.0",
+        protocol_version: 3,
+        capabilities: []
+      })
+
+    assert {:error, :runner_not_authorized} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Cannot claim by UUID",
+               model: "test:model"
+             })
+  end
+
   test "allocates gap-free event sequences and replays after a cursor", %{
     runner: runner,
     scope: scope
@@ -96,5 +128,71 @@ defmodule Kodo.SessionsTest do
 
     assert event.type == "session_status_changed"
     assert event.payload == %{"status" => "cancelled"}
+  end
+
+  test "begins a turn with its message and running status in one transaction", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Atomic turn",
+        model: "openai:gpt-4o-mini"
+      })
+
+    request_id = Ecto.UUID.generate()
+    assert {:ok, [message, status]} = Sessions.begin_turn(session.id, "Fix it", request_id)
+    assert message.type == "user_message"
+    assert status.type == "session_status_changed"
+    assert status.sequence == message.sequence + 1
+    assert Sessions.get_session!(session.id).status == "running"
+    assert {:ok, []} = Sessions.begin_turn(session.id, "Fix it", request_id)
+
+    assert {:error, :turn_in_progress} = Sessions.begin_turn(session.id, "Duplicate")
+    assert Enum.count(Sessions.events_after(session.id), &(&1.type == "user_message")) == 1
+  end
+
+  test "retries session creation by client request id", %{runner: runner, scope: scope} do
+    attrs = %{
+      runner_id: runner.id,
+      title: "Idempotent creation",
+      model: "openai:gpt-4o-mini",
+      client_request_id: Ecto.UUID.generate()
+    }
+
+    assert {:ok, first} = Sessions.create_session(scope, attrs)
+    assert {:ok, second} = Sessions.create_session(scope, attrs)
+    assert second.id == first.id
+  end
+
+  test "only the current durable approval can resolve", %{runner: runner, scope: scope} do
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Current approval",
+        model: "openai:gpt-4o-mini",
+        approval_policy: "safe"
+      })
+
+    first = Ecto.UUID.generate()
+    second = Ecto.UUID.generate()
+
+    {:ok, _status} = Sessions.set_status(session.id, "running")
+
+    assert {:ok, {_request, _status}} =
+             Sessions.request_approval(session.id, %{"approval_id" => first})
+
+    assert {:ok, _cancelled} = Sessions.cancel_session(session.id)
+    {:ok, _status} = Sessions.set_status(session.id, "running")
+
+    assert {:ok, {_request, _status}} =
+             Sessions.request_approval(session.id, %{"approval_id" => second})
+
+    assert {:error, :approval_not_pending} =
+             Sessions.resolve_approval(scope, session.id, first, "approved")
+
+    assert {:ok, {_resolved, _status}} =
+             Sessions.resolve_approval(scope, session.id, second, "approved")
   end
 end

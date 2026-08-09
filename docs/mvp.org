@@ -111,6 +111,11 @@ The first deployment is single-user and local. Phoenix, PostgreSQL, the Rust
 runner, and both clients run on the developer's machine. The model provider is
 the only required external service.
 
+The MVP runs exactly one Phoenix node and one application replica. Node-local
+registries prevent duplicate coordinators within that BEAM instance; a
+database-backed lease with fencing is required before clustered or replicated
+Phoenix deployment is supported.
+
 ** Rust runner and CLI
 
 The Rust application may initially ship as one binary with separate execution
@@ -697,10 +702,10 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 
 ** TODO Milestone 6: Reliability and release candidate
 
-- [ ] Runner reconnect and temporary-disconnection behavior.
-- [ ] Phoenix session-process restart recovery.
+- [X] Runner reconnect and temporary-disconnection behavior.
+- [X] Phoenix session-process restart recovery.
 - [ ] Provider and tool timeout handling.
-- [ ] Command and agent cancellation.
+- [X] Command and agent cancellation.
 - [ ] Clear truncated-output and patch-failure behavior.
 - [X] Hermetic full-stack coverage on every test run and an intentionally
   triggered live-provider smoke test for the core workflow.

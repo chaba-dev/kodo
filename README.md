@@ -40,6 +40,13 @@ collaborator comments exactly `/live-smoke-test`. Configure a protected GitHub E
 environment approval and use a low-quota key: the workflow intentionally executes the requested PR
 revision with that credential.
 
+## Deployment boundary
+
+The MVP supports exactly one Phoenix application node/replica. PostgreSQL makes active sessions
+recoverable after that node restarts, but it does not yet provide a distributed coordinator lease;
+running multiple Phoenix replicas could execute one session concurrently. Keep the Phoenix replica
+count at one until a database-backed lease with fencing is implemented.
+
 The live test can also be run locally:
 
 ```sh
