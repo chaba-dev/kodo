@@ -76,6 +76,29 @@ defmodule Kodo.Sessions do
     end
   end
 
+  def resolve_approval(%Scope{} = scope, session_id, approval_id, decision)
+      when decision in ["approved", "denied"] do
+    case get_session(scope, session_id) do
+      %Session{} -> do_resolve_approval(session_id, approval_id, decision)
+      nil -> {:error, :not_found}
+    end
+  end
+
+  def resolve_approval(%Scope{}, _session_id, _approval_id, _decision),
+    do: {:error, :invalid_decision}
+
+  def request_approval(session_id, payload, opts \\ []) do
+    case Repo.transaction(fn -> request_approval_locked(session_id, payload, opts) end) do
+      {:ok, {requested, status_event}} = result ->
+        broadcast(requested)
+        broadcast(status_event)
+        result
+
+      error ->
+        error
+    end
+  end
+
   defp start_active_session(session_id) do
     DynamicSupervisor.start_child(
       Kodo.SessionSupervisor,
@@ -95,6 +118,18 @@ defmodule Kodo.Sessions do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp do_resolve_approval(session_id, approval_id, decision) do
+    case Repo.transaction(fn -> resolve_approval_locked(session_id, approval_id, decision) end) do
+      {:ok, {resolved, status_event}} = result ->
+        broadcast(resolved)
+        broadcast(status_event)
+        result
+
+      error ->
+        error
     end
   end
 
@@ -199,6 +234,96 @@ defmodule Kodo.Sessions do
     end
   end
 
+  defp resolve_approval_locked(session_id, approval_id, decision) do
+    session = lock_session!(session_id)
+    existing_decision = approval_decision(session_id, approval_id)
+
+    pending? =
+      session.status == "awaiting_approval" and
+        approval_requested?(session_id, approval_id) and
+        is_nil(existing_decision)
+
+    cond do
+      existing_decision == decision ->
+        :already_resolved
+
+      not is_nil(existing_decision) ->
+        Repo.rollback(:approval_already_resolved)
+
+      pending? ->
+        with {:ok, resolved} <-
+               append_locked(
+                 session,
+                 "approval_resolved",
+                 %{"approval_id" => approval_id, "decision" => decision},
+                 source: "user"
+               ),
+             refreshed = lock_session!(session_id),
+             {:ok, refreshed} <-
+               refreshed |> Session.status_changeset("running") |> Repo.update(),
+             {:ok, status_event} <-
+               append_locked(
+                 refreshed,
+                 "session_status_changed",
+                 %{"status" => "running"},
+                 source: "user"
+               ) do
+          {resolved, status_event}
+        else
+          {:error, changeset} -> Repo.rollback(changeset)
+        end
+
+      true ->
+        Repo.rollback(:approval_not_pending)
+    end
+  end
+
+  defp request_approval_locked(session_id, payload, opts) do
+    session = lock_session!(session_id)
+
+    if session.status == "running" do
+      with {:ok, requested} <-
+             append_locked(session, "approval_requested", payload,
+               parent_id: Keyword.get(opts, :parent_id)
+             ),
+           refreshed = lock_session!(session_id),
+           {:ok, refreshed} <-
+             refreshed |> Session.status_changeset("awaiting_approval") |> Repo.update(),
+           {:ok, status_event} <-
+             append_locked(refreshed, "session_status_changed", %{
+               "status" => "awaiting_approval"
+             }) do
+        {requested, status_event}
+      else
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    else
+      Repo.rollback(:session_not_running)
+    end
+  end
+
+  defp approval_requested?(session_id, approval_id) do
+    Repo.exists?(
+      from(event in Event,
+        where:
+          event.session_id == ^session_id and event.type == "approval_requested" and
+            fragment("?->>'approval_id'", event.payload) == ^approval_id
+      )
+    )
+  end
+
+  defp approval_decision(session_id, approval_id) do
+    Repo.one(
+      from(event in Event,
+        where:
+          event.session_id == ^session_id and event.type == "approval_resolved" and
+            fragment("?->>'approval_id'", event.payload) == ^approval_id,
+        select: fragment("?->>'decision'", event.payload),
+        limit: 1
+      )
+    )
+  end
+
   defp create_session_locked(user, attrs) do
     session = if user, do: %Session{user_id: user.id}, else: %Session{}
 
@@ -211,6 +336,7 @@ defmodule Kodo.Sessions do
                "title" => session.title,
                "runner_id" => session.runner_id,
                "model" => session.model,
+               "approval_policy" => session.approval_policy,
                "status" => session.status
              },
              source: "system"

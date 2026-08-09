@@ -82,12 +82,38 @@ defmodule KodoWeb.SessionController do
     end
   end
 
+  def resolve_approval(conn, %{"id" => id, "approval_id" => approval_id, "decision" => decision}) do
+    case Sessions.resolve_approval(conn.assigns.current_scope, id, approval_id, decision) do
+      {:ok, {_resolved, _status_event}} ->
+        json(conn, %{status: "running", decision: decision})
+
+      {:ok, :already_resolved} ->
+        json(conn, %{status: "running", decision: decision})
+
+      {:error, :not_found} ->
+        conn |> put_status(:not_found) |> json(%{error: "session not found"})
+
+      {:error, :invalid_decision} ->
+        conn |> put_status(:unprocessable_entity) |> json(%{error: "invalid decision"})
+
+      {:error, :approval_not_pending} ->
+        conn |> put_status(:conflict) |> json(%{error: "approval is not pending"})
+
+      {:error, :approval_already_resolved} ->
+        conn |> put_status(:conflict) |> json(%{error: "approval was resolved differently"})
+    end
+  end
+
+  def resolve_approval(conn, _params),
+    do: conn |> put_status(:unprocessable_entity) |> json(%{error: "decision is required"})
+
   defp session_json(session) do
     %{
       id: session.id,
       runner_id: session.runner_id,
       title: session.title,
       model: session.model,
+      approval_policy: session.approval_policy,
       status: session.status
     }
   end
@@ -98,6 +124,7 @@ defmodule KodoWeb.SessionController do
       runner_id: projection.runner_id,
       title: projection.title,
       model: projection.model,
+      approval_policy: projection.approval_policy,
       status: projection.status
     }
   end

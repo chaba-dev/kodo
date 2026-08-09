@@ -164,7 +164,8 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp execute_tools(session_id, runner_id, invocation_id, calls, budgets) do
-    with :ok <- Phoenix.PubSub.subscribe(Kodo.PubSub, "runner_responses:#{runner_id}") do
+    with :ok <- Phoenix.PubSub.subscribe(Kodo.PubSub, "runner_responses:#{runner_id}"),
+         :ok <- Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session_id}") do
       Enum.reduce_while(calls, {:ok, []}, fn call, result ->
         execute_next_tool(
           call,
@@ -209,6 +210,7 @@ defmodule Kodo.Agent.Loop do
              },
              parent_id: invocation_id
            ),
+         :ok <- authorize_tool(session_id, invocation_id, call_id, name, arguments),
          :ok <- dispatch(runner_id, request_id, request),
          {:ok, _event} <-
            Sessions.append_event(
@@ -256,6 +258,55 @@ defmodule Kodo.Agent.Loop do
       "request" => request
     })
   end
+
+  defp authorize_tool(session_id, invocation_id, call_id, name, arguments) do
+    policy = session_id |> Sessions.get_session!() |> Map.fetch!(:approval_policy)
+
+    case Tools.authorization(policy, name, arguments) do
+      :allow -> :ok
+      :deny -> {:error, {:tool_denied, policy, name}}
+      :approval -> await_approval(session_id, invocation_id, call_id, name, arguments)
+    end
+  end
+
+  defp await_approval(session_id, invocation_id, call_id, name, arguments) do
+    approval_id = Ecto.UUID.generate()
+
+    with {:ok, {_event, _status_event}} <-
+           Sessions.request_approval(
+             session_id,
+             %{
+               "approval_id" => approval_id,
+               "tool_call_id" => call_id,
+               "name" => name,
+               "arguments" => arguments,
+               "description" => approval_description(name, arguments)
+             },
+             parent_id: invocation_id
+           ) do
+      receive do
+        {:session_event,
+         %{
+           type: "approval_resolved",
+           payload: %{"approval_id" => ^approval_id, "decision" => "approved"}
+         }} ->
+          :ok
+
+        {:session_event,
+         %{
+           type: "approval_resolved",
+           payload: %{"approval_id" => ^approval_id, "decision" => "denied"}
+         }} ->
+          {:error, :approval_denied}
+      end
+    end
+  end
+
+  defp approval_description("start_command", %{"command" => command}),
+    do: "Run command: #{command}"
+
+  defp approval_description("apply_patch", _arguments), do: "Apply a patch to the workspace"
+  defp approval_description(name, _arguments), do: "Run #{name}"
 
   defp persist_tool_failure(session_id, invocation_id, call_id, request_id, name, reason) do
     _ =

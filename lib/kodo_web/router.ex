@@ -43,6 +43,7 @@ defmodule KodoWeb.Router do
     get "/sessions/:id", SessionController, :show
     post "/sessions/:id/messages", SessionController, :message
     post "/sessions/:id/cancel", SessionController, :cancel
+    post "/sessions/:id/approvals/:approval_id", SessionController, :resolve_approval
   end
 
   # Other scopes may use custom stacks.
@@ -71,6 +72,8 @@ defmodule KodoWeb.Router do
 
   scope "/", KodoWeb do
     pipe_through [:browser, :require_authenticated_user]
+
+    get "/sessions/:id", PageController, :session_handoff
 
     live_session :require_authenticated_user,
       on_mount: [{KodoWeb.UserAuth, :require_authenticated}] do

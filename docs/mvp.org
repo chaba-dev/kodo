@@ -664,14 +664,14 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 - [X] Exit criterion: an API-driven session can complete a small coding task
   and be reconstructed entirely from persisted events.
 
-** TODO Milestone 3: CLI frontend
+** DONE Milestone 3: CLI frontend
 
-- [ ] Start and resume session commands.
-- [ ] Streaming transcript and tool activity.
-- [ ] Approval interaction and interrupt control.
-- [ ] Final diff and verification summary.
-- [ ] Browser handoff URL.
-- [ ] Exit criterion: a developer can complete the core workflow without
+- [X] Start and resume session commands.
+- [X] Streaming transcript and tool activity through durable cursor replay.
+- [X] Approval interaction and interrupt control.
+- [X] Final diff and verification summary.
+- [X] Browser handoff URL.
+- [X] Exit criterion: a developer can complete the core workflow without
   opening the browser.
 
 ** TODO Milestone 4: LiveView frontend

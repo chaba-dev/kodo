@@ -36,7 +36,21 @@ defmodule Kodo.SessionsTest do
     assert event.sequence == 1
     assert event.type == "session_created"
     assert event.payload["runner_id"] == runner.id
+    assert event.payload["approval_policy"] == "standard"
     assert event.payload["status"] == "idle"
+  end
+
+  test "persists a selected approval policy", %{runner: runner, scope: scope} do
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Careful changes",
+               model: "openai:gpt-4o-mini",
+               approval_policy: "safe"
+             })
+
+    assert session.approval_policy == "safe"
+    assert hd(Sessions.events_after(session.id)).payload["approval_policy"] == "safe"
   end
 
   test "rejects a session without an owning user", %{runner: runner} do

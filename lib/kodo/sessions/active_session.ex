@@ -104,7 +104,7 @@ defmodule Kodo.Sessions.ActiveSession do
   defp recover(session_id) do
     projection = session_id |> Sessions.events_after() |> Projection.from_events()
 
-    if projection.status == "running" do
+    if projection.status in ["running", "awaiting_approval"] do
       _ =
         Sessions.append_event(session_id, "session_failed", %{
           "reason" => "active coordinator restarted during a turn"

@@ -8,6 +8,7 @@ defmodule Kodo.Sessions.Projection do
     :title,
     :runner_id,
     :model,
+    approval_policy: "standard",
     status: "idle",
     last_sequence: @before_first_event_sequence,
     messages: [],
@@ -29,6 +30,7 @@ defmodule Kodo.Sessions.Projection do
       | title: payload["title"],
         runner_id: payload["runner_id"],
         model: payload["model"],
+        approval_policy: payload["approval_policy"] || "standard",
         status: payload["status"]
     }
   end
