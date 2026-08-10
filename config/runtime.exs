@@ -20,6 +20,27 @@ if System.get_env("PHX_SERVER") do
   config :kodo, KodoWeb.Endpoint, server: true
 end
 
+artifact_revision = System.get_env("KODO_ARTIFACT_REVISION")
+deployment_generation = System.get_env("KODO_DEPLOYMENT_GENERATION")
+
+if config_env() == :prod || artifact_revision || deployment_generation do
+  artifact_revision =
+    case artifact_revision do
+      revision when is_binary(revision) and revision != "" -> revision
+      _invalid -> raise "KODO_ARTIFACT_REVISION must be a non-empty string"
+    end
+
+  deployment_generation =
+    case Integer.parse(deployment_generation || "") do
+      {generation, ""} when generation >= 0 -> generation
+      _invalid -> raise "KODO_DEPLOYMENT_GENERATION must be a non-negative integer"
+    end
+
+  config :kodo, Kodo.Cluster.InstanceManager,
+    artifact_revision: artifact_revision,
+    deployment_generation: deployment_generation
+end
+
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :kodo, KodoWeb.Endpoint,
