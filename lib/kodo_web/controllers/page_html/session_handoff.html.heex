@@ -1,0 +1,33 @@
+<Layouts.app flash={@flash} current_scope={@current_scope}>
+  <section id="session-handoff" class="mx-auto max-w-2xl space-y-8">
+    <div class="space-y-3">
+      <p class="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">Kodo session</p>
+      <h1 class="text-3xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
+        {@session.title}
+      </h1>
+      <div class="flex flex-wrap items-center gap-3 text-sm text-zinc-600 dark:text-zinc-300">
+        <span
+          id="session-status"
+          class="rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 font-medium dark:border-zinc-700 dark:bg-zinc-900"
+        >
+          {@session.status}
+        </span>
+        <span class="font-mono text-xs">{@session.id}</span>
+      </div>
+    </div>
+
+    <div class="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+      <h2 class="text-base font-semibold text-zinc-950 dark:text-zinc-50">
+        Continue in the terminal
+      </h2>
+      <p class="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+        The CLI is streaming this durable session and remains the control surface for this milestone.
+        Live browser controls and the complete transcript arrive in the next frontend milestone.
+      </p>
+      <code
+        id="resume-command"
+        class="mt-5 block overflow-x-auto rounded-xl bg-zinc-950 px-4 py-3 text-sm text-emerald-300"
+      >kodo resume {@session.id}</code>
+    </div>
+  </section>
+</Layouts.app>

@@ -11,7 +11,6 @@ defmodule KodoWeb.RunnerRegistrationController do
   @token_max_age_seconds RunnerProtocol.token_max_age_seconds()
 
   def create(conn, params) do
-    # Registration is intentionally an unauthenticated bootstrap boundary limited to this host.
     cond do
       not json_request?(conn) ->
         conn |> put_status(:unsupported_media_type) |> json(%{error: "JSON body required"})
@@ -20,7 +19,7 @@ defmodule KodoWeb.RunnerRegistrationController do
         conn |> put_status(:forbidden) |> json(%{error: "loopback access required"})
 
       true ->
-        case Runners.register(params) do
+        case Runners.register(conn.assigns.current_scope, params) do
           {:ok, runner} ->
             token = Phoenix.Token.sign(KodoWeb.Endpoint, @token_salt, runner.id)
 
@@ -33,7 +32,10 @@ defmodule KodoWeb.RunnerRegistrationController do
               protocol_version: @protocol_version
             })
 
-          {:error, changeset} ->
+          {:error, :runner_not_authorized} ->
+            conn |> put_status(:forbidden) |> json(%{error: "runner belongs to another user"})
+
+          {:error, %Ecto.Changeset{} = changeset} ->
             conn |> put_status(:unprocessable_entity) |> json(%{errors: errors(changeset)})
         end
     end

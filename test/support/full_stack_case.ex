@@ -35,7 +35,7 @@ defmodule Kodo.Test.FullStackCase do
     root
   end
 
-  def start_runner!(base_url, workspace) do
+  def start_runner!(base_url, workspace, token) do
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "runners")
     executable = runner_executable!()
 
@@ -44,7 +44,15 @@ defmodule Kodo.Test.FullStackCase do
         :binary,
         :exit_status,
         :stderr_to_stdout,
-        args: ["daemon", "--workspace", workspace, "--control-plane", base_url]
+        args: [
+          "daemon",
+          "--workspace",
+          workspace,
+          "--control-plane",
+          base_url,
+          "--token",
+          token
+        ]
       ])
 
     monitor = :erlang.monitor(:port, port)
@@ -72,14 +80,25 @@ defmodule Kodo.Test.FullStackCase do
   end
 
   def replay!(base_url, session_id, token) do
+    replay_pages!(base_url, session_id, token, 0, [])
+  end
+
+  defp replay_pages!(base_url, session_id, token, cursor, events) do
     response =
-      Req.get!(base_url <> "/api/sessions/#{session_id}",
+      Req.get!(base_url <> "/api/sessions/#{session_id}?after_sequence=#{cursor}",
         auth: {:bearer, token},
         receive_timeout: @http_timeout
       )
 
     assert response.status == @http_ok_status
-    response.body
+    replay = response.body
+    events = events ++ replay["events"]
+
+    if replay["has_more"] do
+      replay_pages!(base_url, session_id, token, List.last(events)["sequence"], events)
+    else
+      Map.put(replay, "events", events)
+    end
   end
 
   def assert_live_outcome!(replay, workspace) do

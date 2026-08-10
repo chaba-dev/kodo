@@ -6,12 +6,19 @@ defmodule Kodo.Runners do
   truth for ephemeral online state so crashes cannot leave a stale connected flag.
   """
 
+  import Ecto.Query
+
   alias Kodo.Repo
   alias Kodo.RunnerProtocol
   alias Kodo.Runners.Runner
+  alias Kodo.Accounts.Scope
 
   @max_payload_bytes RunnerProtocol.max_payload_bytes()
   @runner_lifecycle_topic "runners"
+
+  def subscribe_lifecycle do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, @runner_lifecycle_topic)
+  end
 
   @doc "Returns a durable runner identity, whether or not it is currently connected."
   def get_runner(id), do: Repo.get(Runner, id)
@@ -35,20 +42,50 @@ defmodule Kodo.Runners do
   end
 
   @doc "Upserts mutable metadata while preserving the workspace's stable runner UUID."
-  def register(attrs) do
+  def register(%Scope{user: user}, attrs), do: do_register(attrs, user.id)
+  def register(attrs), do: do_register(attrs, nil)
+
+  defp do_register(attrs, user_id) do
     now = DateTime.utc_now()
 
     result =
-      %Runner{}
-      |> Runner.registration_changeset(attrs)
-      |> Ecto.Changeset.put_change(:last_seen_at, now)
-      |> Repo.insert(
-        conflict_target: :workspace_root,
-        on_conflict: {:replace, registration_fields()},
-        returning: true
-      )
+      Repo.transaction(fn ->
+        workspace_root = attrs[:workspace_root] || attrs["workspace_root"]
+
+        runner =
+          if is_binary(workspace_root) do
+            Runner
+            |> where([runner], runner.workspace_root == ^workspace_root)
+            |> lock("FOR UPDATE")
+            |> Repo.one()
+          end
+
+        if runner && runner.user_id not in [nil, user_id] do
+          Repo.rollback(:runner_not_authorized)
+        else
+          (runner || %Runner{})
+          |> Runner.registration_changeset(attrs)
+          |> Ecto.Changeset.put_change(:user_id, user_id || (runner && runner.user_id))
+          |> Ecto.Changeset.put_change(:last_seen_at, now)
+          |> persist_registration(runner)
+        end
+      end)
 
     broadcast_lifecycle(result, :runner_registered)
+  end
+
+  defp persist_registration(changeset, nil) do
+    case Repo.insert(changeset) do
+      {:ok, runner} -> runner
+      {:error, changeset} -> Repo.rollback(changeset)
+    end
+  end
+
+  defp persist_registration(changeset, %Runner{}) do
+    case Repo.update(changeset) do
+      {:ok, runner} -> runner
+      {:error, changeset} -> Repo.rollback(changeset)
+    end
   end
 
   @doc "Records a successful authenticated channel join."
@@ -69,19 +106,6 @@ defmodule Kodo.Runners do
       nil -> {:error, :not_found}
       runner -> runner |> Ecto.Changeset.change(last_seen_at: DateTime.utc_now()) |> Repo.update()
     end
-  end
-
-  defp registration_fields do
-    [
-      :name,
-      :platform,
-      :architecture,
-      :runner_version,
-      :protocol_version,
-      :capabilities,
-      :last_seen_at,
-      :updated_at
-    ]
   end
 
   defp broadcast_lifecycle({:ok, runner} = result, event) do

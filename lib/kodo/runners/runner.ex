@@ -28,6 +28,7 @@ defmodule Kodo.Runners.Runner do
     field :capabilities, {:array, :string}, default: []
     field :last_connected_at, :utc_datetime_usec
     field :last_seen_at, :utc_datetime_usec
+    belongs_to :user, Kodo.Accounts.User, type: :id
 
     timestamps(type: :utc_datetime_usec)
   end

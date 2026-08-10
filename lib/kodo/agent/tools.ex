@@ -6,6 +6,22 @@ defmodule Kodo.Agent.Tools do
   @minimum_zero_based_value 0
   @minimum_positive_count 1
   @integer %{"type" => "integer", "minimum" => @minimum_zero_based_value}
+  @verification_commands [
+    "cargo clippy",
+    "cargo fmt --check",
+    "cargo test",
+    "go test",
+    "mix compile",
+    "mix credo",
+    "mix format --check-formatted",
+    "mix test",
+    "npm run test",
+    "npm test",
+    "pnpm test",
+    "pytest",
+    "yarn test"
+  ]
+  @shell_metacharacters ~r/[;&|`$><\n\r]/
 
   def definitions do
     [
@@ -56,6 +72,31 @@ defmodule Kodo.Agent.Tools do
   end
 
   def request(_name, _arguments), do: {:error, :invalid_tool_call}
+
+  def authorization("read-only", name, _arguments)
+      when name in ["apply_patch", "start_command", "stop_command"],
+      do: :deny
+
+  def authorization("safe", name, _arguments)
+      when name in ["apply_patch", "start_command", "stop_command"],
+      do: :approval
+
+  def authorization("standard", "start_command", %{"command" => command}) do
+    if verification_command?(command), do: :allow, else: :approval
+  end
+
+  def authorization(policy, _name, _arguments)
+      when policy in ["read-only", "safe", "standard"],
+      do: :allow
+
+  defp verification_command?(command) when is_binary(command) do
+    unsafe? = Regex.match?(@shell_metacharacters, command)
+    normalized = command |> String.trim() |> String.replace(~r/[ \t]+/, " ")
+
+    not unsafe? and normalized in @verification_commands
+  end
+
+  defp verification_command?(_command), do: false
 
   defp translate("list_files", %{"path" => path} = args) when is_binary(path),
     do: exact(args, ["path"], "list_files")

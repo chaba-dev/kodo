@@ -12,13 +12,10 @@ defmodule Kodo.LLM do
           required(:text) => String.t(),
           required(:tool_calls) => [map()],
           required(:usage) => map() | nil,
-          required(:continuation) => term()
+          optional(:assistant) => map()
         }
 
   @callback generate(String.t(), [map()], [tool()], keyword()) ::
-              {:ok, result()} | {:error, term()}
-
-  @callback continue(String.t(), term(), [map()], [tool()], keyword()) ::
               {:ok, result()} | {:error, term()}
 
   def adapter, do: Application.get_env(:kodo, :llm_adapter, Kodo.LLM.ReqLLM)

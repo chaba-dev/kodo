@@ -8,6 +8,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+use tokio::sync::oneshot;
 use tokio::time::{Instant, interval_at, sleep};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite};
 use url::{Host, Url};
@@ -54,6 +55,12 @@ pub enum ControlPlaneError {
     Configuration(String),
     #[error("runner limits changed; restart the daemon to begin a new policy epoch")]
     PolicyChanged,
+}
+
+/// Identity of a runner after registration and channel authentication have completed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerReady {
+    pub runner_id: String,
 }
 
 #[derive(Serialize)]
@@ -142,7 +149,30 @@ fn required_string(value: Value, field: &str) -> Result<String, ControlPlaneErro
 }
 
 /// Register the workspace and maintain its authenticated loopback control-plane connection.
-pub async fn serve(base: &str, workspace: &Workspace) -> Result<(), ControlPlaneError> {
+pub async fn serve(
+    base: &str,
+    workspace: &Workspace,
+    agent_token: &str,
+) -> Result<(), ControlPlaneError> {
+    serve_inner(base, workspace, agent_token, None).await
+}
+
+/// Serve like [`serve`], notifying an in-process client once sessions can target this runner.
+pub async fn serve_with_ready(
+    base: &str,
+    workspace: &Workspace,
+    agent_token: &str,
+    ready: oneshot::Sender<RunnerReady>,
+) -> Result<(), ControlPlaneError> {
+    serve_inner(base, workspace, agent_token, Some(ready)).await
+}
+
+async fn serve_inner(
+    base: &str,
+    workspace: &Workspace,
+    agent_token: &str,
+    mut ready: Option<oneshot::Sender<RunnerReady>>,
+) -> Result<(), ControlPlaneError> {
     let base = validate_base_url(base)?;
     let root = workspace.root().to_str().ok_or_else(|| {
         ControlPlaneError::Registration("canonical workspace root is not UTF-8".into())
@@ -158,7 +188,7 @@ pub async fn serve(base: &str, workspace: &Workspace) -> Result<(), ControlPlane
     let mut backoff = INITIAL_RECONNECT_DELAY;
     loop {
         if registration.is_none() {
-            match register(&client, &base, root).await {
+            match register(&client, &base, root, agent_token).await {
                 Ok(registered) => {
                     registration = Some(registered);
                     backoff = INITIAL_RECONNECT_DELAY;
@@ -204,6 +234,11 @@ pub async fn serve(base: &str, workspace: &Workspace) -> Result<(), ControlPlane
                 dispatcher
             }
         };
+        if let Some(sender) = ready.take() {
+            let _ = sender.send(RunnerReady {
+                runner_id: registered.runner_id.clone(),
+            });
+        }
         if let Err(error) = channel_loop(socket, registered, dispatcher).await {
             eprintln!("kodo: control-plane connection lost: {error}");
         }
@@ -243,6 +278,7 @@ async fn register(
     client: &reqwest::Client,
     base: &Url,
     root: &str,
+    agent_token: &str,
 ) -> Result<Registration, ControlPlaneError> {
     let endpoint = base
         .join(&format!(
@@ -261,6 +297,7 @@ async fn register(
     };
     let mut response = client
         .post(endpoint)
+        .bearer_auth(agent_token)
         .json(&request)
         .send()
         .await

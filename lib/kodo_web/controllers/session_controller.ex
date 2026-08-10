@@ -6,6 +6,7 @@ defmodule KodoWeb.SessionController do
   alias Kodo.Sessions
 
   @before_first_event_sequence 0
+  @event_page_size 4
 
   def create(conn, params) do
     case Sessions.create_session(conn.assigns.current_scope, params) do
@@ -14,6 +15,9 @@ defmodule KodoWeb.SessionController do
 
       {:error, %Ecto.Changeset{} = changeset} ->
         conn |> put_status(:unprocessable_entity) |> json(%{errors: errors(changeset)})
+
+      {:error, reason} when reason in [:runner_not_found, :runner_not_authorized] ->
+        conn |> put_status(:forbidden) |> json(%{error: "runner is not available"})
     end
   end
 
@@ -34,30 +38,39 @@ defmodule KodoWeb.SessionController do
     all_events = Sessions.events_after(conn.assigns.current_scope, id)
     projection = Kodo.Sessions.Projection.from_events(all_events)
 
+    page =
+      all_events |> Enum.drop_while(&(&1.sequence <= cursor)) |> Enum.take(@event_page_size + 1)
+
+    has_more = length(page) > @event_page_size
+
     json(conn, %{
       session: projection_json(projection),
-      events:
-        all_events
-        |> Enum.drop_while(&(&1.sequence <= cursor))
-        |> Enum.map(&event_json/1)
+      events: page |> Enum.take(@event_page_size) |> Enum.map(&event_json/1),
+      has_more: has_more
     })
   end
 
-  def message(conn, %{"id" => id, "content" => content}) when is_binary(content) do
+  def message(conn, %{"id" => id, "content" => content} = params) when is_binary(content) do
     content = String.trim(content)
+    client_request_id = params["client_request_id"]
 
-    if content == "" do
-      conn |> put_status(:unprocessable_entity) |> json(%{error: "content is required"})
-    else
-      start_turn(conn, id, content)
+    cond do
+      content == "" ->
+        conn |> put_status(:unprocessable_entity) |> json(%{error: "content is required"})
+
+      is_binary(client_request_id) and match?(:error, Ecto.UUID.cast(client_request_id)) ->
+        conn |> put_status(:unprocessable_entity) |> json(%{error: "invalid client request id"})
+
+      true ->
+        start_turn(conn, id, content, client_request_id)
     end
   end
 
   def message(conn, _params),
     do: conn |> put_status(:unprocessable_entity) |> json(%{error: "content is required"})
 
-  defp start_turn(conn, id, content) do
-    case Sessions.start_turn(conn.assigns.current_scope, id, content) do
+  defp start_turn(conn, id, content, client_request_id) do
+    case Sessions.start_turn(conn.assigns.current_scope, id, content, client_request_id) do
       :ok ->
         conn |> put_status(:accepted) |> json(%{status: "running"})
 
@@ -82,12 +95,38 @@ defmodule KodoWeb.SessionController do
     end
   end
 
+  def resolve_approval(conn, %{"id" => id, "approval_id" => approval_id, "decision" => decision}) do
+    case Sessions.resolve_approval(conn.assigns.current_scope, id, approval_id, decision) do
+      {:ok, {_resolved, _status_event}} ->
+        json(conn, %{status: "running", decision: decision})
+
+      {:ok, :already_resolved} ->
+        json(conn, %{status: "running", decision: decision})
+
+      {:error, :not_found} ->
+        conn |> put_status(:not_found) |> json(%{error: "session not found"})
+
+      {:error, :invalid_decision} ->
+        conn |> put_status(:unprocessable_entity) |> json(%{error: "invalid decision"})
+
+      {:error, :approval_not_pending} ->
+        conn |> put_status(:conflict) |> json(%{error: "approval is not pending"})
+
+      {:error, :approval_already_resolved} ->
+        conn |> put_status(:conflict) |> json(%{error: "approval was resolved differently"})
+    end
+  end
+
+  def resolve_approval(conn, _params),
+    do: conn |> put_status(:unprocessable_entity) |> json(%{error: "decision is required"})
+
   defp session_json(session) do
     %{
       id: session.id,
       runner_id: session.runner_id,
       title: session.title,
       model: session.model,
+      approval_policy: session.approval_policy,
       status: session.status
     }
   end
@@ -98,7 +137,9 @@ defmodule KodoWeb.SessionController do
       runner_id: projection.runner_id,
       title: projection.title,
       model: projection.model,
-      status: projection.status
+      approval_policy: projection.approval_policy,
+      status: projection.status,
+      pending_approval_id: projection.pending_approval_id
     }
   end
 

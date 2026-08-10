@@ -1,6 +1,8 @@
 defmodule KodoWeb.RunnerRegistrationControllerTest do
   use KodoWeb.ConnCase
 
+  import Kodo.AccountsFixtures
+
   @valid %{
     workspace_root: "/work/project",
     platform: "linux",
@@ -9,6 +11,10 @@ defmodule KodoWeb.RunnerRegistrationControllerTest do
     protocol_version: 3,
     capabilities: ["shell"]
   }
+
+  setup %{conn: conn} do
+    %{conn: authenticate_agent(conn, user_fixture())}
+  end
 
   test "loopback registration returns socket credentials", %{conn: conn} do
     response = conn |> post_json(@valid) |> json_response(200)
@@ -28,6 +34,10 @@ defmodule KodoWeb.RunnerRegistrationControllerTest do
 
   test "registration rejects browser form bodies", %{conn: conn} do
     assert conn |> post(~p"/api/runners", @valid) |> json_response(415)
+  end
+
+  test "registration requires an authenticated owner" do
+    assert build_conn() |> post_json(@valid) |> json_response(401)
   end
 
   defp post_json(conn, params) do

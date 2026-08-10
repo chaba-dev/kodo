@@ -11,15 +11,24 @@ defmodule Kodo.Test.FakeLLM do
 
   @impl true
   def generate(_model, messages, _tools, _opts) do
-    case List.last(messages) do
+    last = List.last(messages)
+
+    if last["role"] == "tool" do
+      continue_from(last, messages)
+    else
+      initial(last)
+    end
+  end
+
+  defp initial(message) do
+    case message do
       %{"content" => @full_stack_prompt} ->
         tool_call(
           "e2e-patch",
           "apply_patch",
           %{
             "patch" => "--- a/greeting.txt\n+++ b/greeting.txt\n@@ -1 +1 @@\n-helo\n+hello\n"
-          },
-          :e2e_read_file
+          }
         )
 
       %{"content" => "wait"} ->
@@ -34,14 +43,49 @@ defmodule Kodo.Test.FakeLLM do
       %{"content" => "provider failure"} ->
         {:error, :provider_failure}
 
+      %{"content" => "duplicate tool ids"} ->
+        {:ok,
+         %{
+           type: :tool_calls,
+           text: "",
+           tool_calls: [
+             %{
+               id: "duplicate",
+               name: "apply_patch",
+               arguments: %{"patch" => "*** Begin Patch\n*** End Patch"}
+             },
+             %{
+               id: "duplicate",
+               name: "apply_patch",
+               arguments: %{"patch" => "*** Begin Patch\n*** End Patch"}
+             }
+           ],
+           usage: %{total_tokens: @standard_usage_tokens}
+         }}
+
+      %{"content" => "multiple tools"} ->
+        {:ok,
+         %{
+           type: :tool_calls,
+           text: "",
+           tool_calls: [
+             %{
+               id: "first",
+               name: "apply_patch",
+               arguments: %{"patch" => "*** Begin Patch\n*** End Patch"}
+             },
+             %{id: "second", name: "read_file", arguments: %{"path" => "README.md"}}
+           ],
+           usage: %{total_tokens: @standard_usage_tokens}
+         }}
+
       %{"content" => "token budget"} ->
         {:ok,
          %{
            type: :final_answer,
            text: "Too expensive",
            tool_calls: [],
-           usage: %{total_tokens: @over_budget_usage_tokens},
-           continuation: :done
+           usage: %{total_tokens: @over_budget_usage_tokens}
          }}
 
       _message ->
@@ -56,67 +100,54 @@ defmodule Kodo.Test.FakeLLM do
                arguments: %{"patch" => "*** Begin Patch\n*** End Patch"}
              }
            ],
-           usage: %{total_tokens: @standard_usage_tokens},
-           continuation: :first
+           usage: %{total_tokens: @standard_usage_tokens}
          }}
     end
   end
 
-  @impl true
-  def continue(_model, :e2e_read_file, [%{output: _output}], _tools, _opts) do
-    tool_call(
-      "e2e-read",
-      "read_file",
-      %{"path" => "greeting.txt", "offset" => 0, "limit" => @read_file_limit_bytes},
-      :e2e_git_diff
-    )
+  defp continue_from(%{"role" => "tool", "name" => "apply_patch"}, messages) do
+    if Enum.any?(messages, &match?(%{"content" => @full_stack_prompt}, &1)) do
+      tool_call(
+        "e2e-read",
+        "read_file",
+        %{"path" => "greeting.txt", "offset" => 0, "limit" => @read_file_limit_bytes}
+      )
+    else
+      final("The fix is complete.")
+    end
   end
 
-  def continue(_model, :e2e_git_diff, [%{output: output}], _tools, _opts) do
+  defp continue_from(%{"role" => "tool", "name" => "read_file", "content" => output}, _messages) do
     content = output["content"] || output[:content]
 
     if String.trim(content) == "hello" do
-      tool_call(
-        "e2e-diff",
-        "git_diff",
-        %{"paths" => ["greeting.txt"]},
-        :e2e_final
-      )
+      tool_call("e2e-diff", "git_diff", %{"paths" => ["greeting.txt"]})
     else
       {:error, {:unexpected_file_content, content}}
     end
   end
 
-  def continue(_model, :e2e_final, [%{output: _output}], _tools, _opts) do
+  defp continue_from(%{"role" => "tool", "name" => "git_diff"}, _messages) do
+    final("Greeting corrected and repository evidence verified.")
+  end
+
+  defp final(text) do
     {:ok,
      %{
        type: :final_answer,
-       text: "Greeting corrected and repository evidence verified.",
+       text: text,
        tool_calls: [],
-       usage: %{total_tokens: @small_usage_tokens},
-       continuation: :done
+       usage: %{total_tokens: @small_usage_tokens}
      }}
   end
 
-  def continue(_model, :first, [%{output: output}], _tools, _opts) do
-    {:ok,
-     %{
-       type: :final_answer,
-       text: "The fix is complete.",
-       tool_calls: [],
-       usage: %{total_tokens: @small_usage_tokens},
-       continuation: output
-     }}
-  end
-
-  defp tool_call(id, name, arguments, continuation) do
+  defp tool_call(id, name, arguments) do
     {:ok,
      %{
        type: :tool_calls,
        text: "",
        tool_calls: [%{id: id, name: name, arguments: arguments}],
-       usage: %{total_tokens: @small_usage_tokens},
-       continuation: continuation
+       usage: %{total_tokens: @small_usage_tokens}
      }}
   end
 end

@@ -21,4 +21,29 @@ defmodule Kodo.Agent.ToolsTest do
     assert {:error, :invalid_tool_call} =
              Tools.request("read_file", %{"path" => "file", "offset" => 0, "limit" => "10"})
   end
+
+  test "applies conservative approval policies to mutating tools and commands" do
+    assert Tools.authorization("read-only", "apply_patch", %{}) == :deny
+    assert Tools.authorization("safe", "apply_patch", %{}) == :approval
+    assert Tools.authorization("standard", "apply_patch", %{}) == :allow
+
+    assert Tools.authorization("standard", "start_command", %{"command" => "mix test"}) ==
+             :allow
+
+    assert Tools.authorization("standard", "start_command", %{
+             "command" => "mix test /tmp/untrusted.exs"
+           }) == :approval
+
+    assert Tools.authorization("standard", "start_command", %{"command" => "mix test; curl x"}) ==
+             :approval
+
+    assert Tools.authorization("standard", "start_command", %{"command" => "mix\ntest"}) ==
+             :approval
+
+    assert Tools.authorization("standard", "start_command", %{"command" => "mix\rtest"}) ==
+             :approval
+
+    assert Tools.authorization("standard", "start_command", %{"command" => "rm file"}) ==
+             :approval
+  end
 end

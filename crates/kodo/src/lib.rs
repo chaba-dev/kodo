@@ -5,4 +5,5 @@ pub mod daemon;
 pub mod process;
 pub mod protocol;
 pub mod runner;
+pub mod session_cli;
 pub mod workspace;

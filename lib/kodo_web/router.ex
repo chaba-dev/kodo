@@ -31,18 +31,19 @@ defmodule KodoWeb.Router do
   scope "/api", KodoWeb do
     pipe_through :api
 
-    post "/runners", RunnerRegistrationController, :create
     post "/auth/token", AgentSessionController, :create
   end
 
   scope "/api", KodoWeb do
     pipe_through [:api, :authenticated_agent]
 
+    post "/runners", RunnerRegistrationController, :create
     delete "/auth/token", AgentSessionController, :delete
     post "/sessions", SessionController, :create
     get "/sessions/:id", SessionController, :show
     post "/sessions/:id/messages", SessionController, :message
     post "/sessions/:id/cancel", SessionController, :cancel
+    post "/sessions/:id/approvals/:approval_id", SessionController, :resolve_approval
   end
 
   # Other scopes may use custom stacks.
@@ -71,6 +72,8 @@ defmodule KodoWeb.Router do
 
   scope "/", KodoWeb do
     pipe_through [:browser, :require_authenticated_user]
+
+    get "/sessions/:id", PageController, :session_handoff
 
     live_session :require_authenticated_user,
       on_mount: [{KodoWeb.UserAuth, :require_authenticated}] do
