@@ -45,7 +45,8 @@ revision with that credential.
 The MVP supports exactly one Phoenix application node/replica. PostgreSQL makes active sessions
 recoverable after that node restarts, but it does not yet provide a distributed coordinator lease;
 running multiple Phoenix replicas could execute one session concurrently. Keep the Phoenix replica
-count at one until a database-backed lease with fencing is implemented.
+count at one until the next planned milestone adds PostgreSQL ownership epochs, global BEAM process
+discovery, and revision-aware proactive deploy handoff.
 
 The live test can also be run locally:
 
