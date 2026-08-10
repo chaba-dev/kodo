@@ -126,20 +126,21 @@ defmodule Kodo.Sessions do
         :ok
 
       %Session{} ->
-        case cancel(session_id) do
-          {:error, reason} when reason in [:not_running, :already_finished] ->
-            if get_session(scope, session_id).status == "cancelled",
-              do: :ok,
-              else: {:error, reason}
-
-          result ->
-            result
-        end
+        session_id
+        |> cancel()
+        |> reconcile_cancel(scope, session_id)
 
       nil ->
         {:error, :not_found}
     end
   end
+
+  defp reconcile_cancel({:error, reason}, scope, session_id)
+       when reason in [:not_running, :already_finished] do
+    if get_session(scope, session_id).status == "cancelled", do: :ok, else: {:error, reason}
+  end
+
+  defp reconcile_cancel(result, _scope, _session_id), do: result
 
   def resolve_approval(%Scope{} = scope, session_id, approval_id, decision)
       when decision in ["approved", "denied"] do

@@ -32,7 +32,12 @@ enum Commands {
             default_value = "http://localhost:4451"
         )]
         control_plane: String,
-        #[arg(long, env = "KODO_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "KODO_TOKEN",
+            hide_env_values = true,
+            allow_hyphen_values = true
+        )]
         token: String,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
@@ -48,7 +53,12 @@ enum Commands {
             default_value = "http://localhost:4451"
         )]
         control_plane: String,
-        #[arg(long, env = "KODO_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "KODO_TOKEN",
+            hide_env_values = true,
+            allow_hyphen_values = true
+        )]
         token: String,
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
@@ -61,7 +71,12 @@ enum Commands {
         /// Register with a loopback Phoenix control plane and serve over its WebSocket.
         #[arg(long)]
         control_plane: Option<String>,
-        #[arg(long, env = "KODO_TOKEN", hide_env_values = true)]
+        #[arg(
+            long,
+            env = "KODO_TOKEN",
+            hide_env_values = true,
+            allow_hyphen_values = true
+        )]
         token: Option<String>,
     },
 }

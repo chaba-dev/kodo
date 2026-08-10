@@ -60,16 +60,14 @@ defmodule Kodo.Runners do
             |> Repo.one()
           end
 
-        cond do
-          runner && runner.user_id not in [nil, user_id] ->
-            Repo.rollback(:runner_not_authorized)
-
-          true ->
-            (runner || %Runner{})
-            |> Runner.registration_changeset(attrs)
-            |> Ecto.Changeset.put_change(:user_id, user_id || (runner && runner.user_id))
-            |> Ecto.Changeset.put_change(:last_seen_at, now)
-            |> persist_registration(runner)
+        if runner && runner.user_id not in [nil, user_id] do
+          Repo.rollback(:runner_not_authorized)
+        else
+          (runner || %Runner{})
+          |> Runner.registration_changeset(attrs)
+          |> Ecto.Changeset.put_change(:user_id, user_id || (runner && runner.user_id))
+          |> Ecto.Changeset.put_change(:last_seen_at, now)
+          |> persist_registration(runner)
         end
       end)
 

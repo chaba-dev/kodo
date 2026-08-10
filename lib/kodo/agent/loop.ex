@@ -29,37 +29,51 @@ defmodule Kodo.Agent.Loop do
 
     latest_response = List.last(responses)
 
-    with :ok <- within_budget(invocations, tokens, budgets) do
-      case next_action(latest_invocation, latest_response) do
-        :infer ->
-          infer(session_id, projection, events, adapter, budgets, invocations + 1)
+    case within_budget(invocations, tokens, budgets) do
+      :ok ->
+        action = next_action(latest_invocation, latest_response)
+        resume_action(action, session_id, projection, events, adapter, budgets, invocations)
 
-        %{payload: %{"tool_calls" => calls}} = response when calls != [] ->
-          with {:ok, _results} <-
-                 execute_tools(
-                   session_id,
-                   projection.runner_id,
-                   response,
-                   calls,
-                   budgets
-                 ) do
-            refreshed_events = Sessions.events_after(session_id)
-            refreshed_projection = Projection.from_events(refreshed_events)
-
-            infer(
-              session_id,
-              refreshed_projection,
-              refreshed_events,
-              adapter,
-              budgets,
-              invocations + 1
-            )
-          end
-
-        %{payload: %{"tool_calls" => []} = payload} ->
-          {:ok, payload["text"]}
-      end
+      error ->
+        error
     end
+  end
+
+  defp resume_action(:infer, session_id, projection, events, adapter, budgets, invocations) do
+    infer(session_id, projection, events, adapter, budgets, invocations + 1)
+  end
+
+  defp resume_action(
+         %{payload: %{"tool_calls" => calls}} = response,
+         session_id,
+         projection,
+         _events,
+         adapter,
+         budgets,
+         invocations
+       )
+       when calls != [] do
+    case execute_tools(session_id, projection.runner_id, response, calls, budgets) do
+      {:ok, _results} -> continue_after_tools(session_id, adapter, budgets, invocations)
+      error -> error
+    end
+  end
+
+  defp resume_action(
+         %{payload: %{"tool_calls" => [], "text" => text}},
+         _session_id,
+         _projection,
+         _events,
+         _adapter,
+         _budgets,
+         _invocations
+       ),
+       do: {:ok, text}
+
+  defp continue_after_tools(session_id, adapter, budgets, invocations) do
+    events = Sessions.events_after(session_id)
+    projection = Projection.from_events(events)
+    infer(session_id, projection, events, adapter, budgets, invocations + 1)
   end
 
   defp next_action(nil, nil), do: :infer
@@ -101,47 +115,44 @@ defmodule Kodo.Agent.Loop do
     system = %{"role" => "system", "content" => system_prompt()}
 
     Enum.reduce(events, [system], fn event, messages ->
-      case event do
-        %{type: "user_message", payload: payload} ->
-          messages ++ [%{"role" => "user", "content" => payload["content"]}]
-
-        %{type: "model_response", payload: payload} ->
-          assistant =
-            case payload["assistant"] do
-              nil ->
-                %{
-                  "role" => "assistant",
-                  "content" => payload["text"] || "",
-                  "tool_calls" => payload["tool_calls"] || []
-                }
-
-              provider_state ->
-                %{"role" => "assistant", "provider_state" => provider_state}
-            end
-
-          messages ++ [assistant]
-
-        %{type: type, payload: payload} when type in ["tool_completed", "tool_failed"] ->
-          content =
-            if type == "tool_completed",
-              do: payload["output"],
-              else: %{"error" => payload["error"]}
-
-          messages ++
-            [
-              %{
-                "role" => "tool",
-                "tool_call_id" => payload["tool_call_id"],
-                "name" => payload["name"],
-                "content" => content
-              }
-            ]
-
-        _ ->
-          messages
+      case transcript_message(event) do
+        nil -> messages
+        message -> messages ++ [message]
       end
     end)
   end
+
+  defp transcript_message(%{type: "user_message", payload: payload}),
+    do: %{"role" => "user", "content" => payload["content"]}
+
+  defp transcript_message(%{type: "model_response", payload: payload}),
+    do: assistant_message(payload)
+
+  defp transcript_message(%{type: type, payload: payload})
+       when type in ["tool_completed", "tool_failed"] do
+    content =
+      if type == "tool_completed", do: payload["output"], else: %{"error" => payload["error"]}
+
+    %{
+      "role" => "tool",
+      "tool_call_id" => payload["tool_call_id"],
+      "name" => payload["name"],
+      "content" => content
+    }
+  end
+
+  defp transcript_message(_event), do: nil
+
+  defp assistant_message(%{"assistant" => nil} = payload) do
+    %{
+      "role" => "assistant",
+      "content" => payload["text"] || "",
+      "tool_calls" => payload["tool_calls"] || []
+    }
+  end
+
+  defp assistant_message(%{"assistant" => provider_state}),
+    do: %{"role" => "assistant", "provider_state" => provider_state}
 
   defp start_invocation(session_id, continuation) do
     invocation_id = Ecto.UUID.generate()
@@ -206,30 +217,51 @@ defmodule Kodo.Agent.Loop do
          :ok <- Runners.subscribe_lifecycle() do
       events = Sessions.events_after(session_id)
 
-      Enum.reduce_while(Enum.with_index(calls), {:ok, []}, fn {call, index}, {:ok, results} ->
-        case execute_tool(
-               session_id,
-               runner_id,
-               response.payload["invocation_id"],
-               call,
-               events,
-               budgets[:tool_timeout]
-             ) do
-          {:ok, result} ->
-            {:cont, {:ok, results ++ [result]}}
+      invocation_id = response.payload["invocation_id"]
 
-          {:error, reason} ->
-            case persist_skipped_tools(
-                   session_id,
-                   response.payload["invocation_id"],
-                   Enum.drop(calls, index + 1),
-                   call["id"]
-                 ) do
-              :ok -> {:halt, {:error, reason}}
-              {:error, persistence_reason} -> {:halt, {:error, persistence_reason}}
-            end
-        end
+      Enum.reduce_while(Enum.with_index(calls), {:ok, []}, fn call_with_index, result ->
+        reduce_tool_call(
+          call_with_index,
+          result,
+          session_id,
+          runner_id,
+          invocation_id,
+          calls,
+          events,
+          budgets[:tool_timeout]
+        )
       end)
+    end
+  end
+
+  defp reduce_tool_call(
+         {call, index},
+         {:ok, results},
+         session_id,
+         runner_id,
+         invocation_id,
+         calls,
+         events,
+         timeout
+       ) do
+    case execute_tool(session_id, runner_id, invocation_id, call, events, timeout) do
+      {:ok, result} ->
+        {:cont, {:ok, results ++ [result]}}
+
+      {:error, reason} ->
+        halt_after_tool_failure(session_id, invocation_id, calls, index, call, reason)
+    end
+  end
+
+  defp halt_after_tool_failure(session_id, invocation_id, calls, index, call, reason) do
+    case persist_skipped_tools(
+           session_id,
+           invocation_id,
+           Enum.drop(calls, index + 1),
+           call["id"]
+         ) do
+      :ok -> {:halt, {:error, reason}}
+      {:error, persistence_reason} -> {:halt, {:error, persistence_reason}}
     end
   end
 
@@ -245,8 +277,15 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp execute_tool(session_id, runner_id, invocation_id, call, events, timeout) do
-    call_id = call["id"]
+    facts = tool_facts(events, invocation_id, call["id"])
 
+    case recorded_tool_result(facts, call["id"]) do
+      nil -> execute_unrecorded_tool(session_id, runner_id, invocation_id, call, facts, timeout)
+      result -> result
+    end
+  end
+
+  defp tool_facts(events, invocation_id, call_id) do
     call_facts =
       Enum.filter(events, fn event ->
         (event.parent_id == invocation_id or event.payload["invocation_id"] == invocation_id) and
@@ -263,27 +302,40 @@ defmodule Kodo.Agent.Loop do
         &(&1.type == "approval_resolved" and &1.payload["approval_id"] in approval_ids)
       )
 
-    facts = call_facts ++ resolutions
+    call_facts ++ resolutions
+  end
 
-    cond do
-      completed = Enum.find(facts, &(&1.type == "tool_completed")) ->
-        payload = completed.payload
-        {:ok, %{tool_call_id: call_id, name: payload["name"], output: payload["output"]}}
+  defp recorded_tool_result(facts, call_id) do
+    case Enum.find(facts, &(&1.type == "tool_completed")) do
+      nil -> recorded_tool_failure(facts)
+      completed -> completed_tool_result(completed.payload, call_id)
+    end
+  end
 
-      failed = Enum.find(facts, &(&1.type == "tool_failed")) ->
-        {:error, {:recorded_tool_failure, failed.payload["error"]}}
+  defp recorded_tool_failure(facts) do
+    case Enum.find(facts, &(&1.type == "tool_failed")) do
+      nil -> nil
+      failed -> {:error, {:recorded_tool_failure, failed.payload["error"]}}
+    end
+  end
 
-      true ->
-        case execute_incomplete(session_id, runner_id, invocation_id, call, facts, timeout) do
-          {:error, reason} = error ->
-            case persist_tool_failure(session_id, invocation_id, call, facts, reason) do
-              :ok -> error
-              {:error, persistence_reason} -> {:error, persistence_reason}
-            end
+  defp completed_tool_result(payload, call_id),
+    do: {:ok, %{tool_call_id: call_id, name: payload["name"], output: payload["output"]}}
 
-          result ->
-            result
-        end
+  defp execute_unrecorded_tool(session_id, runner_id, invocation_id, call, facts, timeout) do
+    case execute_incomplete(session_id, runner_id, invocation_id, call, facts, timeout) do
+      {:error, reason} = error ->
+        reconcile_tool_failure(session_id, invocation_id, call, facts, reason, error)
+
+      result ->
+        result
+    end
+  end
+
+  defp reconcile_tool_failure(session_id, invocation_id, call, facts, reason, error) do
+    case persist_tool_failure(session_id, invocation_id, call, facts, reason) do
+      :ok -> error
+      {:error, persistence_reason} -> {:error, persistence_reason}
     end
   end
 

@@ -49,11 +49,13 @@ defmodule Kodo.Sessions.ActiveSession do
         %{task: nil, projection: %{status: status}} = state
       )
       when status not in ["running", "awaiting_approval"] and is_binary(content) and content != "" do
-    with {:ok, _events} <- Sessions.begin_turn(state.projection.id, content, client_request_id) do
-      task = Task.async(fn -> Loop.run(state.projection.id) end)
-      {:reply, :ok, %{state | task: task}}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    case Sessions.begin_turn(state.projection.id, content, client_request_id) do
+      {:ok, _events} ->
+        task = Task.async(fn -> Loop.run(state.projection.id) end)
+        {:reply, :ok, %{state | task: task}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
