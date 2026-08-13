@@ -1,5 +1,10 @@
 defmodule Kodo.Cluster.Instance do
-  @moduledoc "A durable record of one control-plane boot incarnation."
+  @moduledoc """
+  A durable record of one control-plane boot incarnation.
+
+  Protocol capabilities describe clustered control-plane features. Runner transport compatibility
+  remains defined by `Kodo.RunnerProtocol.version/0` rather than duplicated in this metadata.
+  """
 
   use Ecto.Schema
   import Ecto.Changeset

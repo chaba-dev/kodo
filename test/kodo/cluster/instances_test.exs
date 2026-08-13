@@ -76,7 +76,7 @@ defmodule Kodo.Cluster.InstancesTest do
         artifact_revision: "sha-def",
         deployment_generation: 13,
         capacity: 2,
-        protocol_capabilities: ["runner-v3"],
+        protocol_capabilities: ["session-events-v1"],
         heartbeat_interval: :infinity
       })
 
@@ -100,7 +100,7 @@ defmodule Kodo.Cluster.InstancesTest do
         artifact_revision: "sha-shutdown",
         deployment_generation: 14,
         capacity: 2,
-        protocol_capabilities: ["runner-v3"],
+        protocol_capabilities: ["session-events-v1"],
         heartbeat_interval: :infinity
       })
 
@@ -122,7 +122,7 @@ defmodule Kodo.Cluster.InstancesTest do
        artifact_revision: "sha-ghi",
        deployment_generation: 14,
        capacity: 2,
-       protocol_capabilities: ["runner-v3"],
+       protocol_capabilities: ["session-events-v1"],
        heartbeat_interval: :infinity}
 
     assert {:ok, first} = DynamicSupervisor.start_child(supervisor, child)

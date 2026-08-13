@@ -38,7 +38,7 @@ config :kodo,
 config :kodo, Kodo.Cluster.InstanceManager,
   artifact_revision: "development",
   deployment_generation: 0,
-  protocol_capabilities: ["session-events-v1", "runner-v3"],
+  protocol_capabilities: ["session-events-v1"],
   heartbeat_interval: 5_000
 
 config :kodo, start_instance_manager: true
