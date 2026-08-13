@@ -718,7 +718,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 
 ** TODO Milestone 4: Clustered ownership and deploy handoff
 
-- [X] Register BEAM instances with boot incarnation, artifact revision,
+- [ ] Register BEAM instances with boot incarnation, artifact revision,
   deployment generation, readiness, draining state, capacity, and protocol
   capabilities.
 - [ ] Add PostgreSQL session ownership epochs and require the current epoch for

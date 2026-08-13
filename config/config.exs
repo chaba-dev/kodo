@@ -35,14 +35,6 @@ config :kodo,
     tool_timeout: default_tool_timeout_ms
   ]
 
-config :kodo, Kodo.Cluster.InstanceManager,
-  artifact_revision: "development",
-  deployment_generation: 0,
-  protocol_capabilities: ["session-events-v1", "runner-v3"],
-  heartbeat_interval: 5_000
-
-config :kodo, start_instance_manager: true
-
 # Phoenix messages are capped at the cross-language protocol limit. Bandit counts the largest
 # possible WebSocket header in its frame size, while fragmented-message size counts payload bytes.
 runner_wire_bytes = 4 * 1024 * 1024
