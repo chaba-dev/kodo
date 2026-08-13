@@ -721,7 +721,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 - [X] Register BEAM instances with boot incarnation, artifact revision,
   deployment generation, readiness, draining state, capacity, and protocol
   capabilities.
-- [ ] Add PostgreSQL session ownership epochs and require the current epoch for
+- [X] Add PostgreSQL session ownership epochs and require the current epoch for
   every state-advancing transaction and newly dispatched effect.
 - [ ] Fail coordinators closed when ownership or authoritative instance
   liveness can no longer be maintained.

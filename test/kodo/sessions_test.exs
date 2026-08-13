@@ -1,6 +1,7 @@
 defmodule Kodo.SessionsTest do
   use Kodo.DataCase
 
+  alias Kodo.Cluster.Instances
   alias Kodo.Runners
   alias Kodo.Sessions
   alias Kodo.Sessions.Session
@@ -153,6 +154,48 @@ defmodule Kodo.SessionsTest do
     assert Enum.count(Sessions.events_after(session.id), &(&1.type == "user_message")) == 1
   end
 
+  test "advances ownership epochs and fences every stale state mutation", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Fenced session",
+        model: "test:model"
+      })
+
+    {:ok, first_owner} = Instances.register(instance_attrs("kodo@one"))
+    {:ok, second_owner} = Instances.register(instance_attrs("kodo@two"))
+
+    assert {:ok, first} = Sessions.claim_ownership(session.id, first_owner.boot_id)
+    assert first.epoch == 1
+    assert :ok = Sessions.assert_owner(first)
+    assert {:error, :session_owned} = Sessions.claim_ownership(session.id, second_owner.boot_id)
+
+    assert {:ok, second} = Sessions.transfer_ownership(first, second_owner.boot_id)
+    assert second.epoch == 2
+    assert {:error, :stale_ownership} = Sessions.assert_owner(first)
+    assert :ok = Sessions.assert_owner(second)
+
+    assert {:error, :stale_ownership} =
+             Sessions.append_event(session.id, "user_message", %{"content" => "stale"},
+               ownership: first
+             )
+
+    assert {:error, :stale_ownership} =
+             Sessions.begin_turn(session.id, "stale turn", nil, ownership: first)
+
+    assert {:ok, _event} =
+             Sessions.append_event(session.id, "user_message", %{"content" => "current"},
+               ownership: second
+             )
+
+    persisted = Sessions.get_session!(session.id)
+    assert persisted.owner_boot_id == second_owner.boot_id
+    assert persisted.ownership_epoch == 2
+  end
+
   test "retries session creation by client request id", %{runner: runner, scope: scope} do
     attrs = %{
       runner_id: runner.id,
@@ -194,5 +237,18 @@ defmodule Kodo.SessionsTest do
 
     assert {:ok, {_resolved, _status}} =
              Sessions.resolve_approval(scope, session.id, second, "approved")
+  end
+
+  defp instance_attrs(node_name) do
+    %{
+      boot_id: Ecto.UUID.generate(),
+      node_name: node_name,
+      artifact_revision: "test-revision",
+      deployment_generation: 1,
+      ready: true,
+      draining: false,
+      capacity: 1,
+      protocol_capabilities: ["session-events-v1"]
+    }
   end
 end

@@ -4,6 +4,7 @@ defmodule Kodo.Sessions.ActiveSession do
   use GenServer
 
   alias Kodo.Agent.Loop
+  alias Kodo.Cluster.InstanceManager
   alias Kodo.Sessions
   alias Kodo.Sessions.Projection
 
@@ -26,18 +27,21 @@ defmodule Kodo.Sessions.ActiveSession do
 
   def cancel(pid), do: GenServer.call(pid, :cancel)
 
+  def resolve_approval(pid, approval_id, decision),
+    do: GenServer.call(pid, {:resolve_approval, approval_id, decision})
+
   @impl true
   def init(session_id) do
     Process.flag(:trap_exit, true)
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session_id}")
-    projection = recover(session_id)
 
-    task =
-      if projection.status in ["running", "awaiting_approval"] do
-        Task.async(fn -> Loop.run(session_id) end)
-      end
+    with {:ok, ownership} <-
+           Sessions.claim_ownership(session_id, InstanceManager.current_boot_id()) do
+      projection = recover(session_id)
+      task = maybe_start_loop(projection, ownership)
 
-    {:ok, %{projection: projection, task: task}}
+      {:ok, %{projection: projection, task: task, ownership: ownership}}
+    end
   end
 
   @impl true
@@ -49,9 +53,11 @@ defmodule Kodo.Sessions.ActiveSession do
         %{task: nil, projection: %{status: status}} = state
       )
       when status not in ["running", "awaiting_approval"] and is_binary(content) and content != "" do
-    case Sessions.begin_turn(state.projection.id, content, client_request_id) do
+    case Sessions.begin_turn(state.projection.id, content, client_request_id,
+           ownership: state.ownership
+         ) do
       {:ok, _events} ->
-        task = Task.async(fn -> Loop.run(state.projection.id) end)
+        task = start_loop(state.projection.id, state.ownership)
         {:reply, :ok, %{state | task: task}}
 
       {:error, reason} ->
@@ -60,7 +66,9 @@ defmodule Kodo.Sessions.ActiveSession do
   end
 
   def handle_call({:start_turn, content, client_request_id}, _from, state) do
-    case Sessions.begin_turn(state.projection.id, content, client_request_id) do
+    case Sessions.begin_turn(state.projection.id, content, client_request_id,
+           ownership: state.ownership
+         ) do
       {:ok, []} -> {:reply, :ok, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -78,7 +86,7 @@ defmodule Kodo.Sessions.ActiveSession do
         finish_cancelled_task(state, {:error, {:task_exit, reason}})
 
       nil ->
-        case Sessions.cancel_session(state.projection.id) do
+        case Sessions.cancel_session(state.projection.id, ownership: state.ownership) do
           {:ok, _cancelled} ->
             {:reply, :ok, %{state | task: nil}}
 
@@ -86,6 +94,18 @@ defmodule Kodo.Sessions.ActiveSession do
             {:stop, {:cancellation_persistence_failed, reason}, {:error, reason}, state}
         end
     end
+  end
+
+  def handle_call({:resolve_approval, approval_id, decision}, _from, state) do
+    result =
+      Sessions.resolve_owned_approval(
+        state.projection.id,
+        approval_id,
+        decision,
+        state.ownership
+      )
+
+    {:reply, result, state}
   end
 
   @impl true
@@ -105,16 +125,16 @@ defmodule Kodo.Sessions.ActiveSession do
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
-  defp finalize(session_id, {:ok, _answer}) do
-    Sessions.complete_session(session_id)
+  defp finalize(session_id, {:ok, _answer}, ownership) do
+    Sessions.complete_session(session_id, ownership: ownership)
   end
 
-  defp finalize(session_id, {:error, reason}) do
-    Sessions.fail_session(session_id, reason)
+  defp finalize(session_id, {:error, reason}, ownership) do
+    Sessions.fail_session(session_id, reason, ownership: ownership)
   end
 
   defp finish_task(state, result) do
-    case finalize(state.projection.id, result) do
+    case finalize(state.projection.id, result, state.ownership) do
       {:ok, _events} ->
         {:noreply, %{state | task: nil}}
 
@@ -127,7 +147,7 @@ defmodule Kodo.Sessions.ActiveSession do
   end
 
   defp finish_cancelled_task(state, result) do
-    case finalize(state.projection.id, result) do
+    case finalize(state.projection.id, result, state.ownership) do
       {:ok, _events} ->
         {:reply, {:error, :already_finished}, %{state | task: nil}}
 
@@ -141,6 +161,16 @@ defmodule Kodo.Sessions.ActiveSession do
 
   defp recover(session_id) do
     session_id |> Sessions.events_after() |> Projection.from_events()
+  end
+
+  defp maybe_start_loop(%{status: status, id: session_id}, ownership)
+       when status in ["running", "awaiting_approval"],
+       do: start_loop(session_id, ownership)
+
+  defp maybe_start_loop(_projection, _ownership), do: nil
+
+  defp start_loop(session_id, ownership) do
+    Task.async(fn -> Loop.run(session_id, ownership: ownership) end)
   end
 
   defp apply_committed_events(event, projection) when event.sequence <= projection.last_sequence,
