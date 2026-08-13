@@ -121,9 +121,11 @@ defmodule Kodo.Agent.Loop do
     with :ok <- within_budget(invocation, usage(current_turn(events)), budgets),
          {:ok, invocation_id} <- start_invocation(session_id, invocation, ownership),
          {:ok, response} <-
-           adapter.generate(projection.model, transcript(events), Tools.definitions(),
-             timeout: budgets[:model_timeout]
-           ),
+           Sessions.dispatch_if_owner(ownership, fn ->
+             adapter.generate(projection.model, transcript(events), Tools.definitions(),
+               timeout: budgets[:model_timeout]
+             )
+           end),
          {:ok, _event} <-
            persist_invocation_usage(session_id, invocation_id, response.usage, ownership),
          :ok <-
@@ -634,8 +636,8 @@ defmodule Kodo.Agent.Loop do
       "request" => request
     }
 
-    with :ok <- Sessions.assert_owner(ownership),
-         result <- Runners.dispatch(runner_id, envelope) do
+    with result <-
+           Sessions.dispatch_if_owner(ownership, fn -> Runners.dispatch(runner_id, envelope) end) do
       case result do
         :ok ->
           :ok

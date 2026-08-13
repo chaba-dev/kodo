@@ -4,6 +4,7 @@ defmodule Kodo.Sessions do
   import Ecto.Query
 
   alias Kodo.Accounts.Scope
+  alias Kodo.Cluster.Instances
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
@@ -15,6 +16,16 @@ defmodule Kodo.Sessions do
   @single_event_increment 1
   @single_updated_row 1
   @stale_coordinator_shutdown_timeout 5_000
+  @ownership_lock_sql "SELECT pg_advisory_lock(hashtextextended($1, 0))"
+  @ownership_unlock_sql "SELECT pg_advisory_unlock(hashtextextended($1, 0))"
+
+  @ownership_stale_after_seconds Keyword.fetch!(
+                                   Application.compile_env!(
+                                     :kodo,
+                                     Kodo.Cluster.InstanceManager
+                                   ),
+                                   :ownership_stale_after_seconds
+                                 )
 
   def get_session(id) do
     case Ecto.UUID.cast(id) do
@@ -38,41 +49,73 @@ defmodule Kodo.Sessions do
     |> Repo.all()
   end
 
-  @doc "Claims an unowned session, or replaces a prior coordinator from the same boot."
+  @doc "Claims an unowned session or replaces a coordinator from this node or a stale owner."
   def claim_ownership(session_id, owner_boot_id) do
-    Repo.transaction(fn ->
-      session = lock_session!(session_id, allow_unowned: true)
+    with_ownership_lock(session_id, fn ->
+      Repo.transaction(fn ->
+        session = lock_session!(session_id, allow_unowned: true)
 
-      if is_nil(session.owner_boot_id) or session.owner_boot_id == owner_boot_id do
-        epoch = session.ownership_epoch + 1
+        if claimable?(session, owner_boot_id) do
+          epoch = session.ownership_epoch + 1
 
-        session
-        |> Ecto.Changeset.change(owner_boot_id: owner_boot_id, ownership_epoch: epoch)
-        |> Repo.update!()
+          session
+          |> Ecto.Changeset.change(owner_boot_id: owner_boot_id, ownership_epoch: epoch)
+          |> Repo.update!()
 
-        %Ownership{session_id: session.id, owner_boot_id: owner_boot_id, epoch: epoch}
-      else
-        Repo.rollback(:session_owned)
-      end
+          %Ownership{session_id: session.id, owner_boot_id: owner_boot_id, epoch: epoch}
+        else
+          Repo.rollback(:session_owned)
+        end
+      end)
     end)
+  end
+
+  defp claimable?(session, nil),
+    do: is_nil(session.owner_boot_id)
+
+  defp claimable?(session, owner_boot_id) do
+    unless Instances.ownership_supported_cluster_wide?(
+             owner_boot_id,
+             @ownership_stale_after_seconds
+           ) do
+      Repo.rollback(:ownership_capability_not_cluster_wide)
+    end
+
+    is_nil(session.owner_boot_id) or session.owner_boot_id == owner_boot_id or
+      Instances.same_node?(session.owner_boot_id, owner_boot_id) or
+      not Instances.alive?(session.owner_boot_id, @ownership_stale_after_seconds)
   end
 
   @doc "Transfers a session by advancing its epoch under the current owner's fence."
   def transfer_ownership(%Ownership{} = ownership, new_owner_boot_id) do
-    Repo.transaction(fn ->
-      session = lock_session!(ownership.session_id, ownership: ownership)
-      epoch = session.ownership_epoch + 1
+    with_ownership_lock(ownership.session_id, fn ->
+      Repo.transaction(fn ->
+        session = lock_session!(ownership.session_id, ownership: ownership)
+        validate_owner_capability!(new_owner_boot_id)
+        epoch = session.ownership_epoch + 1
 
-      session
-      |> Ecto.Changeset.change(owner_boot_id: new_owner_boot_id, ownership_epoch: epoch)
-      |> Repo.update!()
+        session
+        |> Ecto.Changeset.change(owner_boot_id: new_owner_boot_id, ownership_epoch: epoch)
+        |> Repo.update!()
 
-      %Ownership{
-        session_id: session.id,
-        owner_boot_id: new_owner_boot_id,
-        epoch: epoch
-      }
+        %Ownership{
+          session_id: session.id,
+          owner_boot_id: new_owner_boot_id,
+          epoch: epoch
+        }
+      end)
     end)
+  end
+
+  defp validate_owner_capability!(nil), do: :ok
+
+  defp validate_owner_capability!(owner_boot_id) do
+    unless Instances.ownership_supported_cluster_wide?(
+             owner_boot_id,
+             @ownership_stale_after_seconds
+           ) do
+      Repo.rollback(:ownership_capability_not_cluster_wide)
+    end
   end
 
   @doc "Checks a fencing token immediately before dispatching an external effect."
@@ -92,6 +135,65 @@ defmodule Kodo.Sessions do
       end
 
     if Repo.exists?(query), do: :ok, else: {:error, :stale_ownership}
+  end
+
+  @doc "Runs an external dispatch while serializing ownership transfer across the cluster."
+  def dispatch_if_owner(%Ownership{} = ownership, dispatch) when is_function(dispatch, 0) do
+    with_ownership_lock(ownership.session_id, fn ->
+      with :ok <- assert_owner(ownership), do: dispatch.()
+    end)
+  end
+
+  # A separate checkout holds the PostgreSQL session lock so the caller can perform short database
+  # operations without keeping a transaction open across a potentially long external request.
+  defp with_ownership_lock(session_id, fun) do
+    caller = self()
+    lock_ref = make_ref()
+
+    {holder, holder_ref} =
+      spawn_monitor(fn -> hold_ownership_lock(caller, lock_ref, session_id) end)
+
+    receive do
+      {^lock_ref, :acquired} ->
+        try do
+          fun.()
+        after
+          send(holder, {lock_ref, :release})
+
+          receive do
+            {:DOWN, ^holder_ref, :process, ^holder, :normal} -> :ok
+            {:DOWN, ^holder_ref, :process, ^holder, reason} -> exit(reason)
+          end
+        end
+
+      {:DOWN, ^holder_ref, :process, ^holder, reason} ->
+        exit(reason)
+    end
+  end
+
+  defp hold_ownership_lock(caller, lock_ref, session_id) do
+    run_outside_sandbox(fn ->
+      Ecto.Adapters.SQL.query!(Repo, @ownership_lock_sql, [session_id])
+      caller_ref = Process.monitor(caller)
+      send(caller, {lock_ref, :acquired})
+
+      try do
+        receive do
+          {^lock_ref, :release} -> :ok
+          {:DOWN, ^caller_ref, :process, ^caller, _reason} -> :ok
+        end
+      after
+        Ecto.Adapters.SQL.query!(Repo, @ownership_unlock_sql, [session_id])
+      end
+    end)
+  end
+
+  defp run_outside_sandbox(fun) do
+    if Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox do
+      Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fun)
+    else
+      Repo.checkout(fun, timeout: :infinity)
+    end
   end
 
   @doc "Returns the unique active coordinator, reconstructing it from events when needed."
@@ -204,10 +306,13 @@ defmodule Kodo.Sessions do
   def resolve_approval(%Scope{} = scope, session_id, approval_id, decision)
       when decision in ["approved", "denied"] do
     case get_session(scope, session_id) do
-      %Session{} ->
-        with {:ok, pid} <- ensure_started(session_id) do
-          Kodo.Sessions.ActiveSession.resolve_approval(pid, approval_id, decision)
-        end
+      %Session{} = session ->
+        resolve_owned_approval(
+          session_id,
+          approval_id,
+          decision,
+          ownership_for(session)
+        )
 
       nil ->
         {:error, :not_found}
@@ -287,6 +392,14 @@ defmodule Kodo.Sessions do
       error ->
         error
     end
+  end
+
+  defp ownership_for(%Session{} = session) do
+    %Ownership{
+      session_id: session.id,
+      owner_boot_id: session.owner_boot_id,
+      epoch: session.ownership_epoch
+    }
   end
 
   @doc "Appends an event while locking its session row to allocate exactly one sequence number."

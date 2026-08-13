@@ -11,6 +11,8 @@ defmodule Kodo.Cluster.Instances do
   alias Kodo.Cluster.Instance
   alias Kodo.Repo
 
+  @ownership_capability "session-ownership-v1"
+
   @immutable_registration_fields [
     :node_name,
     :artifact_revision,
@@ -88,6 +90,43 @@ defmodule Kodo.Cluster.Instances do
     )
     |> order_by([instance], asc: instance.boot_id)
     |> Repo.all()
+  end
+
+  @doc "Checks authoritative heartbeat liveness without conflating it with placement readiness."
+  def alive?(boot_id, stale_after_seconds)
+      when is_integer(stale_after_seconds) and stale_after_seconds >= 0 do
+    Repo.exists?(
+      from(instance in Instance,
+        where:
+          instance.boot_id == ^boot_id and
+            fragment(
+              "? >= timezone('UTC', clock_timestamp()) - (? * interval '1 second')",
+              instance.last_seen_at,
+              ^stale_after_seconds
+            )
+      )
+    )
+  end
+
+  @doc "Requires the target and every currently eligible node to support ownership fencing."
+  def ownership_supported_cluster_wide?(target_boot_id, stale_after_seconds)
+      when is_integer(stale_after_seconds) and stale_after_seconds >= 0 do
+    eligible = list_eligible(stale_after_seconds)
+
+    Enum.any?(eligible, &(&1.boot_id == target_boot_id)) and
+      Enum.all?(eligible, &(@ownership_capability in &1.protocol_capabilities))
+  end
+
+  def same_node?(left_boot_id, right_boot_id) do
+    query =
+      from(left in Instance,
+        join: right in Instance,
+        on: right.boot_id == ^right_boot_id,
+        where: left.boot_id == ^left_boot_id,
+        select: left.node_name == right.node_name
+      )
+
+    Repo.one(query) == true
   end
 
   defp resume_instance(instance, changeset) do

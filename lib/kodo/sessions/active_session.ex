@@ -27,9 +27,6 @@ defmodule Kodo.Sessions.ActiveSession do
 
   def cancel(pid), do: GenServer.call(pid, :cancel)
 
-  def resolve_approval(pid, approval_id, decision),
-    do: GenServer.call(pid, {:resolve_approval, approval_id, decision})
-
   @impl true
   def init(session_id) do
     Process.flag(:trap_exit, true)
@@ -94,18 +91,6 @@ defmodule Kodo.Sessions.ActiveSession do
             {:stop, {:cancellation_persistence_failed, reason}, {:error, reason}, state}
         end
     end
-  end
-
-  def handle_call({:resolve_approval, approval_id, decision}, _from, state) do
-    result =
-      Sessions.resolve_owned_approval(
-        state.projection.id,
-        approval_id,
-        decision,
-        state.ownership
-      )
-
-    {:reply, result, state}
   end
 
   @impl true

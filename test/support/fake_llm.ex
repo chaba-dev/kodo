@@ -40,6 +40,14 @@ defmodule Kodo.Test.FakeLLM do
           :never -> {:error, :unexpected}
         end
 
+      %{"content" => "ownership barrier"} ->
+        test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
+        send(test_pid, {:model_dispatch_started, self()})
+
+        receive do
+          :release_model_dispatch -> final("Released")
+        end
+
       %{"content" => "provider failure"} ->
         {:error, :provider_failure}
 

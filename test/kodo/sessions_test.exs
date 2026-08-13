@@ -196,6 +196,89 @@ defmodule Kodo.SessionsTest do
     assert persisted.ownership_epoch == 2
   end
 
+  test "a new boot takes over a session whose prior owner is stale", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Restart recovery",
+        model: "test:model"
+      })
+
+    {:ok, old_boot} = Instances.register(instance_attrs("kodo@old"))
+    {:ok, new_boot} = Instances.register(instance_attrs("kodo@new"))
+    {:ok, old_ownership} = Sessions.claim_ownership(session.id, old_boot.boot_id)
+
+    stale_timestamp = DateTime.add(DateTime.utc_now(), -120, :second)
+
+    Kodo.Cluster.Instance
+    |> where([instance], instance.boot_id == ^old_boot.boot_id)
+    |> Repo.update_all(set: [last_seen_at: stale_timestamp])
+
+    assert {:ok, new_ownership} =
+             Sessions.claim_ownership(session.id, new_boot.boot_id)
+
+    assert new_ownership.epoch > old_ownership.epoch
+    assert new_ownership.owner_boot_id == new_boot.boot_id
+  end
+
+  test "ownership activation is blocked while an eligible legacy instance lacks fencing", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Mixed rollout",
+        model: "test:model"
+      })
+
+    {:ok, target} = Instances.register(instance_attrs("kodo@target"))
+
+    {:ok, _legacy} =
+      Instances.register(%{
+        instance_attrs("kodo@legacy")
+        | protocol_capabilities: ["session-events-v1"]
+      })
+
+    assert {:error, :ownership_capability_not_cluster_wide} =
+             Sessions.claim_ownership(session.id, target.boot_id)
+  end
+
+  test "resolves an approval through durable ownership without a local coordinator", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Remote approval",
+        model: "test:model"
+      })
+
+    {:ok, owner} = Instances.register(instance_attrs("kodo@remote"))
+    {:ok, ownership} = Sessions.claim_ownership(session.id, owner.boot_id)
+    approval_id = Ecto.UUID.generate()
+
+    {:ok, _status} = Sessions.set_status(session.id, "running", "agent", ownership: ownership)
+
+    assert {:ok, {_request, _status}} =
+             Sessions.request_approval(
+               session.id,
+               %{"approval_id" => approval_id},
+               ownership: ownership
+             )
+
+    assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
+
+    assert {:ok, {_resolved, _status}} =
+             Sessions.resolve_approval(scope, session.id, approval_id, "approved")
+
+    assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
+  end
+
   test "retries session creation by client request id", %{runner: runner, scope: scope} do
     attrs = %{
       runner_id: runner.id,
@@ -248,7 +331,7 @@ defmodule Kodo.SessionsTest do
       ready: true,
       draining: false,
       capacity: 1,
-      protocol_capabilities: ["session-events-v1"]
+      protocol_capabilities: ["session-events-v1", "session-ownership-v1"]
     }
   end
 end
