@@ -48,6 +48,10 @@ running multiple Phoenix replicas could execute one session concurrently. Keep t
 count at one until the next planned milestone adds PostgreSQL ownership epochs, global BEAM process
 discovery, and revision-aware proactive deploy handoff.
 
+Production releases must identify their immutable artifact and ordered deployment generation. See
+the [server operations guide](docs/operations.org) for required values, rollback semantics, startup
+failure behavior, and the current clustering boundary.
+
 The live test can also be run locally:
 
 ```sh

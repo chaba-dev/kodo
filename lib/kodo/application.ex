@@ -19,6 +19,7 @@ defmodule Kodo.Application do
       {Registry, keys: :unique, name: Kodo.SessionRegistry},
       {DynamicSupervisor, name: Kodo.SessionSupervisor, strategy: :one_for_one},
       Kodo.Sessions.Recovery,
+      {Kodo.Cluster.InstanceManager, boot_id: Ecto.UUID.generate()},
       # Start to serve requests, typically the last entry
       KodoWeb.Endpoint
     ]
@@ -27,6 +28,15 @@ defmodule Kodo.Application do
     # for other strategies and supported options
     opts = [strategy: :rest_for_one, name: Kodo.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  @impl true
+  def prep_stop(state) do
+    if Process.whereis(Kodo.Cluster.InstanceManager) do
+      _ = Kodo.Cluster.InstanceManager.begin_drain()
+    end
+
+    state
   end
 
   # Tell Phoenix to update the endpoint configuration
