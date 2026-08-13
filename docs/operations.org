@@ -1,0 +1,137 @@
+#+title: Kodo Server Operations
+#+subtitle: Runtime and deployment requirements for the control plane
+#+startup: showall
+#+options: toc:2
+
+* Current deployment boundary
+
+Kodo currently supports exactly one Phoenix application node and replica.
+PostgreSQL persists session state and control-plane instance metadata, but
+session ownership epochs and fencing are not implemented yet. Running multiple
+replicas can therefore execute the same session concurrently.
+
+Keep the Phoenix replica count at one until clustered session ownership is
+complete. The instance registration described below prepares for clustered
+operation; it does not make a replicated deployment safe by itself.
+
+* Required production identity
+
+Every production server boot must receive both of these environment variables:
+
+| Variable                     | Meaning                                      |
+|------------------------------+----------------------------------------------|
+| ~KODO_ARTIFACT_REVISION~     | Immutable identity of the deployed artifact |
+| ~KODO_DEPLOYMENT_GENERATION~ | Ordered identity of the deployment rollout  |
+
+For example:
+
+#+begin_src sh
+export KODO_ARTIFACT_REVISION="$(git rev-parse HEAD)"
+export KODO_DEPLOYMENT_GENERATION="42"
+export PHX_SERVER=true
+bin/kodo start
+#+end_src
+
+The release pipeline or deployment system should supply these values. Do not
+derive them independently inside each running replica.
+
+** Artifact revision
+
+~KODO_ARTIFACT_REVISION~ must be a non-empty string that identifies the exact
+immutable code artifact. A Git commit SHA is suitable when one commit maps to
+one artifact. An image digest or immutable build identifier is preferable when
+the build can vary for the same commit.
+
+Artifact revisions are identities, not ordered versions. Kodo must not infer
+which of two artifacts is newer by comparing revision strings.
+
+** Deployment generation
+
+~KODO_DEPLOYMENT_GENERATION~ must contain a base-10, non-negative integer with
+no suffix or surrounding content. The deployment system must increase it when
+the desired rollout changes.
+
+All replicas in one rollout receive the same generation and artifact revision.
+A later rollout receives a higher generation. In particular, a rollback uses
+the older artifact revision with a new, higher generation:
+
+| Rollout          | Artifact revision | Deployment generation |
+|------------------+-------------------+-----------------------|
+| Initial release  | ~sha-new~         |                    41 |
+| Forward rollout  | ~sha-newer~       |                    42 |
+| Emergency revert | ~sha-new~         |                    43 |
+
+This separation lets placement prefer the currently intended deployment even
+when that deployment intentionally returns to older code. A CI run number,
+release sequence, or another durable monotonic counter is suitable. A Git SHA,
+pod restart count, timestamp generated independently by each replica, or
+Kubernetes pod ordinal is not suitable.
+
+Do not reuse a generation for different desired artifacts. Keep the counter in
+a system that survives cluster replacement and rollback, such as the release
+pipeline or deployment metadata store.
+
+** Missing or invalid values
+
+Production startup fails closed if either value is missing or invalid:
+
+- a missing or empty ~KODO_ARTIFACT_REVISION~ raises
+  ~KODO_ARTIFACT_REVISION must be a non-empty string~;
+- a missing, negative, or malformed ~KODO_DEPLOYMENT_GENERATION~ raises
+  ~KODO_DEPLOYMENT_GENERATION must be a non-negative integer~.
+
+The failure occurs while ~config/runtime.exs~ is evaluated, before the Kodo
+supervision tree, HTTP endpoint, or control-plane instance registration starts.
+The process exits and should remain unready; the deployment system should not
+restart it with invented fallback values. Correct the release configuration
+and start it again.
+
+Development defaults to artifact revision ~development~ and generation ~0~
+when neither variable is supplied. If either variable is supplied in a
+non-production environment, both are validated and required. Tests disable the
+instance manager because application-owned heartbeat writes would sit outside
+ExUnit SQL Sandbox transactions.
+
+* Control-plane instance lifecycle
+
+One running BEAM VM registers one durable control-plane instance record. Its
+boot ID identifies that VM incarnation and is different after a new application
+boot, even when the host or distributed Erlang node name is reused.
+
+The instance manager:
+
+1. registers the boot identity and deployment metadata in PostgreSQL;
+2. marks the instance ready for future session placement;
+3. refreshes its heartbeat using PostgreSQL's UTC clock;
+4. marks the instance non-ready and draining during graceful application
+   shutdown.
+
+Readiness in this record means eligible for session ownership. It does not
+replace the HTTP or Kubernetes readiness probe. A crashed VM cannot mark itself
+draining; future placement excludes it after its database heartbeat becomes
+stale.
+
+Instance registration and heartbeat failures are fatal to the instance manager
+so supervision can fail closed rather than continue advertising state it can no
+longer maintain.
+
+* Graceful shutdown
+
+Use an application shutdown path that invokes OTP's ~Application.prep_stop/1~.
+Kodo records draining state before its supervision tree stops. Process kills,
+VM crashes, and termination-grace expiry cannot perform this transition and
+fall back to heartbeat-based failure detection.
+
+Clustered session handoff is not implemented yet. Until it is, draining records
+deployment intent but does not transfer active sessions to another replica.
+
+* BEAM clustering
+
+~DNS_CLUSTER_QUERY~ configures node discovery through ~DNSCluster~ in
+production. BEAM distribution provides fast process discovery, messaging, and
+failure signals. PostgreSQL remains authoritative for durable instance
+identity and, in later milestones, session ownership epochs.
+
+Operational requirements for distributed Erlang networking, Kubernetes
+readiness, rolling-update strategy, and termination grace will be added here as
+the remaining clustered ownership work is implemented.
