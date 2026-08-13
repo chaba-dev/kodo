@@ -6,17 +6,21 @@ defmodule Kodo.Cluster.InstanceManager do
   alias Kodo.Cluster.Instances
 
   def start_link(opts) do
-    {name, opts} = Keyword.pop(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, opts, if(name, do: [name: name], else: []))
+    config = Keyword.merge(Application.fetch_env!(:kodo, __MODULE__), opts)
+    {name, config} = Keyword.pop(config, :name, __MODULE__)
+
+    if Keyword.fetch!(config, :enabled) do
+      GenServer.start_link(__MODULE__, config, if(name, do: [name: name], else: []))
+    else
+      :ignore
+    end
   end
 
   def current_instance(server \\ __MODULE__), do: GenServer.call(server, :current_instance)
   def begin_drain(server \\ __MODULE__), do: GenServer.call(server, :begin_drain)
 
   @impl true
-  def init(opts) do
-    config = Keyword.merge(Application.fetch_env!(:kodo, __MODULE__), opts)
-
+  def init(config) do
     attrs = %{
       boot_id: Keyword.get(config, :boot_id, Ecto.UUID.generate()),
       node_name: Keyword.get(config, :node_name, Atom.to_string(node())),

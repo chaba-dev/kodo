@@ -64,12 +64,17 @@ defmodule Kodo.Cluster.InstancesTest do
              Instances.register_current(%{attrs | artifact_revision: "different-sha"})
   end
 
+  test "disabled manager is omitted by its supervisor" do
+    assert :ignore = InstanceManager.start_link(enabled: false)
+  end
+
   test "manager registers one boot incarnation and enters draining state" do
     boot_id = Ecto.UUID.generate()
 
     pid =
       start_supervised!({
         InstanceManager,
+        enabled: true,
         name: nil,
         boot_id: boot_id,
         node_name: "kodo@node-b",
@@ -95,6 +100,7 @@ defmodule Kodo.Cluster.InstancesTest do
     pid =
       start_supervised!({
         InstanceManager,
+        enabled: true,
         boot_id: Ecto.UUID.generate(),
         node_name: "kodo@node-shutdown",
         artifact_revision: "sha-shutdown",
@@ -116,6 +122,7 @@ defmodule Kodo.Cluster.InstancesTest do
 
     child =
       {InstanceManager,
+       enabled: true,
        name: nil,
        boot_id: boot_id,
        node_name: "kodo@node-c",
