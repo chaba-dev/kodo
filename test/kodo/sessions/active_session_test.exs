@@ -2,6 +2,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
   use Kodo.DataCase
 
   alias Kodo.Runners
+  alias Kodo.Cluster.Discovery
   alias Kodo.Cluster.InstanceManager
   alias Kodo.Cluster.Instances
   alias Kodo.Sessions
@@ -281,6 +282,24 @@ defmodule Kodo.Sessions.ActiveSessionTest do
 
     {:ok, _runner_registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
     assert {:ok, _runner} = Runners.connected(runner)
+    assert_receive {:tool_request, %{"request_id" => ^request_id} = request}
+    respond_to_tool(runner.id, request)
+
+    assert_receive {:session_event,
+                    %{type: "session_status_changed", payload: %{"status" => "completed"}}}
+  end
+
+  test "dispatches when discovery converges without another connection notification", %{
+    runner: runner,
+    session: session
+  } do
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
+    assert :ok = Sessions.start_turn(session.id, "Fix it")
+
+    assert_receive {:session_event,
+                    %{type: "tool_started", payload: %{"request_id" => request_id}}}
+
+    :ok = Discovery.join_runner(runner.id)
     assert_receive {:tool_request, %{"request_id" => ^request_id} = request}
     respond_to_tool(runner.id, request)
 

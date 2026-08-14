@@ -3,6 +3,7 @@ defmodule Kodo.Cluster.DiscoveryTest do
 
   alias Kodo.Cluster.Discovery
   alias Kodo.Runners
+  alias Kodo.Sessions
 
   test "discovers live session and runner processes and removes them on exit" do
     session_id = Ecto.UUID.generate()
@@ -71,6 +72,40 @@ defmodule Kodo.Cluster.DiscoveryTest do
     assert_receive {:cluster_membership, :leave, :runner, ^runner_id, [^pid], []}
   end
 
+  test "returns a recoverable error when a remote coordinator node fails during a call" do
+    ensure_distributed_node!()
+    {:ok, peer, peer_node} = :peer.start_link(%{name: :kodo_peer_regression})
+
+    on_exit(fn ->
+      try do
+        :peer.stop(peer)
+      catch
+        :exit, _reason -> :ok
+      end
+    end)
+
+    :ok = :erpc.call(peer_node, :code, :add_paths, [:code.get_path()])
+    {:ok, _scope} = :erpc.call(peer_node, :pg, :start, [Discovery.scope()])
+    session_id = Ecto.UUID.generate()
+
+    {monitor_ref, _members} =
+      :pg.monitor(Discovery.scope(), Discovery.group(:session, session_id))
+
+    remote_pid =
+      :erpc.call(peer_node, Kodo.Test.RemoteCoordinator, :start, [
+        self(),
+        Discovery.scope(),
+        session_id
+      ])
+
+    assert_receive {^monitor_ref, :join, {:session, ^session_id}, [^remote_pid]}
+    call = Task.async(fn -> Sessions.active_state(session_id) end)
+    assert_receive {:remote_call_received, ^remote_pid}
+    :ok = :peer.stop(peer)
+
+    assert Task.await(call) == {:error, :coordinator_unavailable}
+  end
+
   defp assert_eventually_empty(kind, id) do
     ref = make_ref()
     {monitor_ref, _members} = :pg.monitor(Discovery.scope(), Discovery.group(kind, id))
@@ -83,5 +118,12 @@ defmodule Kodo.Cluster.DiscoveryTest do
 
     assert Discovery.members(kind, id) == []
     :pg.demonitor(Discovery.scope(), monitor_ref)
+  end
+
+  defp ensure_distributed_node! do
+    if node() == :nonode@nohost do
+      {_output, 0} = System.cmd("epmd", ["-daemon"])
+      {:ok, _pid} = :net_kernel.start([:kodo_test_regression, :shortnames])
+    end
   end
 end

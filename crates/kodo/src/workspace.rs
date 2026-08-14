@@ -3,6 +3,7 @@
 //! File and patch paths are always relative to one canonical Git root. Direct reads use a retained
 //! directory capability; paths passed to external programs are validated here first.
 
+use std::fs::{File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use std::{io::ErrorKind, io::Read};
 
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -26,6 +28,8 @@ pub enum WorkspaceError {
     NoExistingAncestor(PathBuf),
     #[error("file exceeds {limit} byte input limit: {path}")]
     FileTooLarge { path: PathBuf, limit: usize },
+    #[error("another Kodo runner is already active for workspace: {0}")]
+    RunnerAlreadyActive(PathBuf),
     #[error("failed to access {path}: {source}")]
     Io {
         path: PathBuf,
@@ -39,6 +43,10 @@ pub enum WorkspaceError {
 pub struct Workspace {
     root: PathBuf,
     root_dir: Arc<Dir>,
+}
+
+pub struct RunnerLock {
+    _file: File,
 }
 
 impl Workspace {
@@ -98,6 +106,39 @@ impl Workspace {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Exclusively owns this workspace for one runner process lifetime.
+    pub fn lock_runner(&self) -> Result<RunnerLock, WorkspaceError> {
+        let lock_dir = std::env::temp_dir().join("kodo-workspace-locks");
+        std::fs::create_dir_all(&lock_dir).map_err(|source| WorkspaceError::Io {
+            path: lock_dir.clone(),
+            source,
+        })?;
+        let digest = Sha256::digest(self.root.as_os_str().as_encoded_bytes());
+        let lock_path = lock_dir.join(format!("{digest:x}.lock"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|source| WorkspaceError::Io {
+                path: lock_path.clone(),
+                source,
+            })?;
+
+        if let Err(source) = fs2::FileExt::try_lock_exclusive(&file) {
+            if source.kind() == ErrorKind::WouldBlock {
+                return Err(WorkspaceError::RunnerAlreadyActive(self.root.clone()));
+            }
+            return Err(WorkspaceError::Io {
+                path: lock_path,
+                source,
+            });
+        }
+
+        Ok(RunnerLock { _file: file })
     }
 
     /// Read through the retained root capability so concurrent symlink changes cannot escape it.
@@ -233,6 +274,21 @@ mod tests {
         let workspace = Workspace::discover(&nested).unwrap();
 
         assert_eq!(workspace.root(), repository.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn permits_only_one_runner_for_a_workspace() {
+        let repository = git_repository();
+        let workspace = Workspace::from_root(repository.path()).unwrap();
+        let first = workspace.lock_runner().unwrap();
+
+        assert!(matches!(
+            workspace.lock_runner(),
+            Err(WorkspaceError::RunnerAlreadyActive(path)) if path == workspace.root()
+        ));
+
+        drop(first);
+        workspace.lock_runner().unwrap();
     }
 
     #[test]

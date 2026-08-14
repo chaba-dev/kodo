@@ -24,6 +24,9 @@ defmodule Kodo.Cluster.Discovery do
   def join_runner(runner_id, pid \\ self()),
     do: :pg.join(@scope, group(:runner, runner_id), pid)
 
+  def monitor_runner(runner_id), do: :pg.monitor(@scope, group(:runner, runner_id))
+  def demonitor(ref), do: :pg.demonitor(@scope, ref)
+
   def session(session_id), do: member(:session, session_id)
   def runner(runner_id), do: member(:runner, runner_id)
 

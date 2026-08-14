@@ -451,8 +451,14 @@ defmodule Kodo.Agent.Loop do
          :ok <- persist_request(session_id, invocation_id, call, request_id, requested, ownership),
          :ok <- authorize_tool(session_id, invocation_id, call, facts, ownership),
          :ok <- persist_started(session_id, invocation_id, call, request_id, facts, ownership),
-         :ok <- dispatch_when_connected(runner_id, request_id, request, ownership),
-         {:ok, output} <- await_response(runner_id, request_id, request, timeout, ownership),
+         {:ok, output} <-
+           dispatch_and_await_response(
+             runner_id,
+             request_id,
+             request,
+             timeout,
+             ownership
+           ),
          {:ok, _event} <-
            Sessions.append_event(
              session_id,
@@ -627,7 +633,26 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp dispatch_when_connected(runner_id, request_id, request, ownership) do
+  defp dispatch_and_await_response(runner_id, request_id, request, timeout, ownership) do
+    {monitor_ref, _members} = Kodo.Cluster.Discovery.monitor_runner(runner_id)
+
+    try do
+      with :ok <- dispatch_when_connected(runner_id, request_id, request, ownership, monitor_ref),
+           do:
+             await_response(
+               runner_id,
+               request_id,
+               request,
+               timeout,
+               ownership,
+               monitor_ref
+             )
+    after
+      Kodo.Cluster.Discovery.demonitor(monitor_ref)
+    end
+  end
+
+  defp dispatch_when_connected(runner_id, request_id, request, ownership, monitor_ref) do
     envelope = %{
       "protocol_version" => @protocol_version,
       "request_id" => request_id,
@@ -644,7 +669,10 @@ defmodule Kodo.Agent.Loop do
         {:error, :offline} ->
           receive do
             {:runner_connected, %{id: ^runner_id}} ->
-              dispatch_when_connected(runner_id, request_id, request, ownership)
+              dispatch_when_connected(runner_id, request_id, request, ownership, monitor_ref)
+
+            {^monitor_ref, :join, {:runner, ^runner_id}, _pids} ->
+              dispatch_when_connected(runner_id, request_id, request, ownership, monitor_ref)
           end
 
         error ->
@@ -653,12 +681,27 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp await_response(runner_id, request_id, request, timeout, ownership) do
+  defp await_response(runner_id, request_id, request, timeout, ownership, monitor_ref) do
     deadline = System.monotonic_time(:millisecond) + timeout
-    await_response_until(runner_id, request_id, request, deadline, ownership)
+
+    await_response_until(
+      runner_id,
+      request_id,
+      request,
+      deadline,
+      ownership,
+      monitor_ref
+    )
   end
 
-  defp await_response_until(runner_id, request_id, request, deadline, ownership) do
+  defp await_response_until(
+         runner_id,
+         request_id,
+         request,
+         deadline,
+         ownership,
+         monitor_ref
+       ) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
@@ -679,9 +722,35 @@ defmodule Kodo.Agent.Loop do
         {:error, :invalid_runner_response}
 
       {:runner_connected, %{id: ^runner_id}} ->
-        case dispatch_when_connected(runner_id, request_id, request, ownership) do
-          :ok -> await_response_until(runner_id, request_id, request, deadline, ownership)
-          error -> error
+        case dispatch_when_connected(runner_id, request_id, request, ownership, monitor_ref) do
+          :ok ->
+            await_response_until(
+              runner_id,
+              request_id,
+              request,
+              deadline,
+              ownership,
+              monitor_ref
+            )
+
+          error ->
+            error
+        end
+
+      {^monitor_ref, :join, {:runner, ^runner_id}, _pids} ->
+        case dispatch_when_connected(runner_id, request_id, request, ownership, monitor_ref) do
+          :ok ->
+            await_response_until(
+              runner_id,
+              request_id,
+              request,
+              deadline,
+              ownership,
+              monitor_ref
+            )
+
+          error ->
+            error
         end
     after
       remaining -> {:error, :tool_timeout}
