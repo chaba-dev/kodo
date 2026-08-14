@@ -4,6 +4,7 @@ defmodule Kodo.Sessions do
   import Ecto.Query
 
   alias Kodo.Accounts.Scope
+  alias Kodo.Cluster.Discovery
   alias Kodo.Cluster.Instances
   alias Kodo.Repo
   alias Kodo.Sessions.Event
@@ -212,15 +213,16 @@ defmodule Kodo.Sessions do
 
   @doc "Returns the unique active coordinator, reconstructing it from events when needed."
   def ensure_started(session_id) do
-    case Registry.lookup(Kodo.SessionRegistry, session_id) do
-      [{pid, _value}] ->
-        if supervised_session?(pid) do
-          {:ok, pid}
-        else
-          await_stale_coordinator(pid, session_id)
-        end
+    case Discovery.session(session_id) do
+      {:ok, pid} when node(pid) != node() ->
+        {:ok, pid}
 
-      [] ->
+      {:ok, pid} ->
+        if supervised_session?(pid),
+          do: {:ok, pid},
+          else: await_stale_coordinator(pid, session_id)
+
+      :error ->
         start_active_session(session_id)
     end
   end

@@ -1,13 +1,14 @@
 defmodule Kodo.Runners do
   @moduledoc """
-  Owns durable runner identities and routes messages to the current local connection.
+  Owns durable runner identities and routes messages to the current cluster connection.
 
-  PostgreSQL records identity and last-seen metadata; the unique Registry remains the source of
-  truth for ephemeral online state so crashes cannot leave a stale connected flag.
+  PostgreSQL records identity and last-seen metadata. Distributed discovery is only an ephemeral
+  routing hint, so crashes cannot leave a durable connected flag.
   """
 
   import Ecto.Query
 
+  alias Kodo.Cluster.Discovery
   alias Kodo.Repo
   alias Kodo.RunnerProtocol
   alias Kodo.Runners.Runner
@@ -23,16 +24,16 @@ defmodule Kodo.Runners do
   @doc "Returns a durable runner identity, whether or not it is currently connected."
   def get_runner(id), do: Repo.get(Runner, id)
 
-  @doc "Routes one bounded request directly to the runner's unique live channel."
+  @doc "Routes one bounded request directly to a discovered live runner channel."
   def dispatch(runner_id, request) when is_map(request) do
     with {:ok, encoded} <- Jason.encode(request),
          true <- byte_size(encoded) <= @max_payload_bytes do
-      case Registry.lookup(Kodo.RunnerRegistry, runner_id) do
-        [{channel, _value}] ->
+      case runner_connection(runner_id) do
+        {:ok, channel} ->
           send(channel, {:tool_request, request})
           :ok
 
-        [] ->
+        :error ->
           {:error, :offline}
       end
     else
@@ -41,14 +42,14 @@ defmodule Kodo.Runners do
     end
   end
 
-  @doc "Renews one session authority lease on the currently connected local runner."
+  @doc "Renews one session authority lease on a discovered live runner connection."
   def renew_authority(runner_id, lease) when is_map(lease) do
-    case Registry.lookup(Kodo.RunnerRegistry, runner_id) do
-      [{channel, _value}] ->
+    case runner_connection(runner_id) do
+      {:ok, channel} ->
         send(channel, {:authority_lease, lease})
         :ok
 
-      [] ->
+      :error ->
         {:error, :offline}
     end
   end
@@ -117,6 +118,21 @@ defmodule Kodo.Runners do
     case get_runner(id) do
       nil -> {:error, :not_found}
       runner -> runner |> Ecto.Changeset.change(last_seen_at: DateTime.utc_now()) |> Repo.update()
+    end
+  end
+
+  # The local registry closes the small channel-join window before global membership propagates.
+  defp runner_connection(runner_id) do
+    case Discovery.runner(runner_id) do
+      {:ok, _channel} = connected -> connected
+      :error -> local_runner_connection(runner_id)
+    end
+  end
+
+  defp local_runner_connection(runner_id) do
+    case Registry.lookup(Kodo.RunnerRegistry, runner_id) do
+      [{channel, _value}] -> {:ok, channel}
+      [] -> :error
     end
   end
 

@@ -1,8 +1,9 @@
 defmodule KodoWeb.RunnerChannel do
-  @moduledoc "Authenticated transport for one active local runner connection."
+  @moduledoc "Authenticated transport for one active runner connection on this BEAM node."
 
   use KodoWeb, :channel
 
+  alias Kodo.Cluster.Discovery
   alias Kodo.RunnerProtocol
   alias Kodo.Runners
 
@@ -59,7 +60,8 @@ defmodule KodoWeb.RunnerChannel do
 
   defp connect_runner(runner_id, socket) do
     with %{} = runner <- Runners.get_runner(runner_id),
-         {:ok, _runner} <- Runners.connected(runner) do
+         {:ok, _runner} <- Runners.connected(runner),
+         :ok <- Discovery.join_runner(runner_id) do
       # Limits are disclosed only after socket authentication and exact-topic authorization.
       {:ok, %{limits: RunnerProtocol.limits()}, socket}
     else
