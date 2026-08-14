@@ -18,8 +18,8 @@ defmodule Kodo.Application do
       {Registry, keys: :unique, name: Kodo.RunnerRegistry},
       {Registry, keys: :unique, name: Kodo.SessionRegistry},
       {DynamicSupervisor, name: Kodo.SessionSupervisor, strategy: :one_for_one},
-      Kodo.Sessions.Recovery,
       {Kodo.Cluster.InstanceManager, boot_id: Ecto.UUID.generate()},
+      Kodo.Sessions.Recovery,
       # Start to serve requests, typically the last entry
       KodoWeb.Endpoint
     ]

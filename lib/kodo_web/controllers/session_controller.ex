@@ -114,6 +114,9 @@ defmodule KodoWeb.SessionController do
 
       {:error, :approval_already_resolved} ->
         conn |> put_status(:conflict) |> json(%{error: "approval was resolved differently"})
+
+      {:error, reason} ->
+        conn |> put_status(:conflict) |> json(%{error: inspect(reason)})
     end
   end
 

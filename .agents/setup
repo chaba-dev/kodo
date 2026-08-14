@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+packages=(
+  autoconf
+  build-essential
+  libncurses-dev
+  libssl-dev
+  libwxgtk3.2-dev
+  postgresql
+  unixodbc-dev
+)
+
+missing_packages=()
+for package in "${packages[@]}"; do
+  dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q "ok installed" || missing_packages+=("$package")
+done
+
+if ((${#missing_packages[@]})); then
+  sudo apt-get update
+  sudo apt-get install -y --no-install-recommends "${missing_packages[@]}"
+fi
+
+if [[ ! -x "$HOME/.local/bin/mise" ]]; then
+  curl -fsSL https://mise.run | MISE_INSTALL_PATH="$HOME/.local/bin/mise" sh
+fi
+
+if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
+  curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+fi
+
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+mise install erlang@28.5 elixir@1.20.3-otp-28
+mise use --global erlang@28.5 elixir@1.20.3-otp-28
+
+if ! rustup toolchain list | grep -q '^stable'; then
+  rustup toolchain install stable --profile minimal
+fi
+rustup default stable
+rustup component add clippy rustfmt
+
+profile_marker="# kodo orb toolchains"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >>"$HOME/.bash_profile" <<'EOF'
+
+# kodo orb toolchains
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+eval "$(mise activate bash)"
+EOF
+fi
+
+sudo pg_ctlcluster 15 main start || true
+sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+ALTER USER postgres PASSWORD 'postgres';
+SQL
+
+eval "$(mise activate bash)"
+mix local.hex --force
+mix local.rebar --force
+mix deps.get

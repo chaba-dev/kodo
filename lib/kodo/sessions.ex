@@ -4,8 +4,10 @@ defmodule Kodo.Sessions do
   import Ecto.Query
 
   alias Kodo.Accounts.Scope
+  alias Kodo.Cluster.Instances
   alias Kodo.Repo
   alias Kodo.Sessions.Event
+  alias Kodo.Sessions.Ownership
   alias Kodo.Sessions.Session
   alias Kodo.Runners.Runner
 
@@ -14,6 +16,16 @@ defmodule Kodo.Sessions do
   @single_event_increment 1
   @single_updated_row 1
   @stale_coordinator_shutdown_timeout 5_000
+  @ownership_lock_sql "SELECT pg_advisory_lock(hashtextextended($1, 0))"
+  @ownership_unlock_sql "SELECT pg_advisory_unlock(hashtextextended($1, 0))"
+
+  @ownership_stale_after_seconds Keyword.fetch!(
+                                   Application.compile_env!(
+                                     :kodo,
+                                     Kodo.Cluster.InstanceManager
+                                   ),
+                                   :ownership_stale_after_seconds
+                                 )
 
   def get_session(id) do
     case Ecto.UUID.cast(id) do
@@ -35,6 +47,155 @@ defmodule Kodo.Sessions do
     Session
     |> where([session], session.status in ["running", "awaiting_approval"])
     |> Repo.all()
+  end
+
+  @doc "Claims an unowned session or replaces a coordinator from this node or a stale owner."
+  def claim_ownership(session_id, owner_boot_id) do
+    with_ownership_lock(session_id, fn ->
+      Repo.transaction(fn -> claim_ownership_locked(session_id, owner_boot_id) end)
+    end)
+  end
+
+  defp claim_ownership_locked(session_id, owner_boot_id) do
+    session = lock_session!(session_id, allow_unowned: true)
+
+    if claimable?(session, owner_boot_id) do
+      epoch = session.ownership_epoch + 1
+
+      session
+      |> Ecto.Changeset.change(owner_boot_id: owner_boot_id, ownership_epoch: epoch)
+      |> Repo.update!()
+
+      %Ownership{session_id: session.id, owner_boot_id: owner_boot_id, epoch: epoch}
+    else
+      Repo.rollback(:session_owned)
+    end
+  end
+
+  defp claimable?(session, nil),
+    do: is_nil(session.owner_boot_id)
+
+  defp claimable?(session, owner_boot_id) do
+    unless Instances.ownership_supported_cluster_wide?(
+             owner_boot_id,
+             @ownership_stale_after_seconds
+           ) do
+      Repo.rollback(:ownership_capability_not_cluster_wide)
+    end
+
+    is_nil(session.owner_boot_id) or session.owner_boot_id == owner_boot_id or
+      Instances.same_node?(session.owner_boot_id, owner_boot_id) or
+      not Instances.alive?(session.owner_boot_id, @ownership_stale_after_seconds)
+  end
+
+  @doc "Transfers a session by advancing its epoch under the current owner's fence."
+  def transfer_ownership(%Ownership{} = ownership, new_owner_boot_id) do
+    with_ownership_lock(ownership.session_id, fn ->
+      Repo.transaction(fn ->
+        session = lock_session!(ownership.session_id, ownership: ownership)
+        validate_owner_capability!(new_owner_boot_id)
+        epoch = session.ownership_epoch + 1
+
+        session
+        |> Ecto.Changeset.change(owner_boot_id: new_owner_boot_id, ownership_epoch: epoch)
+        |> Repo.update!()
+
+        %Ownership{
+          session_id: session.id,
+          owner_boot_id: new_owner_boot_id,
+          epoch: epoch
+        }
+      end)
+    end)
+  end
+
+  defp validate_owner_capability!(nil), do: :ok
+
+  defp validate_owner_capability!(owner_boot_id) do
+    unless Instances.ownership_supported_cluster_wide?(
+             owner_boot_id,
+             @ownership_stale_after_seconds
+           ) do
+      Repo.rollback(:ownership_capability_not_cluster_wide)
+    end
+  end
+
+  @doc "Checks a fencing token immediately before dispatching an external effect."
+  def assert_owner(%Ownership{} = ownership) do
+    query =
+      from(session in Session,
+        where:
+          session.id == ^ownership.session_id and
+            session.ownership_epoch == ^ownership.epoch
+      )
+
+    query =
+      if ownership.owner_boot_id do
+        where(query, [session], session.owner_boot_id == ^ownership.owner_boot_id)
+      else
+        where(query, [session], is_nil(session.owner_boot_id))
+      end
+
+    if Repo.exists?(query), do: :ok, else: {:error, :stale_ownership}
+  end
+
+  @doc "Runs an external dispatch while serializing ownership transfer across the cluster."
+  def dispatch_if_owner(%Ownership{} = ownership, dispatch) when is_function(dispatch, 0) do
+    with_ownership_lock(ownership.session_id, fn ->
+      with :ok <- assert_owner(ownership), do: dispatch.()
+    end)
+  end
+
+  # A separate checkout holds the PostgreSQL session lock so the caller can perform short database
+  # operations without keeping a transaction open across a potentially long external request.
+  defp with_ownership_lock(session_id, fun) do
+    caller = self()
+    lock_ref = make_ref()
+
+    {holder, holder_ref} =
+      spawn_monitor(fn -> hold_ownership_lock(caller, lock_ref, session_id) end)
+
+    receive do
+      {^lock_ref, :acquired} ->
+        try do
+          fun.()
+        after
+          send(holder, {lock_ref, :release})
+
+          receive do
+            {:DOWN, ^holder_ref, :process, ^holder, :normal} -> :ok
+            {:DOWN, ^holder_ref, :process, ^holder, reason} -> exit(reason)
+          end
+        end
+
+      {:DOWN, ^holder_ref, :process, ^holder, reason} ->
+        exit(reason)
+    end
+  end
+
+  defp hold_ownership_lock(caller, lock_ref, session_id) do
+    run_outside_sandbox(fn ->
+      Ecto.Adapters.SQL.query!(Repo, @ownership_lock_sql, [session_id])
+      caller_ref = Process.monitor(caller)
+      send(caller, {lock_ref, :acquired})
+
+      try do
+        receive do
+          {^lock_ref, :release} -> :ok
+          {:DOWN, ^caller_ref, :process, ^caller, _reason} -> :ok
+        end
+      after
+        Ecto.Adapters.SQL.query!(Repo, @ownership_unlock_sql, [session_id])
+      end
+    end)
+  end
+
+  defp run_outside_sandbox(fun) do
+    if Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox do
+      Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fun)
+    else
+      Repo.checkout(fun, timeout: :infinity)
+    end
   end
 
   @doc "Returns the unique active coordinator, reconstructing it from events when needed."
@@ -88,9 +249,11 @@ defmodule Kodo.Sessions do
     end
   end
 
-  def begin_turn(session_id, content, client_request_id \\ nil)
+  def begin_turn(session_id, content, client_request_id \\ nil, opts \\ [])
       when is_binary(content) and content != "" do
-    case Repo.transaction(fn -> begin_turn_locked(session_id, content, client_request_id) end) do
+    case Repo.transaction(fn ->
+           begin_turn_locked(session_id, content, client_request_id, opts)
+         end) do
       {:ok, events} = result ->
         Enum.each(events, &broadcast/1)
         result
@@ -145,8 +308,16 @@ defmodule Kodo.Sessions do
   def resolve_approval(%Scope{} = scope, session_id, approval_id, decision)
       when decision in ["approved", "denied"] do
     case get_session(scope, session_id) do
-      %Session{} -> do_resolve_approval(session_id, approval_id, decision)
-      nil -> {:error, :not_found}
+      %Session{} = session ->
+        resolve_owned_approval(
+          session_id,
+          approval_id,
+          decision,
+          ownership_for(session)
+        )
+
+      nil ->
+        {:error, :not_found}
     end
   end
 
@@ -211,8 +382,10 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp do_resolve_approval(session_id, approval_id, decision) do
-    case Repo.transaction(fn -> resolve_approval_locked(session_id, approval_id, decision) end) do
+  def resolve_owned_approval(session_id, approval_id, decision, ownership) do
+    case Repo.transaction(fn ->
+           resolve_approval_locked(session_id, approval_id, decision, ownership: ownership)
+         end) do
       {:ok, {resolved, status_event}} = result ->
         broadcast(resolved)
         broadcast(status_event)
@@ -221,6 +394,14 @@ defmodule Kodo.Sessions do
       error ->
         error
     end
+  end
+
+  defp ownership_for(%Session{} = session) do
+    %Ownership{
+      session_id: session.id,
+      owner_boot_id: session.owner_boot_id,
+      epoch: session.ownership_epoch
+    }
   end
 
   @doc "Appends an event while locking its session row to allocate exactly one sequence number."
@@ -247,10 +428,16 @@ defmodule Kodo.Sessions do
     end
   end
 
-  def complete_session(session_id), do: finalize_session(session_id, "completed", nil)
+  def complete_session(session_id, opts \\ []),
+    do: finalize_session(session_id, "completed", nil, opts)
 
-  def fail_session(session_id, reason) do
-    finalize_session(session_id, "failed", {"session_failed", %{"reason" => inspect(reason)}})
+  def fail_session(session_id, reason, opts \\ []) do
+    finalize_session(
+      session_id,
+      "failed",
+      {"session_failed", %{"reason" => inspect(reason)}},
+      opts
+    )
   end
 
   def events_after(session_id), do: events_after(session_id, @before_first_event_sequence)
@@ -280,8 +467,8 @@ defmodule Kodo.Sessions do
     |> Repo.all()
   end
 
-  def set_status(session_id, status, source \\ "agent") do
-    case Repo.transaction(fn -> set_status_locked(session_id, status, source) end) do
+  def set_status(session_id, status, source \\ "agent", opts \\ []) do
+    case Repo.transaction(fn -> set_status_locked(session_id, status, source, opts) end) do
       {:ok, {_session, event}} = result ->
         broadcast(event)
         result
@@ -292,8 +479,8 @@ defmodule Kodo.Sessions do
   end
 
   @doc "Atomically records cancellation and updates the session's query index."
-  def cancel_session(session_id) do
-    case Repo.transaction(fn -> cancel_session_locked(session_id) end) do
+  def cancel_session(session_id, opts \\ []) do
+    case Repo.transaction(fn -> cancel_session_locked(session_id, opts) end) do
       {:ok, {_session, event}} = result ->
         broadcast(event)
         result
@@ -304,7 +491,7 @@ defmodule Kodo.Sessions do
   end
 
   defp append_event_locked(session_id, type, payload, opts) do
-    session = lock_session!(session_id)
+    session = lock_session!(session_id, opts)
 
     case append_locked(session, type, payload, opts) do
       {:ok, event} -> event
@@ -312,8 +499,8 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp begin_turn_locked(session_id, content, client_request_id) do
-    session = lock_session!(session_id)
+  defp begin_turn_locked(session_id, content, client_request_id, opts) do
+    session = lock_session!(session_id, opts)
 
     if turn_request_recorded?(session_id, client_request_id) do
       []
@@ -366,7 +553,13 @@ defmodule Kodo.Sessions do
   defp maybe_put_request_id(payload, _request_id), do: payload
 
   defp append_events_locked(session_id, event_specs) do
-    session = lock_session!(session_id)
+    ownership =
+      event_specs
+      |> List.first()
+      |> elem(2)
+      |> Keyword.get(:ownership)
+
+    session = lock_session!(session_id, ownership: ownership)
 
     {events, _session} =
       Enum.map_reduce(event_specs, session, fn {type, payload, opts}, current_session ->
@@ -383,8 +576,10 @@ defmodule Kodo.Sessions do
     events
   end
 
-  defp finalize_session(session_id, status, terminal_event) do
-    case Repo.transaction(fn -> finalize_session_locked(session_id, status, terminal_event) end) do
+  defp finalize_session(session_id, status, terminal_event, opts) do
+    case Repo.transaction(fn ->
+           finalize_session_locked(session_id, status, terminal_event, opts)
+         end) do
       {:ok, events} = result ->
         Enum.each(events, &broadcast/1)
         result
@@ -394,8 +589,8 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp finalize_session_locked(session_id, status, terminal_event) do
-    session = lock_session!(session_id)
+  defp finalize_session_locked(session_id, status, terminal_event, opts) do
+    session = lock_session!(session_id, opts)
 
     if session.status in ["running", "awaiting_approval"] do
       {events, session} = append_terminal_event(session, terminal_event)
@@ -429,8 +624,8 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp set_status_locked(session_id, status, source) do
-    session = lock_session!(session_id)
+  defp set_status_locked(session_id, status, source, opts) do
+    session = lock_session!(session_id, opts)
 
     with {:ok, session} <- session |> Session.status_changeset(status) |> Repo.update(),
          {:ok, event} <-
@@ -441,8 +636,8 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp cancel_session_locked(session_id) do
-    session = lock_session!(session_id)
+  defp cancel_session_locked(session_id, opts) do
+    session = lock_session!(session_id, opts)
 
     with {:ok, session} <-
            session |> Session.status_changeset("cancelled") |> Repo.update(),
@@ -459,8 +654,8 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp resolve_approval_locked(session_id, approval_id, decision) do
-    session = lock_session!(session_id)
+  defp resolve_approval_locked(session_id, approval_id, decision, opts) do
+    session = lock_session!(session_id, opts)
     existing_decision = approval_decision(session_id, approval_id)
 
     pending? =
@@ -483,7 +678,7 @@ defmodule Kodo.Sessions do
                  %{"approval_id" => approval_id, "decision" => decision},
                  source: "user"
                ),
-             refreshed = lock_session!(session_id),
+             refreshed = lock_session!(session_id, opts),
              {:ok, refreshed} <-
                refreshed |> Session.status_changeset("running") |> Repo.update(),
              {:ok, status_event} <-
@@ -504,14 +699,14 @@ defmodule Kodo.Sessions do
   end
 
   defp request_approval_locked(session_id, payload, opts) do
-    session = lock_session!(session_id)
+    session = lock_session!(session_id, opts)
 
     if session.status == "running" do
       with {:ok, requested} <-
              append_locked(session, "approval_requested", payload,
                parent_id: Keyword.get(opts, :parent_id)
              ),
-           refreshed = lock_session!(session_id),
+           refreshed = lock_session!(session_id, opts),
            {:ok, refreshed} <-
              refreshed |> Session.status_changeset("awaiting_approval") |> Repo.update(),
            {:ok, status_event} <-
@@ -604,12 +799,31 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp lock_session!(session_id) do
-    Session
-    |> where([session], session.id == ^session_id)
-    |> lock("FOR UPDATE")
-    |> Repo.one!()
+  defp lock_session!(session_id, opts) do
+    session =
+      Session
+      |> where([session], session.id == ^session_id)
+      |> lock("FOR UPDATE")
+      |> Repo.one!()
+
+    ownership = Keyword.get(opts, :ownership)
+
+    cond do
+      Keyword.get(opts, :allow_unowned, false) -> session
+      ownership_matches?(session, ownership) -> session
+      true -> Repo.rollback(:stale_ownership)
+    end
   end
+
+  defp ownership_matches?(%Session{ownership_epoch: 0}, nil), do: true
+
+  defp ownership_matches?(%Session{} = session, %Ownership{} = ownership) do
+    session.id == ownership.session_id and
+      session.owner_boot_id == ownership.owner_boot_id and
+      session.ownership_epoch == ownership.epoch
+  end
+
+  defp ownership_matches?(_session, _ownership), do: false
 
   defp append_locked(session, type, payload, opts) do
     attrs = %{

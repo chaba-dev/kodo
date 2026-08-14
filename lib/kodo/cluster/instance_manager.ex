@@ -17,6 +17,14 @@ defmodule Kodo.Cluster.InstanceManager do
   end
 
   def current_instance(server \\ __MODULE__), do: GenServer.call(server, :current_instance)
+  def current_boot_id(server \\ __MODULE__)
+
+  def current_boot_id(server) when is_pid(server), do: current_instance(server).boot_id
+
+  def current_boot_id(server) do
+    if Process.whereis(server), do: current_instance(server).boot_id
+  end
+
   def begin_drain(server \\ __MODULE__), do: GenServer.call(server, :begin_drain)
 
   @impl true

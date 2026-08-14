@@ -20,6 +20,8 @@ defmodule Kodo.Sessions.Session do
     field :approval_policy, :string, default: "standard"
     field :client_request_id, Ecto.UUID
     field :next_event_sequence, :integer, default: @first_event_sequence
+    field :owner_boot_id, Ecto.UUID
+    field :ownership_epoch, :integer, default: 0
 
     belongs_to :runner, Kodo.Runners.Runner
     belongs_to :user, Kodo.Accounts.User, type: :id

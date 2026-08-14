@@ -107,7 +107,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     [{first, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
     crash(first)
 
-    assert_receive :fake_llm_waiting
+    assert_receive :fake_llm_waiting, 1_000
     [{second, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
     refute first == second
     assert :ok = Sessions.cancel(session.id)
@@ -159,6 +159,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
     assert :ok = Sessions.start_turn(session.id, "Fix it")
     assert_receive {:tool_request, %{"request_id" => request_id}}
+    _ = Sessions.get_session!(session.id)
 
     [{first, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
     crash(first)
@@ -297,8 +298,17 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     session: session
   } do
     {:ok, pid} = Sessions.ensure_started(session.id)
-    {:ok, second} = Sessions.append_event(session.id, "user_message", %{"content" => "one"})
-    {:ok, third} = Sessions.append_event(session.id, "user_message", %{"content" => "two"})
+    ownership = :sys.get_state(pid).ownership
+
+    {:ok, second} =
+      Sessions.append_event(session.id, "user_message", %{"content" => "one"},
+        ownership: ownership
+      )
+
+    {:ok, third} =
+      Sessions.append_event(session.id, "user_message", %{"content" => "two"},
+        ownership: ownership
+      )
 
     send(pid, {:session_event, third})
     _ = :sys.get_state(pid)
