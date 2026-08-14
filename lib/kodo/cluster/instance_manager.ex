@@ -25,6 +25,7 @@ defmodule Kodo.Cluster.InstanceManager do
     if Process.whereis(server), do: current_instance(server).boot_id
   end
 
+  def mark_ready(server \\ __MODULE__), do: GenServer.call(server, :mark_ready)
   def begin_drain(server \\ __MODULE__), do: GenServer.call(server, :begin_drain)
 
   @impl true
@@ -34,7 +35,7 @@ defmodule Kodo.Cluster.InstanceManager do
       node_name: Keyword.get(config, :node_name, Atom.to_string(node())),
       artifact_revision: Keyword.fetch!(config, :artifact_revision),
       deployment_generation: Keyword.fetch!(config, :deployment_generation),
-      ready: true,
+      ready: Keyword.get(config, :ready, true),
       draining: false,
       capacity: Keyword.get(config, :capacity, System.schedulers_online()),
       protocol_capabilities: Keyword.fetch!(config, :protocol_capabilities)
@@ -52,6 +53,13 @@ defmodule Kodo.Cluster.InstanceManager do
 
   @impl true
   def handle_call(:current_instance, _from, state), do: {:reply, state.instance, state}
+
+  def handle_call(:mark_ready, _from, state) do
+    case Instances.mark_ready(state.instance) do
+      {:ok, instance} -> {:reply, {:ok, instance}, %{state | instance: instance}}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
 
   def handle_call(:begin_drain, _from, state) do
     case Instances.begin_drain(state.instance) do

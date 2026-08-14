@@ -55,6 +55,59 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert first == second
   end
 
+  test "does not start an unfenced coordinator when the enabled instance manager is absent", %{
+    session: session
+  } do
+    put_instance_manager_enabled(true)
+
+    assert {:error, :coordinator_unavailable} = Sessions.ensure_started(session.id)
+    assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
+    assert Sessions.get_session!(session.id).owner_boot_id == nil
+  end
+
+  test "rejects coordinator startup for a different boot incarnation", %{session: session} do
+    _manager = start_instance_manager!()
+
+    assert {:error, :target_boot_mismatch} =
+             Sessions.start_active_session_here(session.id, Ecto.UUID.generate())
+
+    assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
+    assert Sessions.get_session!(session.id).owner_boot_id == nil
+  end
+
+  test "does not dispatch a selected boot to an incompatible replacement on the same node", %{
+    session: session
+  } do
+    {:ok, old_boot} = Instances.register(instance_attrs(Atom.to_string(node())))
+    {:ok, old_ownership} = Sessions.claim_ownership(session.id, old_boot.boot_id)
+
+    _manager =
+      start_instance_manager!(protocol_capabilities: ["session-ownership-v1"])
+
+    assert {:error, :no_compatible_instance} = Sessions.ensure_started(session.id)
+    assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
+
+    persisted = Sessions.get_session!(session.id)
+    assert persisted.owner_boot_id == old_ownership.owner_boot_id
+    assert persisted.ownership_epoch == old_ownership.epoch
+  end
+
+  test "normalizes a remote startup failure when the target supervisor is unavailable", %{
+    session: session
+  } do
+    ensure_distributed_node!()
+    {:ok, peer, peer_node} = :peer.start_link(%{name: :kodo_placement_peer})
+
+    on_exit(fn -> stop_peer(peer) end)
+
+    :ok = :erpc.call(peer_node, :code, :add_paths, [:code.get_path()])
+    _manager = start_instance_manager!(protocol_capabilities: ["session-ownership-v1"])
+    {:ok, _remote} = Instances.register(instance_attrs(Atom.to_string(peer_node)))
+
+    assert {:error, :coordinator_unavailable} = Sessions.ensure_started(session.id)
+    assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
+  end
+
   test "stops when its durable ownership epoch is replaced", %{session: session} do
     _manager = start_instance_manager!()
     {:ok, replacement} = Instances.register(instance_attrs("kodo@replacement"))
@@ -350,6 +403,30 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert :ok = ActiveSession.cancel(pid)
   end
 
+  test "startup recovery retries a session when placement is temporarily unavailable", %{
+    session: session
+  } do
+    put_instance_manager_enabled(true)
+
+    {:ok, _event} =
+      Sessions.append_event(session.id, "user_message", %{
+        "role" => "user",
+        "content" => "wait"
+      })
+
+    {:ok, _status} = Sessions.set_status(session.id, "running")
+
+    recovery = start_supervised!({Recovery, name: nil})
+    assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
+
+    _manager = start_instance_manager!()
+    send(recovery, :retry)
+    _ = :sys.get_state(recovery)
+    assert_receive :fake_llm_waiting, 1_000
+    assert [{pid, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
+    assert :ok = ActiveSession.cancel(pid)
+  end
+
   test "supervision-tree restart reconstructs active sessions before serving again", %{
     session: session
   } do
@@ -432,7 +509,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     )
   end
 
-  defp start_instance_manager! do
+  defp start_instance_manager!(overrides \\ []) do
     start_supervised!({
       InstanceManager,
       enabled: true,
@@ -441,9 +518,35 @@ defmodule Kodo.Sessions.ActiveSessionTest do
       artifact_revision: "test-revision",
       deployment_generation: 1,
       capacity: 1,
-      protocol_capabilities: ["session-events-v1", "session-ownership-v1"],
+      protocol_capabilities:
+        Keyword.get(
+          overrides,
+          :protocol_capabilities,
+          ["session-events-v1", "session-ownership-v1", "session-placement-v1"]
+        ),
       heartbeat_interval: :infinity
     })
+  end
+
+  defp put_instance_manager_enabled(enabled) do
+    previous = Application.fetch_env!(:kodo, InstanceManager)
+    Application.put_env(:kodo, InstanceManager, Keyword.put(previous, :enabled, enabled))
+    on_exit(fn -> Application.put_env(:kodo, InstanceManager, previous) end)
+  end
+
+  defp ensure_distributed_node! do
+    if node() == :nonode@nohost do
+      {_output, 0} = System.cmd("epmd", ["-daemon"])
+      {:ok, _pid} = :net_kernel.start([:kodo_placement_test, :shortnames])
+    end
+  end
+
+  defp stop_peer(peer) do
+    try do
+      :peer.stop(peer)
+    catch
+      :exit, _reason -> :ok
+    end
   end
 
   defp instance_attrs(node_name) do
@@ -455,7 +558,11 @@ defmodule Kodo.Sessions.ActiveSessionTest do
       ready: true,
       draining: false,
       capacity: 1,
-      protocol_capabilities: ["session-events-v1", "session-ownership-v1"]
+      protocol_capabilities: [
+        "session-events-v1",
+        "session-ownership-v1",
+        "session-placement-v1"
+      ]
     }
   end
 

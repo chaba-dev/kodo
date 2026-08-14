@@ -41,7 +41,9 @@ defmodule Kodo.Cluster.PlacementTest do
 
     {:ok, _incompatible} =
       Instances.register(
-        instance_attrs("incompatible", protocol_capabilities: ["session-ownership-v1"])
+        instance_attrs("incompatible",
+          protocol_capabilities: ["session-events-v1", "session-ownership-v1"]
+        )
       )
 
     {:ok, draining} = Instances.register(instance_attrs("draining"))
@@ -83,6 +85,33 @@ defmodule Kodo.Cluster.PlacementTest do
     assert selected.boot_id == available.boot_id
   end
 
+  test "serializes capacity admission across sessions", context do
+    first = create_session(context)
+    second = create_session(context)
+    {:ok, target} = Instances.register(instance_attrs("capacity-one"))
+    parent = self()
+
+    tasks =
+      for session <- [first, second] do
+        Task.async(fn ->
+          send(parent, {:ready, self()})
+          receive do: (:claim -> Sessions.claim_ownership(session.id, target.boot_id))
+        end)
+      end
+
+    task_pids =
+      for _index <- 1..2 do
+        assert_receive {:ready, task_pid}
+        task_pid
+      end
+
+    Enum.each(task_pids, &send(&1, :claim))
+    results = Task.await_many(tasks, :infinity)
+
+    assert Enum.count(results, &match?({:ok, %Kodo.Sessions.Ownership{}}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :instance_at_capacity})) == 1
+  end
+
   defp create_session(%{runner: runner, scope: scope}) do
     {:ok, session} =
       Sessions.create_session(scope, %{
@@ -104,7 +133,11 @@ defmodule Kodo.Cluster.PlacementTest do
         ready: true,
         draining: false,
         capacity: 1,
-        protocol_capabilities: ["session-events-v1", "session-ownership-v1"]
+        protocol_capabilities: [
+          "session-events-v1",
+          "session-ownership-v1",
+          "session-placement-v1"
+        ]
       },
       Map.new(overrides)
     )

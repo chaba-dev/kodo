@@ -13,7 +13,7 @@ defmodule Kodo.Application do
     children = [
       KodoWeb.Telemetry,
       Kodo.Repo,
-      {Kodo.Cluster.InstanceManager, boot_id: Ecto.UUID.generate()},
+      {Kodo.Cluster.InstanceManager, boot_id: Ecto.UUID.generate(), ready: false},
       {DNSCluster, query: Application.get_env(:kodo, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Kodo.PubSub},
       Kodo.Cluster.Discovery,

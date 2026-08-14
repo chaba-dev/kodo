@@ -14,7 +14,7 @@ defmodule Kodo.Cluster.Placement do
   alias Kodo.Repo
   alias Kodo.Sessions.Session
 
-  @required_capabilities ["session-events-v1", "session-ownership-v1"]
+  @required_capabilities ["session-events-v1", "session-ownership-v1", "session-placement-v1"]
   @capacity_statuses ["idle", "running", "awaiting_approval"]
 
   @doc "Returns a reachable, compatible instance and its distributed Erlang node."
