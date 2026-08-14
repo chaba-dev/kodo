@@ -2,6 +2,8 @@ defmodule Kodo.Sessions.ActiveSessionTest do
   use Kodo.DataCase
 
   alias Kodo.Runners
+  alias Kodo.Cluster.InstanceManager
+  alias Kodo.Cluster.Instances
   alias Kodo.Sessions
   alias Kodo.Sessions.ActiveSession
   alias Kodo.Sessions.Recovery
@@ -22,7 +24,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 3,
+        protocol_version: 4,
         capabilities: []
       })
 
@@ -50,6 +52,76 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert {:ok, first} = Sessions.ensure_started(session.id)
     assert {:ok, second} = Sessions.ensure_started(session.id)
     assert first == second
+  end
+
+  test "stops when its durable ownership epoch is replaced", %{session: session} do
+    _manager = start_instance_manager!()
+    {:ok, replacement} = Instances.register(instance_attrs("kodo@replacement"))
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    ownership = :sys.get_state(coordinator).ownership
+
+    assert {:ok, _replacement_ownership} =
+             Sessions.transfer_ownership(ownership, replacement.boot_id)
+
+    ref = Process.monitor(coordinator)
+    send(coordinator, :check_authority)
+
+    assert_receive {:DOWN, ^ref, :process, ^coordinator, :normal}
+  end
+
+  test "does not transiently restart when a task finishes after losing ownership", %{
+    session: session
+  } do
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    assert :ok = ActiveSession.start_turn(coordinator, "ownership barrier")
+    assert_receive {:model_dispatch_started, dispatch_pid}
+
+    ownership = :sys.get_state(coordinator).ownership
+    coordinator_ref = Process.monitor(coordinator)
+    transfer = Task.async(fn -> Sessions.transfer_ownership(ownership, nil) end)
+    transfer_ref = transfer.ref
+
+    refute_receive {^transfer_ref, _result}
+    send(dispatch_pid, :release_model_dispatch)
+
+    assert {:ok, replacement} = Task.await(transfer)
+    assert replacement.epoch > ownership.epoch
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
+  end
+
+  test "renews runner authority only after revalidating durable ownership", %{
+    runner: runner,
+    session: session
+  } do
+    _manager = start_instance_manager!()
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    ownership = :sys.get_state(coordinator).ownership
+
+    expected = Kodo.RunnerProtocol.authority_lease(ownership)
+    assert_receive {:authority_lease, ^expected}
+
+    send(coordinator, :check_authority)
+    assert_receive {:authority_lease, ^expected}
+  end
+
+  test "stops when the process maintaining authoritative liveness exits", %{session: session} do
+    manager = start_instance_manager!()
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    assert :ok = ActiveSession.start_turn(coordinator, "wait")
+    assert_receive :fake_llm_waiting
+
+    task = :sys.get_state(coordinator).task.pid
+    coordinator_ref = Process.monitor(coordinator)
+    manager_ref = Process.monitor(manager)
+    task_ref = Process.monitor(task)
+
+    assert :ok = stop_supervised(InstanceManager)
+
+    assert_receive {:DOWN, ^manager_ref, :process, ^manager, :shutdown}
+    assert_receive {:DOWN, ^task_ref, :process, ^task, :killed}
+
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
   end
 
   test "reconciles a repeated turn request while its task is active", %{session: session} do
@@ -333,12 +405,39 @@ defmodule Kodo.Sessions.ActiveSessionTest do
       "runner_responses:#{runner_id}",
       {:runner_tool_response, runner_id,
        %{
-         "protocol_version" => 3,
+         "protocol_version" => 4,
          "request_id" => request["request_id"],
          "status" => "success",
          "response" => %{"result" => "files_changed", "paths" => []}
        }}
     )
+  end
+
+  defp start_instance_manager! do
+    start_supervised!({
+      InstanceManager,
+      enabled: true,
+      boot_id: Ecto.UUID.generate(),
+      node_name: "kodo@authority",
+      artifact_revision: "test-revision",
+      deployment_generation: 1,
+      capacity: 1,
+      protocol_capabilities: ["session-events-v1", "session-ownership-v1"],
+      heartbeat_interval: :infinity
+    })
+  end
+
+  defp instance_attrs(node_name) do
+    %{
+      boot_id: Ecto.UUID.generate(),
+      node_name: node_name,
+      artifact_revision: "test-revision",
+      deployment_generation: 1,
+      ready: true,
+      draining: false,
+      capacity: 1,
+      protocol_capabilities: ["session-events-v1", "session-ownership-v1"]
+    }
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:kodo, key)

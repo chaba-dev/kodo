@@ -6,14 +6,21 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::sync::Semaphore;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command as TokioCommand;
+#[cfg(test)]
+use tokio::sync::Notify;
+use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
 
-use crate::process::{ProcessError, ProcessManager};
+use crate::authority::{AuthorityError, AuthorityGuard};
+use crate::process::{
+    ProcessError, ProcessGroupGuard, ProcessManager, cleanup_process_group, terminate_process_group,
+};
 use crate::protocol::{ExecutionLimits, MAX_BLOCKING_TOOLS, SearchMatch, ToolRequest, ToolResult};
 use crate::workspace::{Workspace, WorkspaceError};
 
@@ -36,8 +43,16 @@ pub enum RunnerError {
     OutputLimit(String),
     #[error("runner task failed: {0}")]
     Task(String),
+    #[error("{0}")]
+    Authority(String),
     #[error(transparent)]
     Process(#[from] ProcessError),
+}
+
+impl From<AuthorityError> for RunnerError {
+    fn from(error: AuthorityError) -> Self {
+        Self::Authority(error.to_string())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +65,33 @@ pub struct Runner {
     mutation_lock: Arc<Mutex<()>>,
     // Git and filesystem calls are blocking; cap them to protect runtime and host resources.
     blocking_tools: Arc<Semaphore>,
+    #[cfg(test)]
+    patch_mutation_gate: Option<Arc<PatchMutationGate>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct PatchMutationGate {
+    spawned: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+impl PatchMutationGate {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            spawned: Notify::new(),
+            release: Notify::new(),
+        })
+    }
+
+    pub(crate) async fn wait_until_spawned(&self) {
+        self.spawned.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
 }
 
 impl Runner {
@@ -86,7 +128,15 @@ impl Runner {
             processes,
             mutation_lock: Arc::new(Mutex::new(())),
             blocking_tools: Arc::new(Semaphore::new(max_blocking_tools)),
+            #[cfg(test)]
+            patch_mutation_gate: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_patch_mutation_gate(mut self, gate: Arc<PatchMutationGate>) -> Self {
+        self.patch_mutation_gate = Some(gate);
+        self
     }
 
     pub(crate) fn limits(&self) -> &ExecutionLimits {
@@ -94,12 +144,25 @@ impl Runner {
     }
 
     pub async fn execute(&self, request: ToolRequest) -> Result<ToolResult, RunnerError> {
+        self.execute_authorized(request, AuthorityGuard::unmanaged())
+            .await
+    }
+
+    pub(crate) async fn execute_authorized(
+        &self,
+        request: ToolRequest,
+        authority: AuthorityGuard,
+    ) -> Result<ToolResult, RunnerError> {
+        authority.ensure_valid()?;
         match request {
             ToolRequest::StartCommand {
                 command,
                 cwd,
                 timeout_ms,
-            } => self.start_command(&command, &cwd, timeout_ms).await,
+            } => {
+                self.start_command(&command, &cwd, timeout_ms, authority)
+                    .await
+            }
             ToolRequest::PollCommand {
                 process_id,
                 after_sequence,
@@ -108,8 +171,12 @@ impl Runner {
                 process_id,
                 after_sequence,
             } => self.stop_command(process_id, after_sequence).await,
+            ToolRequest::ApplyPatch { patch } => {
+                self.apply_patch_authorized(patch, authority).await
+            }
             request => {
                 let runner = self.clone();
+                let blocking_authority = authority.clone();
                 let permit = Arc::clone(&self.blocking_tools)
                     .acquire_owned()
                     .await
@@ -117,7 +184,7 @@ impl Runner {
                 tokio::task::spawn_blocking(move || {
                     // Hold the permit for the complete blocking operation, including child reaping.
                     let _permit = permit;
-                    runner.execute_blocking(request)
+                    runner.execute_blocking(request, &blocking_authority)
                 })
                 .await
                 .map_err(|error| RunnerError::Task(error.to_string()))?
@@ -125,7 +192,12 @@ impl Runner {
         }
     }
 
-    fn execute_blocking(&self, request: ToolRequest) -> Result<ToolResult, RunnerError> {
+    fn execute_blocking(
+        &self,
+        request: ToolRequest,
+        authority: &AuthorityGuard,
+    ) -> Result<ToolResult, RunnerError> {
+        authority.ensure_valid()?;
         match request {
             ToolRequest::ListFiles { path } => self.list_files(&path),
             ToolRequest::SearchCode { query, paths } => self.search_code(&query, &paths),
@@ -136,11 +208,11 @@ impl Runner {
             } => self.read_file(&path, offset, limit),
             ToolRequest::GitStatus => self.git_output(["status", "--short"], &[]),
             ToolRequest::GitDiff { paths } => self.git_diff(&paths),
-            ToolRequest::ApplyPatch { patch } => self.apply_patch(&patch),
-            ToolRequest::StartCommand { .. }
+            ToolRequest::ApplyPatch { .. }
+            | ToolRequest::StartCommand { .. }
             | ToolRequest::PollCommand { .. }
             | ToolRequest::StopCommand { .. } => {
-                unreachable!("process requests are dispatched asynchronously")
+                unreachable!("mutation and process requests are dispatched asynchronously")
             }
         }
     }
@@ -150,11 +222,13 @@ impl Runner {
         command: &str,
         cwd: &str,
         timeout_ms: u64,
+        authority: AuthorityGuard,
     ) -> Result<ToolResult, RunnerError> {
+        authority.ensure_valid()?;
         let cwd = self.workspace.resolve(cwd)?;
         let process_id = self
             .processes
-            .start(command, &cwd, Duration::from_millis(timeout_ms))
+            .start_authorized(command, &cwd, Duration::from_millis(timeout_ms), authority)
             .await?;
         Ok(ToolResult::CommandStarted { process_id })
     }
@@ -419,25 +493,143 @@ impl Runner {
         Ok(ToolResult::Output { content, truncated })
     }
 
-    fn apply_patch(&self, patch: &str) -> Result<ToolResult, RunnerError> {
+    async fn apply_patch_authorized(
+        &self,
+        patch: String,
+        authority: AuthorityGuard,
+    ) -> Result<ToolResult, RunnerError> {
         if patch.len() > self.limits.max_patch_input_bytes {
             return Err(RunnerError::Patch(format!(
                 "patch exceeds {} byte limit",
                 self.limits.max_patch_input_bytes
             )));
         }
-        let _mutation = self
-            .mutation_lock
-            .lock()
-            .expect("workspace mutation lock poisoned");
+        let _permit = Arc::clone(&self.blocking_tools)
+            .acquire_owned()
+            .await
+            .map_err(|error| RunnerError::Task(error.to_string()))?;
+        let _mutation = self.mutation_lock.lock().await;
+        let runner = self.clone();
+        let preflight_patch = patch.clone();
+        let preflight_authority = authority.clone();
+        let paths = tokio::task::spawn_blocking(move || {
+            runner.preflight_patch(&preflight_patch, &preflight_authority)
+        })
+        .await
+        .map_err(|error| RunnerError::Task(error.to_string()))??;
+        authority.ensure_valid()?;
+        let applied = self.git_apply_authorized(&patch, &authority).await?;
+        successful_patch(applied)?;
+        Ok(ToolResult::FilesChanged { paths })
+    }
+
+    fn preflight_patch(
+        &self,
+        patch: &str,
+        authority: &AuthorityGuard,
+    ) -> Result<Vec<String>, RunnerError> {
+        authority.ensure_valid()?;
         // Derive and confine every affected path before asking Git to mutate the worktree.
         let paths = self.patch_paths(patch)?;
         // Preflight under the same mutation lock so a successful check describes the state applied.
         let check = self.git_with_input(["apply", "--check"], patch)?;
         successful_patch(check)?;
-        let applied = self.git_with_input(["apply"], patch)?;
-        successful_patch(applied)?;
-        Ok(ToolResult::FilesChanged { paths })
+        authority.ensure_valid()?;
+        Ok(paths)
+    }
+
+    async fn git_apply_authorized(
+        &self,
+        patch: &str,
+        authority: &AuthorityGuard,
+    ) -> Result<CapturedOutput, RunnerError> {
+        authority.ensure_valid()?;
+        let mut command = TokioCommand::new("git");
+        command
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "apply",
+            ])
+            .current_dir(self.workspace.root())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_ATTR_NOSYSTEM", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            // Git may invoke filters while updating the worktree; keep them within the same
+            // authority-controlled lifecycle as the direct Git process.
+            .process_group(0);
+        for variable in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+        ] {
+            command.env_remove(variable);
+        }
+        let mut child = command.spawn().map_err(RunnerError::GitIo)?;
+        let mut process_group = ProcessGroupGuard::for_child(&child);
+        let group = process_group.as_ref().and_then(ProcessGroupGuard::group);
+        let mut stdin = child.stdin.take().expect("piped stdin must be available");
+        let stdout = child.stdout.take().expect("piped stdout must be available");
+        let stderr = child.stderr.take().expect("piped stderr must be available");
+        #[cfg(test)]
+        if let Some(gate) = &self.patch_mutation_gate {
+            gate.spawned.notify_one();
+            gate.release.notified().await;
+        }
+        let input = patch.as_bytes().to_vec();
+        let input_writer = tokio::spawn(async move { stdin.write_all(&input).await });
+        let limit = self.limits.max_output_bytes;
+        let stdout_reader = tokio::spawn(read_async_bounded(stdout, limit));
+        let stderr_reader = tokio::spawn(read_async_bounded(stderr, limit));
+
+        let status = tokio::select! {
+            biased;
+            () = authority.wait_until_invalid() => {
+                terminate_process_group(&mut child, group).await;
+                None
+            }
+            status = child.wait() => Some(status.map_err(RunnerError::GitIo)?),
+        };
+        if status.is_some() {
+            cleanup_process_group(group).await;
+        }
+        if let Some(process_group) = process_group.as_mut() {
+            process_group.disarm();
+        }
+        let input_result = if status.is_none() {
+            input_writer.abort();
+            let _ = input_writer.await;
+            Ok(())
+        } else {
+            input_writer
+                .await
+                .map_err(|error| RunnerError::Task(error.to_string()))?
+        };
+        let (stdout, stdout_truncated) = finish_git_reader(stdout_reader).await?;
+        let (stderr, stderr_truncated) = finish_git_reader(stderr_reader).await?;
+        let Some(status) = status else {
+            return Err(AuthorityError::Lost.into());
+        };
+        if status.success() {
+            input_result.map_err(RunnerError::GitIo)?;
+        }
+        Ok(CapturedOutput {
+            status,
+            stdout,
+            stderr,
+            stdout_truncated,
+            stderr_truncated,
+            limit,
+        })
     }
 
     fn patch_paths(&self, patch: &str) -> Result<Vec<String>, RunnerError> {
@@ -699,6 +891,41 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> Result<(Vec<u8>, bool), 
         let remaining = limit.saturating_sub(output.len());
         output.extend_from_slice(&buffer[..read.min(remaining)]);
         truncated |= read > remaining;
+    }
+}
+
+async fn read_async_bounded(
+    mut reader: impl AsyncRead + Unpin,
+    limit: usize,
+) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let mut output = Vec::with_capacity(limit.min(8 * 1024));
+    let mut buffer = [0; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok((output, truncated));
+        }
+        let remaining = limit.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..read.min(remaining)]);
+        truncated |= read > remaining;
+    }
+}
+
+async fn finish_git_reader(
+    mut reader: tokio::task::JoinHandle<Result<(Vec<u8>, bool), std::io::Error>>,
+) -> Result<(Vec<u8>, bool), RunnerError> {
+    match tokio::time::timeout(Duration::from_millis(25), &mut reader).await {
+        Ok(result) => result
+            .map_err(|error| RunnerError::Task(error.to_string()))?
+            .map_err(RunnerError::GitIo),
+        Err(_) => {
+            // A descendant that inherited Git's output pipe must not hold the mutation lock after
+            // its process group has been terminated.
+            reader.abort();
+            let _ = reader.await;
+            Ok((Vec::new(), true))
+        }
     }
 }
 

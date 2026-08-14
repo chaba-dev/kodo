@@ -52,6 +52,11 @@ defmodule KodoWeb.RunnerChannel do
     {:noreply, socket}
   end
 
+  def handle_info({:authority_lease, lease}, socket) do
+    :ok = push(socket, "authority_lease", lease)
+    {:noreply, socket}
+  end
+
   defp connect_runner(runner_id, socket) do
     with %{} = runner <- Runners.get_runner(runner_id),
          {:ok, _runner} <- Runners.connected(runner) do

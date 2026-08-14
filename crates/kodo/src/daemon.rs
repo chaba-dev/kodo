@@ -12,7 +12,10 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
-use crate::protocol::{PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope, ToolRequest};
+use crate::authority::{AuthorityGuard, AuthorityRegistry};
+use crate::protocol::{
+    AuthorityLease, PROTOCOL_VERSION, RequestEnvelope, ResponseEnvelope, ToolRequest,
+};
 use crate::runner::Runner;
 
 // Stdio framing and connection scheduling exist before any Phoenix policy is available.
@@ -26,6 +29,7 @@ pub(crate) struct Dispatcher {
     max_cached_requests: usize,
     max_cached_response_bytes: usize,
     max_error_bytes: usize,
+    authorities: AuthorityRegistry,
 }
 
 #[derive(Default)]
@@ -58,6 +62,7 @@ impl Dispatcher {
             max_cached_requests,
             max_cached_response_bytes,
             max_error_bytes,
+            authorities: AuthorityRegistry::default(),
         }
     }
 
@@ -65,7 +70,46 @@ impl Dispatcher {
         if request.protocol_version != PROTOCOL_VERSION {
             return unsupported_protocol_response(request.request_id, request.protocol_version);
         }
-        let fingerprint = request_fingerprint(&request.request);
+        let authority = match request.authority {
+            Some(lease) => match self.authorities.grant(lease) {
+                Ok(authority) => authority,
+                Err(error) => return authority_error_response(request.request_id, error),
+            },
+            None => AuthorityGuard::unmanaged(),
+        };
+        self.dispatch_with_authority(request, authority).await
+    }
+
+    pub(crate) async fn dispatch_connected(&self, request: RequestEnvelope) -> String {
+        if request.protocol_version != PROTOCOL_VERSION {
+            return unsupported_protocol_response(request.request_id, request.protocol_version);
+        }
+        let Some(lease) = request.authority else {
+            return missing_authority_response(request.request_id);
+        };
+        let authority = match self.authorities.grant(lease) {
+            Ok(authority) => authority,
+            Err(error) => return authority_error_response(request.request_id, error),
+        };
+        self.dispatch_with_authority(request, authority).await
+    }
+
+    pub(crate) fn renew_authority(
+        &self,
+        lease: AuthorityLease,
+    ) -> Result<(), crate::authority::AuthorityError> {
+        self.authorities.grant(lease).map(|_guard| ())
+    }
+
+    async fn dispatch_with_authority(
+        &self,
+        request: RequestEnvelope,
+        authority: AuthorityGuard,
+    ) -> String {
+        let fingerprint = request_fingerprint(
+            &request.request,
+            request.authority.map(|lease| lease.session_id),
+        );
         let (slot, elected) = {
             let mut cache = self.cache.lock().expect("response cache lock poisoned");
             if let Some(slot) = cache.slots.get(&request.request_id) {
@@ -100,13 +144,18 @@ impl Dispatcher {
         }
 
         if elected {
-            self.spawn_execution(request, Arc::clone(&slot));
+            self.spawn_execution(request, authority, Arc::clone(&slot));
         }
 
         wait_for_response(slot).await
     }
 
-    fn spawn_execution(&self, request: RequestEnvelope, slot: Arc<ResponseSlot>) {
+    fn spawn_execution(
+        &self,
+        request: RequestEnvelope,
+        authority: AuthorityGuard,
+        slot: Arc<ResponseSlot>,
+    ) {
         let runner = self.runner.clone();
         let cache = Arc::clone(&self.cache);
         let max_cached_response_bytes = self.max_cached_response_bytes;
@@ -114,7 +163,8 @@ impl Dispatcher {
         tokio::spawn(async move {
             // Execution outlives any transport waiter so reconnect retries cannot duplicate a
             // blocking mutation whose original WebSocket disappeared.
-            let response = match runner.execute(request.request).await {
+            let result = runner.execute_authorized(request.request, authority).await;
+            let response = match result {
                 Ok(response) => ResponseEnvelope::Success {
                     protocol_version: PROTOCOL_VERSION,
                     request_id: request.request_id,
@@ -173,9 +223,10 @@ async fn wait_for_response(slot: Arc<ResponseSlot>) -> String {
     }
 }
 
-fn request_fingerprint(request: &ToolRequest) -> [u8; 32] {
+fn request_fingerprint(request: &ToolRequest, session_id: Option<Uuid>) -> [u8; 32] {
     Sha256::digest(
-        serde_json::to_vec(request).expect("tool request must serialize for fingerprinting"),
+        serde_json::to_vec(&(session_id, request))
+            .expect("tool request must serialize for fingerprinting"),
     )
     .into()
 }
@@ -215,6 +266,22 @@ fn unsupported_protocol_response(request_id: Uuid, protocol_version: u16) -> Str
         error: format!(
             "unsupported protocol version {protocol_version}; expected {PROTOCOL_VERSION}"
         ),
+    })
+}
+
+fn missing_authority_response(request_id: Uuid) -> String {
+    serialize_response(ResponseEnvelope::Error {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: Some(request_id),
+        error: "connected runner request omitted its authority lease".into(),
+    })
+}
+
+fn authority_error_response(request_id: Uuid, error: crate::authority::AuthorityError) -> String {
+    serialize_response(ResponseEnvelope::Error {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: Some(request_id),
+        error: error.to_string(),
     })
 }
 
@@ -355,13 +422,16 @@ fn serialize_response(response: ResponseEnvelope) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
+    use std::time::Duration;
 
     use tempfile::TempDir;
     use uuid::Uuid;
 
     use super::*;
-    use crate::protocol::{ExecutionLimits, ToolRequest, ToolResult};
+    use crate::protocol::{AuthorityLease, ExecutionLimits, ToolRequest, ToolResult};
+    use crate::runner::PatchMutationGate;
     use crate::workspace::Workspace;
 
     #[tokio::test]
@@ -372,6 +442,7 @@ mod tests {
         let request = serde_json::to_string(&RequestEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id,
+            authority: None,
             request: ToolRequest::GitStatus,
         })
         .unwrap();
@@ -403,6 +474,7 @@ mod tests {
         let request = serde_json::to_string(&RequestEnvelope {
             protocol_version: 2,
             request_id,
+            authority: None,
             request: ToolRequest::GitStatus,
         })
         .unwrap();
@@ -420,6 +492,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connected_dispatch_rejects_requests_without_an_authority_lease() {
+        let repository = git_repository();
+        let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
+        let dispatcher = Dispatcher::new(runner);
+        let request_id = Uuid::new_v4();
+
+        let response = dispatcher
+            .dispatch_connected(RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id,
+                authority: None,
+                request: ToolRequest::GitStatus,
+            })
+            .await;
+        let ResponseEnvelope::Error { error, .. } = serde_json::from_str(&response).unwrap() else {
+            panic!("expected missing authority error");
+        };
+
+        assert!(error.contains("omitted its authority lease"));
+    }
+
+    #[tokio::test]
     async fn rejects_requests_larger_than_the_transport_limit() {
         let repository = git_repository();
         let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
@@ -427,6 +521,7 @@ mod tests {
         let request = serde_json::to_string(&RequestEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id: Uuid::new_v4(),
+            authority: None,
             request: ToolRequest::ApplyPatch {
                 patch: "x".repeat(1_100_000),
             },
@@ -451,6 +546,7 @@ mod tests {
         let request = serde_json::to_string(&RequestEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id: Uuid::new_v4(),
+            authority: None,
             request: ToolRequest::StartCommand {
                 command: "while true; do :; done".into(),
                 cwd: String::new(),
@@ -480,6 +576,7 @@ mod tests {
         let request = RequestEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id,
+            authority: None,
             request: ToolRequest::ReadFile {
                 path: format!("/{}", "x".repeat(10_000)),
                 offset: 0,
@@ -519,6 +616,7 @@ mod tests {
         let request = RequestEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id,
+            authority: None,
             request: ToolRequest::ApplyPatch {
                 patch: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n".into(),
             },
@@ -550,6 +648,196 @@ mod tests {
             std::fs::read_to_string(repository.path().join("file.txt")).unwrap(),
             "after\n"
         );
+    }
+
+    #[tokio::test]
+    async fn superseding_an_authority_lease_stops_its_running_command_before_mutation() {
+        let repository = git_repository();
+        let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
+        let dispatcher = Dispatcher::new(runner);
+        let session_id = Uuid::new_v4();
+        let request = RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            authority: Some(AuthorityLease {
+                session_id,
+                ownership_epoch: 1,
+                ttl_ms: 1_000,
+            }),
+            request: ToolRequest::StartCommand {
+                command: "sleep 0.2; printf mutated > lease.txt".into(),
+                cwd: String::new(),
+                timeout_ms: 2_000,
+            },
+        };
+
+        let response = dispatcher.dispatch_connected(request).await;
+        assert!(matches!(
+            serde_json::from_str::<ResponseEnvelope>(&response).unwrap(),
+            ResponseEnvelope::Success { .. }
+        ));
+
+        dispatcher
+            .renew_authority(AuthorityLease {
+                session_id,
+                ownership_epoch: 2,
+                ttl_ms: 1_000,
+            })
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(!repository.path().join("lease.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn expiring_an_authority_lease_stops_its_running_command_before_mutation() {
+        let repository = git_repository();
+        let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
+        let dispatcher = Dispatcher::new(runner);
+        let request = RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            authority: Some(AuthorityLease {
+                session_id: Uuid::new_v4(),
+                ownership_epoch: 1,
+                ttl_ms: 50,
+            }),
+            request: ToolRequest::StartCommand {
+                command: "sleep 0.2; printf mutated > lease.txt".into(),
+                cwd: String::new(),
+                timeout_ms: 2_000,
+            },
+        };
+
+        let response = dispatcher.dispatch_connected(request).await;
+        assert!(matches!(
+            serde_json::from_str::<ResponseEnvelope>(&response).unwrap(),
+            ResponseEnvelope::Success { .. }
+        ));
+
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(!repository.path().join("lease.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn superseding_authority_after_patch_preflight_aborts_the_git_mutation() {
+        let repository = git_repository();
+        std::fs::write(repository.path().join("file.txt"), "before\n").unwrap();
+        git(repository.path(), ["add", "file.txt"]);
+        git(repository.path(), ["commit", "-m", "fixture"]);
+        let gate = PatchMutationGate::new();
+        let runner = Runner::new(Workspace::from_root(repository.path()).unwrap())
+            .with_patch_mutation_gate(Arc::clone(&gate));
+        let dispatcher = Dispatcher::new(runner);
+        let session_id = Uuid::new_v4();
+        let request = RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            authority: Some(AuthorityLease {
+                session_id,
+                ownership_epoch: 1,
+                ttl_ms: 1_000,
+            }),
+            request: ToolRequest::ApplyPatch {
+                patch: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n".into(),
+            },
+        };
+        let execution = {
+            let dispatcher = dispatcher.clone();
+            tokio::spawn(async move { dispatcher.dispatch_connected(request).await })
+        };
+
+        gate.wait_until_spawned().await;
+        dispatcher
+            .renew_authority(AuthorityLease {
+                session_id,
+                ownership_epoch: 2,
+                ttl_ms: 1_000,
+            })
+            .unwrap();
+        gate.release();
+
+        let response = execution.await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ResponseEnvelope>(&response).unwrap(),
+            ResponseEnvelope::Error { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("file.txt")).unwrap(),
+            "before\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn superseding_authority_terminates_git_apply_filter_descendants() {
+        let repository = git_repository();
+        std::fs::write(repository.path().join("file.txt"), "before\n").unwrap();
+        std::fs::write(
+            repository.path().join(".gitattributes"),
+            "file.txt filter=blocking\n",
+        )
+        .unwrap();
+        let filter = repository.path().join("blocking-filter.sh");
+        std::fs::write(
+            &filter,
+            "#!/bin/sh\ntouch filter-started\ncat\nsleep 0.4\nprintf escaped > escaped.txt\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&filter).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&filter, permissions).unwrap();
+        git(repository.path(), ["add", "file.txt", ".gitattributes"]);
+        git(repository.path(), ["commit", "-m", "fixture"]);
+        git(
+            repository.path(),
+            ["config", "filter.blocking.smudge", "./blocking-filter.sh"],
+        );
+
+        let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
+        let dispatcher = Dispatcher::new(runner);
+        let session_id = Uuid::new_v4();
+        let request = RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            authority: Some(AuthorityLease {
+                session_id,
+                ownership_epoch: 1,
+                ttl_ms: 5_000,
+            }),
+            request: ToolRequest::ApplyPatch {
+                patch: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n".into(),
+            },
+        };
+        let execution = {
+            let dispatcher = dispatcher.clone();
+            tokio::spawn(async move { dispatcher.dispatch_connected(request).await })
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !repository.path().join("filter-started").exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("Git apply filter did not start");
+        dispatcher
+            .renew_authority(AuthorityLease {
+                session_id,
+                ownership_epoch: 2,
+                ttl_ms: 5_000,
+            })
+            .unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(1), execution)
+            .await
+            .expect("cancelled patch did not return promptly")
+            .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ResponseEnvelope>(&response).unwrap(),
+            ResponseEnvelope::Error { .. }
+        ));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!repository.path().join("escaped.txt").exists());
     }
 
     #[tokio::test]
@@ -589,6 +877,7 @@ mod tests {
         let request = RequestEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id: Uuid::new_v4(),
+            authority: None,
             request: ToolRequest::ApplyPatch {
                 patch: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n".into(),
             },
@@ -707,6 +996,7 @@ mod tests {
             .dispatch(RequestEnvelope {
                 protocol_version: PROTOCOL_VERSION,
                 request_id: Uuid::new_v4(),
+                authority: None,
                 request,
             })
             .await;

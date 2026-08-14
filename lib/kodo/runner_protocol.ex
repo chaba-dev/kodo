@@ -6,8 +6,9 @@ defmodule Kodo.RunnerProtocol do
   transport constants in sync when changing them.
   """
 
-  @version 3
+  @version 4
   @limits_version 1
+  @authority_lease_ttl_ms 15_000
   @token_salt "runner socket v1"
   @token_max_age_seconds 24 * 60 * 60
   @max_wire_bytes 4 * 1024 * 1024
@@ -51,6 +52,15 @@ defmodule Kodo.RunnerProtocol do
   def max_wire_bytes, do: @max_wire_bytes
   def max_payload_bytes, do: @max_payload_bytes
   def limits, do: @limits
+
+  @doc "Builds the short runner-enforced lease carried by every connected tool request."
+  def authority_lease(%{session_id: session_id, epoch: epoch}) do
+    %{
+      "session_id" => session_id,
+      "ownership_epoch" => epoch,
+      "ttl_ms" => @authority_lease_ttl_ms
+    }
+  end
 
   @doc "Fails fast when Phoenix policy cannot be safely enforced by a connected runner."
   def validate_limits!(limits \\ @limits)

@@ -631,6 +631,7 @@ defmodule Kodo.Agent.Loop do
     envelope = %{
       "protocol_version" => @protocol_version,
       "request_id" => request_id,
+      "authority" => RunnerProtocol.authority_lease(ownership),
       "request" => request
     }
 

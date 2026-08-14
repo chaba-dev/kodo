@@ -6,8 +6,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const LIMITS_VERSION: u16 = 1;
+pub const MAX_AUTHORITY_LEASE_MS: u64 = 15_000;
 const MAX_CONNECTED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024 - 4 * 1024;
 const JSON_ESCAPE_EXPANSION: usize = 6;
 const RESPONSE_ENVELOPE_BYTES: usize = 4 * 1024;
@@ -114,7 +115,17 @@ impl ExecutionLimits {
 pub struct RequestEnvelope {
     pub protocol_version: u16,
     pub request_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<AuthorityLease>,
     pub request: ToolRequest,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityLease {
+    pub session_id: Uuid,
+    pub ownership_epoch: u64,
+    pub ttl_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -290,6 +301,36 @@ mod tests {
                 "path": "src/lib.rs",
                 "offset": 10,
                 "limit": 20
+            })
+        );
+    }
+
+    #[test]
+    fn connected_request_authority_has_a_stable_json_shape() {
+        let session_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let envelope = RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            authority: Some(AuthorityLease {
+                session_id,
+                ownership_epoch: 7,
+                ttl_ms: MAX_AUTHORITY_LEASE_MS,
+            }),
+            request: ToolRequest::GitStatus,
+        };
+
+        assert_eq!(
+            serde_json::to_value(envelope).unwrap(),
+            serde_json::json!({
+                "protocol_version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "authority": {
+                    "session_id": session_id,
+                    "ownership_epoch": 7,
+                    "ttl_ms": MAX_AUTHORITY_LEASE_MS
+                },
+                "request": {"tool": "git_status"}
             })
         );
     }
