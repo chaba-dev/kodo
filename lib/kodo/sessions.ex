@@ -5,7 +5,9 @@ defmodule Kodo.Sessions do
 
   alias Kodo.Accounts.Scope
   alias Kodo.Cluster.Discovery
+  alias Kodo.Cluster.InstanceManager
   alias Kodo.Cluster.Instances
+  alias Kodo.Cluster.Placement
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
@@ -223,7 +225,7 @@ defmodule Kodo.Sessions do
           else: await_stale_coordinator(pid, session_id)
 
       :error ->
-        start_active_session(session_id)
+        place_active_session(session_id)
     end
   end
 
@@ -238,7 +240,7 @@ defmodule Kodo.Sessions do
     ref = Process.monitor(pid)
 
     receive do
-      {:DOWN, ^ref, :process, ^pid, _reason} -> start_active_session(session_id)
+      {:DOWN, ^ref, :process, ^pid, _reason} -> place_active_session(session_id)
     after
       @stale_coordinator_shutdown_timeout ->
         Process.demonitor(ref, [:flush])
@@ -369,7 +371,8 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp start_active_session(session_id) do
+  @doc false
+  def start_active_session_here(session_id) do
     case DynamicSupervisor.start_child(
            Kodo.SessionSupervisor,
            {Kodo.Sessions.ActiveSession, session_id}
@@ -377,6 +380,27 @@ defmodule Kodo.Sessions do
       {:error, {:already_started, pid}} -> {:ok, pid}
       result -> result
     end
+  end
+
+  defp place_active_session(session_id) do
+    if Process.whereis(InstanceManager) do
+      with {:ok, _instance, target_node} <-
+             Placement.select(session_id, @ownership_stale_after_seconds) do
+        start_active_session_on(target_node, session_id)
+      end
+    else
+      start_active_session_here(session_id)
+    end
+  end
+
+  defp start_active_session_on(target_node, session_id) when target_node == node() do
+    start_active_session_here(session_id)
+  end
+
+  defp start_active_session_on(target_node, session_id) do
+    :erpc.call(target_node, __MODULE__, :start_active_session_here, [session_id])
+  catch
+    :error, {:erpc, _reason} -> {:error, :coordinator_unavailable}
   end
 
   def create_session(%Scope{} = scope, attrs) do

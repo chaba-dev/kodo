@@ -728,7 +728,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 - [X] Add global session and runner discovery, remote command routing, and
   immediate BEAM process/node failure signals without making the registry
   authoritative.
-- [ ] Add revision-compatible placement and decentralized scheduling across
+- [X] Add revision-compatible placement and decentralized scheduling across
   ready, non-draining nodes.
 - [ ] Add bounded proactive drain and source-to-target rehoming at durable
   model, approval, and tool-request boundaries.

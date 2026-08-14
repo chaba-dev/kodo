@@ -437,7 +437,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
       InstanceManager,
       enabled: true,
       boot_id: Ecto.UUID.generate(),
-      node_name: "kodo@authority",
+      node_name: Atom.to_string(node()),
       artifact_revision: "test-revision",
       deployment_generation: 1,
       capacity: 1,
