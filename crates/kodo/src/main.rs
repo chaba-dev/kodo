@@ -145,6 +145,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let token = token.ok_or("KODO_TOKEN is required with --control-plane")?;
                 control_plane::serve(&url, &workspace, &token).await?;
             } else {
+                let _runner_lock = workspace.lock_runner()?;
                 let runner = Runner::new(workspace);
                 daemon::serve_stdio(&runner).await?;
             }

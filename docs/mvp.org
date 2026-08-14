@@ -725,7 +725,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
   every state-advancing transaction and newly dispatched effect.
 - [X] Fail coordinators closed when ownership or authoritative instance
   liveness can no longer be maintained.
-- [ ] Add global session and runner discovery, remote command routing, and
+- [X] Add global session and runner discovery, remote command routing, and
   immediate BEAM process/node failure signals without making the registry
   authoritative.
 - [ ] Add revision-compatible placement and decentralized scheduling across

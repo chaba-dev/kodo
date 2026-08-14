@@ -4,6 +4,7 @@ defmodule Kodo.Sessions do
   import Ecto.Query
 
   alias Kodo.Accounts.Scope
+  alias Kodo.Cluster.Discovery
   alias Kodo.Cluster.Instances
   alias Kodo.Repo
   alias Kodo.Sessions.Event
@@ -212,15 +213,16 @@ defmodule Kodo.Sessions do
 
   @doc "Returns the unique active coordinator, reconstructing it from events when needed."
   def ensure_started(session_id) do
-    case Registry.lookup(Kodo.SessionRegistry, session_id) do
-      [{pid, _value}] ->
-        if supervised_session?(pid) do
-          {:ok, pid}
-        else
-          await_stale_coordinator(pid, session_id)
-        end
+    case Discovery.session(session_id) do
+      {:ok, pid} when node(pid) != node() ->
+        {:ok, pid}
 
-      [] ->
+      {:ok, pid} ->
+        if supervised_session?(pid),
+          do: {:ok, pid},
+          else: await_stale_coordinator(pid, session_id)
+
+      :error ->
         start_active_session(session_id)
     end
   end
@@ -246,7 +248,7 @@ defmodule Kodo.Sessions do
 
   def active_state(session_id) do
     with {:ok, pid} <- ensure_started(session_id) do
-      {:ok, Kodo.Sessions.ActiveSession.state(pid)}
+      call_coordinator(pid, fn -> {:ok, Kodo.Sessions.ActiveSession.state(pid)} end)
     end
   end
 
@@ -257,7 +259,9 @@ defmodule Kodo.Sessions do
 
   def start_turn(session_id, content, client_request_id) do
     with {:ok, pid} <- ensure_started(session_id) do
-      Kodo.Sessions.ActiveSession.start_turn(pid, content, client_request_id)
+      call_coordinator(pid, fn ->
+        Kodo.Sessions.ActiveSession.start_turn(pid, content, client_request_id)
+      end)
     end
   end
 
@@ -291,9 +295,26 @@ defmodule Kodo.Sessions do
 
   def cancel(session_id) do
     with {:ok, pid} <- ensure_started(session_id) do
-      Kodo.Sessions.ActiveSession.cancel(pid)
+      call_coordinator(pid, fn -> Kodo.Sessions.ActiveSession.cancel(pid) end)
     end
   end
+
+  defp call_coordinator(pid, call) do
+    call.()
+  catch
+    :exit, reason ->
+      if node(pid) != node() and coordinator_unavailable?(reason) do
+        {:error, :coordinator_unavailable}
+      else
+        exit(reason)
+      end
+  end
+
+  defp coordinator_unavailable?({:nodedown, _node}), do: true
+  defp coordinator_unavailable?({:noproc, _call}), do: true
+  defp coordinator_unavailable?({{:nodedown, _node}, _call}), do: true
+  defp coordinator_unavailable?({{:noproc, _detail}, _call}), do: true
+  defp coordinator_unavailable?(_reason), do: false
 
   def cancel(%Scope{} = scope, session_id) do
     case get_session(scope, session_id) do

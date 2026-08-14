@@ -16,6 +16,8 @@ defmodule Kodo.Application do
       {Kodo.Cluster.InstanceManager, boot_id: Ecto.UUID.generate()},
       {DNSCluster, query: Application.get_env(:kodo, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Kodo.PubSub},
+      Kodo.Cluster.Discovery,
+      Kodo.Cluster.DiscoveryMonitor,
       {Registry, keys: :unique, name: Kodo.RunnerRegistry},
       {Registry, keys: :unique, name: Kodo.SessionRegistry},
       {DynamicSupervisor, name: Kodo.SessionSupervisor, strategy: :one_for_one},

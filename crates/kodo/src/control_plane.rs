@@ -174,6 +174,9 @@ async fn serve_inner(
     mut ready: Option<oneshot::Sender<RunnerReady>>,
 ) -> Result<(), ControlPlaneError> {
     let base = validate_base_url(base)?;
+    let _runner_lock = workspace
+        .lock_runner()
+        .map_err(|error| ControlPlaneError::Configuration(error.to_string()))?;
     let root = workspace.root().to_str().ok_or_else(|| {
         ControlPlaneError::Registration("canonical workspace root is not UTF-8".into())
     })?;

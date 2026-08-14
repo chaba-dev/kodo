@@ -4,6 +4,7 @@ defmodule Kodo.Sessions.ActiveSession do
   use GenServer
 
   alias Kodo.Agent.Loop
+  alias Kodo.Cluster.Discovery
   alias Kodo.Cluster.InstanceManager
   alias Kodo.Sessions
   alias Kodo.Sessions.Projection
@@ -34,6 +35,7 @@ defmodule Kodo.Sessions.ActiveSession do
     {boot_id, instance_manager_ref} = monitor_instance_manager()
 
     with {:ok, ownership} <- Sessions.claim_ownership(session_id, boot_id),
+         :ok <- Discovery.join_session(session_id),
          projection = recover(session_id),
          :ok <- renew_runner_authority(projection.runner_id, ownership) do
       task = maybe_start_loop(projection, ownership)
