@@ -41,6 +41,18 @@ defmodule Kodo.Runners do
     end
   end
 
+  @doc "Renews one session authority lease on the currently connected local runner."
+  def renew_authority(runner_id, lease) when is_map(lease) do
+    case Registry.lookup(Kodo.RunnerRegistry, runner_id) do
+      [{channel, _value}] ->
+        send(channel, {:authority_lease, lease})
+        :ok
+
+      [] ->
+        {:error, :offline}
+    end
+  end
+
   @doc "Upserts mutable metadata while preserving the workspace's stable runner UUID."
   def register(%Scope{user: user}, attrs), do: do_register(attrs, user.id)
   def register(attrs), do: do_register(attrs, nil)

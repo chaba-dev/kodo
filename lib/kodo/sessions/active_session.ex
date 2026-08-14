@@ -33,8 +33,9 @@ defmodule Kodo.Sessions.ActiveSession do
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session_id}")
     {boot_id, instance_manager_ref} = monitor_instance_manager()
 
-    with {:ok, ownership} <- Sessions.claim_ownership(session_id, boot_id) do
-      projection = recover(session_id)
+    with {:ok, ownership} <- Sessions.claim_ownership(session_id, boot_id),
+         projection = recover(session_id),
+         :ok <- renew_runner_authority(projection.runner_id, ownership) do
       task = maybe_start_loop(projection, ownership)
       schedule_authority_check(ownership)
 
@@ -103,6 +104,9 @@ defmodule Kodo.Sessions.ActiveSession do
           {:ok, _cancelled} ->
             {:reply, :ok, %{state | task: nil}}
 
+          {:error, :stale_ownership} = error ->
+            {:stop, :normal, error, stop_task(state)}
+
           {:error, reason} ->
             {:stop, {:cancellation_persistence_failed, reason}, {:error, reason}, state}
         end
@@ -132,7 +136,7 @@ defmodule Kodo.Sessions.ActiveSession do
   end
 
   def handle_info(:check_authority, state) do
-    case Sessions.assert_owner(state.ownership) do
+    case renew_runner_authority(state.projection.runner_id, state.ownership) do
       :ok ->
         schedule_authority_check(state.ownership)
         {:noreply, state}
@@ -160,6 +164,9 @@ defmodule Kodo.Sessions.ActiveSession do
       {:error, :session_not_active} ->
         {:noreply, %{state | task: nil}}
 
+      {:error, :stale_ownership} ->
+        {:stop, :normal, stop_task(state)}
+
       {:error, reason} ->
         {:stop, {:session_finalization_failed, reason}, state}
     end
@@ -172,6 +179,9 @@ defmodule Kodo.Sessions.ActiveSession do
 
       {:error, :session_not_active} ->
         {:reply, {:error, :already_finished}, %{state | task: nil}}
+
+      {:error, :stale_ownership} = error ->
+        {:stop, :normal, error, stop_task(state)}
 
       {:error, reason} ->
         {:stop, {:session_finalization_failed, reason}, {:error, reason}, state}
@@ -220,6 +230,20 @@ defmodule Kodo.Sessions.ActiveSession do
 
     if interval != :infinity, do: Process.send_after(self(), :check_authority, interval)
     :ok
+  end
+
+  defp renew_runner_authority(_runner_id, %{owner_boot_id: nil}), do: :ok
+
+  defp renew_runner_authority(runner_id, ownership) do
+    case Sessions.dispatch_if_owner(ownership, fn ->
+           Kodo.Runners.renew_authority(
+             runner_id,
+             Kodo.RunnerProtocol.authority_lease(ownership)
+           )
+         end) do
+      {:error, :offline} -> :ok
+      result -> result
+    end
   end
 
   defp apply_committed_events(event, projection) when event.sequence <= projection.last_sequence,

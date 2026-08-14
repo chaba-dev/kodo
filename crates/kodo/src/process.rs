@@ -17,6 +17,7 @@ use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
+use crate::authority::AuthorityGuard;
 use crate::protocol::{CommandOutput, ExecutionLimits, OutputStream, ProcessStatus};
 
 const PROCESS_RETENTION: Duration = Duration::from_secs(5 * 60);
@@ -31,6 +32,8 @@ pub enum ProcessError {
     SupervisorStopped(Uuid),
     #[error("runner already retains the maximum of {0} processes")]
     Capacity(usize),
+    #[error("{0}")]
+    Authority(String),
 }
 
 #[derive(Clone)]
@@ -93,6 +96,7 @@ pub struct ProcessPoll {
 enum StopReason {
     TimedOut,
     Stopped,
+    AuthorityLost,
 }
 
 impl ProcessManager {
@@ -124,7 +128,21 @@ impl ProcessManager {
         cwd: &Path,
         timeout: Duration,
     ) -> Result<Uuid, ProcessError> {
+        self.start_authorized(command, cwd, timeout, AuthorityGuard::unmanaged())
+            .await
+    }
+
+    pub(crate) async fn start_authorized(
+        &self,
+        command: &str,
+        cwd: &Path,
+        timeout: Duration,
+        authority: AuthorityGuard,
+    ) -> Result<Uuid, ProcessError> {
         let mut entries = self.entries.lock().await;
+        authority
+            .ensure_valid()
+            .map_err(|error| ProcessError::Authority(error.to_string()))?;
         if entries.len() >= self.max_retained_processes {
             return Err(ProcessError::Capacity(self.max_retained_processes));
         }
@@ -140,9 +158,7 @@ impl ProcessManager {
             .spawn()
             .map_err(ProcessError::Start)?;
         let process_id = Uuid::new_v4();
-        let process_group = child.id().map(|id| ProcessGroupGuard {
-            group: Some(Pid::from_raw(id as i32)),
-        });
+        let process_group = ProcessGroupGuard::for_child(&child);
         let stdout = child.stdout.take().expect("piped stdout must be available");
         let stderr = child.stderr.take().expect("piped stderr must be available");
         let state = Arc::new(StdMutex::new(ProcessState {
@@ -171,6 +187,7 @@ impl ProcessManager {
             process_id,
             entries: Arc::clone(&self.entries),
             process_group,
+            authority,
         }));
 
         Ok(process_id)
@@ -255,6 +272,7 @@ struct Supervisor {
     process_id: Uuid,
     entries: Arc<Mutex<HashMap<Uuid, ProcessEntry>>>,
     process_group: Option<ProcessGroupGuard>,
+    authority: AuthorityGuard,
 }
 
 async fn supervise(supervisor: Supervisor) {
@@ -270,6 +288,7 @@ async fn supervise(supervisor: Supervisor) {
         process_id,
         entries,
         mut process_group,
+        authority,
     } = supervisor;
     let stdout_reader = spawn_reader(
         stdout,
@@ -293,12 +312,14 @@ async fn supervise(supervisor: Supervisor) {
             biased;
             status = child.wait() => SupervisorOutcome::Exited(status),
             reason = stop.recv() => SupervisorOutcome::Stopped(reason.unwrap_or(StopReason::Stopped)),
+            () = authority.wait_until_invalid() => SupervisorOutcome::Stopped(StopReason::AuthorityLost),
         }
     } else {
         tokio::select! {
             biased;
             status = child.wait() => SupervisorOutcome::Exited(status),
             reason = stop.recv() => SupervisorOutcome::Stopped(reason.unwrap_or(StopReason::Stopped)),
+            () = authority.wait_until_invalid() => SupervisorOutcome::Stopped(StopReason::AuthorityLost),
             _ = tokio::time::sleep(timeout) => SupervisorOutcome::Stopped(StopReason::TimedOut),
         }
     };
@@ -318,7 +339,7 @@ async fn supervise(supervisor: Supervisor) {
             terminate_process_group(&mut child, group).await;
             match reason {
                 StopReason::TimedOut => ProcessStatus::TimedOut,
-                StopReason::Stopped => ProcessStatus::Stopped,
+                StopReason::Stopped | StopReason::AuthorityLost => ProcessStatus::Stopped,
             }
         }
     };
@@ -343,12 +364,22 @@ enum SupervisorOutcome {
 }
 
 /// Last-resort ownership guard for descendants if the async supervisor is cancelled or dropped.
-struct ProcessGroupGuard {
+pub(crate) struct ProcessGroupGuard {
     group: Option<Pid>,
 }
 
 impl ProcessGroupGuard {
-    fn disarm(&mut self) {
+    pub(crate) fn for_child(child: &Child) -> Option<Self> {
+        child.id().map(|id| Self {
+            group: Some(Pid::from_raw(id as i32)),
+        })
+    }
+
+    pub(crate) fn group(&self) -> Option<Pid> {
+        self.group
+    }
+
+    pub(crate) fn disarm(&mut self) {
         // Normal supervision has already terminated and reaped everything in the group.
         self.group = None;
     }
@@ -362,7 +393,7 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
-async fn terminate_process_group(child: &mut Child, process_group: Option<Pid>) {
+pub(crate) async fn terminate_process_group(child: &mut Child, process_group: Option<Pid>) {
     let Some(group) = process_group else {
         let _ = child.wait().await;
         return;
@@ -375,7 +406,7 @@ async fn terminate_process_group(child: &mut Child, process_group: Option<Pid>) 
     }
 }
 
-async fn cleanup_process_group(process_group: Option<Pid>) {
+pub(crate) async fn cleanup_process_group(process_group: Option<Pid>) {
     let Some(group) = process_group else {
         return;
     };

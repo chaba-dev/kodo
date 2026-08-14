@@ -17,7 +17,7 @@ defmodule Kodo.SessionsTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 3,
+        protocol_version: 4,
         capabilities: []
       })
 
@@ -86,7 +86,7 @@ defmodule Kodo.SessionsTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 3,
+        protocol_version: 4,
         capabilities: []
       })
 

@@ -14,7 +14,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_conf
 use url::{Host, Url};
 
 use crate::daemon::{Dispatcher, MAX_IN_FLIGHT_REQUESTS};
-use crate::protocol::{ExecutionLimits, PROTOCOL_VERSION, RequestEnvelope};
+use crate::protocol::{AuthorityLease, ExecutionLimits, PROTOCOL_VERSION, RequestEnvelope};
 use crate::runner::Runner;
 use crate::workspace::Workspace;
 
@@ -492,7 +492,11 @@ where
                         let request: RequestEnvelope = serde_json::from_value(frame.payload).map_err(|e| ControlPlaneError::Transport(format!("invalid tool request: {e}")))?;
                         let dispatcher = dispatcher.clone();
                         let reference = frame.reference;
-                        requests.push(async move { (reference, dispatcher.dispatch(request).await) });
+                        requests.push(async move { (reference, dispatcher.dispatch_connected(request).await) });
+                    } else if frame.topic == registration.topic && frame.event == "authority_lease" {
+                        let lease: AuthorityLease = serde_json::from_value(frame.payload).map_err(|e| ControlPlaneError::Transport(format!("invalid authority lease: {e}")))?;
+                        // A delayed stale renewal must not disconnect the runner from a newer owner.
+                        let _ = dispatcher.renew_authority(lease);
                     }
                 }
             }
@@ -547,7 +551,7 @@ mod tests {
 
     #[test]
     fn phoenix_frame_round_trips() {
-        let input = r#"["1","2","runner:abc","tool_request",{"protocol_version":3}]"#;
+        let input = r#"["1","2","runner:abc","tool_request",{"protocol_version":4}]"#;
         let frame = Frame::parse(input).unwrap();
         assert_eq!(frame.topic, "runner:abc");
         assert_eq!(frame.event, "tool_request");

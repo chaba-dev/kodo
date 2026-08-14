@@ -35,7 +35,7 @@ defmodule KodoWeb.SessionControllerTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 3,
+        protocol_version: 4,
         capabilities: []
       })
 
@@ -59,13 +59,16 @@ defmodule KodoWeb.SessionControllerTest do
 
     assert_receive {:tool_request, request}
     assert request["request"]["tool"] == "apply_patch"
+    assert request["authority"]["session_id"] == session["id"]
+    assert request["authority"]["ownership_epoch"] > 0
+    assert request["authority"]["ttl_ms"] == 15_000
 
     Phoenix.PubSub.broadcast(
       Kodo.PubSub,
       "runner_responses:#{runner.id}",
       {:runner_tool_response, runner.id,
        %{
-         "protocol_version" => 3,
+         "protocol_version" => 4,
          "request_id" => request["request_id"],
          "status" => "success",
          "response" => %{"result" => "files_changed", "paths" => ["lib/greeting.ex"]}
@@ -192,7 +195,7 @@ defmodule KodoWeb.SessionControllerTest do
       "runner_responses:#{runner.id}",
       {:runner_tool_response, runner.id,
        %{
-         "protocol_version" => 3,
+         "protocol_version" => 4,
          "request_id" => request["request_id"],
          "status" => "success",
          "response" => %{"result" => "files_changed", "paths" => []}
