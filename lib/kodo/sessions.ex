@@ -52,22 +52,24 @@ defmodule Kodo.Sessions do
   @doc "Claims an unowned session or replaces a coordinator from this node or a stale owner."
   def claim_ownership(session_id, owner_boot_id) do
     with_ownership_lock(session_id, fn ->
-      Repo.transaction(fn ->
-        session = lock_session!(session_id, allow_unowned: true)
-
-        if claimable?(session, owner_boot_id) do
-          epoch = session.ownership_epoch + 1
-
-          session
-          |> Ecto.Changeset.change(owner_boot_id: owner_boot_id, ownership_epoch: epoch)
-          |> Repo.update!()
-
-          %Ownership{session_id: session.id, owner_boot_id: owner_boot_id, epoch: epoch}
-        else
-          Repo.rollback(:session_owned)
-        end
-      end)
+      Repo.transaction(fn -> claim_ownership_locked(session_id, owner_boot_id) end)
     end)
+  end
+
+  defp claim_ownership_locked(session_id, owner_boot_id) do
+    session = lock_session!(session_id, allow_unowned: true)
+
+    if claimable?(session, owner_boot_id) do
+      epoch = session.ownership_epoch + 1
+
+      session
+      |> Ecto.Changeset.change(owner_boot_id: owner_boot_id, ownership_epoch: epoch)
+      |> Repo.update!()
+
+      %Ownership{session_id: session.id, owner_boot_id: owner_boot_id, epoch: epoch}
+    else
+      Repo.rollback(:session_owned)
+    end
   end
 
   defp claimable?(session, nil),

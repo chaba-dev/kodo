@@ -253,46 +253,44 @@ defmodule Kodo.Agent.Loop do
 
       invocation_id = response.payload["invocation_id"]
 
+      context = %{
+        session_id: session_id,
+        runner_id: runner_id,
+        invocation_id: invocation_id,
+        calls: calls,
+        events: events,
+        timeout: budgets[:tool_timeout],
+        ownership: ownership
+      }
+
       Enum.reduce_while(Enum.with_index(calls), {:ok, []}, fn call_with_index, result ->
-        reduce_tool_call(
-          call_with_index,
-          result,
-          session_id,
-          runner_id,
-          invocation_id,
-          calls,
-          events,
-          budgets[:tool_timeout],
-          ownership
-        )
+        reduce_tool_call(call_with_index, result, context)
       end)
     end
   end
 
-  defp reduce_tool_call(
-         {call, index},
-         {:ok, results},
-         session_id,
-         runner_id,
-         invocation_id,
-         calls,
-         events,
-         timeout,
-         ownership
-       ) do
-    case execute_tool(session_id, runner_id, invocation_id, call, events, timeout, ownership) do
+  defp reduce_tool_call({call, index}, {:ok, results}, context) do
+    case execute_tool(
+           context.session_id,
+           context.runner_id,
+           context.invocation_id,
+           call,
+           context.events,
+           context.timeout,
+           context.ownership
+         ) do
       {:ok, result} ->
         {:cont, {:ok, results ++ [result]}}
 
       {:error, reason} ->
         halt_after_tool_failure(
-          session_id,
-          invocation_id,
-          calls,
+          context.session_id,
+          context.invocation_id,
+          context.calls,
           index,
           call,
           reason,
-          ownership
+          context.ownership
         )
     end
   end

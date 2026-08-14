@@ -37,6 +37,7 @@ if ! rustup toolchain list | grep -q '^stable'; then
   rustup toolchain install stable --profile minimal
 fi
 rustup default stable
+rustup component add clippy rustfmt
 
 profile_marker="# kodo orb toolchains"
 if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then

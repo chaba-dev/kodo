@@ -20,6 +20,15 @@ defmodule Kodo.Test.FakeLLM do
     end
   end
 
+  defp initial(%{"content" => "ownership barrier"}) do
+    test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
+    send(test_pid, {:model_dispatch_started, self()})
+
+    receive do
+      :release_model_dispatch -> final("Released")
+    end
+  end
+
   defp initial(message) do
     case message do
       %{"content" => @full_stack_prompt} ->
@@ -38,14 +47,6 @@ defmodule Kodo.Test.FakeLLM do
 
         receive do
           :never -> {:error, :unexpected}
-        end
-
-      %{"content" => "ownership barrier"} ->
-        test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
-        send(test_pid, {:model_dispatch_started, self()})
-
-        receive do
-          :release_model_dispatch -> final("Released")
         end
 
       %{"content" => "provider failure"} ->
