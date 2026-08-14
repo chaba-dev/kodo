@@ -723,7 +723,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
   capabilities.
 - [X] Add PostgreSQL session ownership epochs and require the current epoch for
   every state-advancing transaction and newly dispatched effect.
-- [ ] Fail coordinators closed when ownership or authoritative instance
+- [X] Fail coordinators closed when ownership or authoritative instance
   liveness can no longer be maintained.
 - [ ] Add global session and runner discovery, remote command routing, and
   immediate BEAM process/node failure signals without making the registry

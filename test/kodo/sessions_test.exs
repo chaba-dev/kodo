@@ -224,6 +224,37 @@ defmodule Kodo.SessionsTest do
     assert new_ownership.owner_boot_id == new_boot.boot_id
   end
 
+  test "rejects state mutations and effects after the owner's authoritative heartbeat expires", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Expired owner",
+        model: "test:model"
+      })
+
+    {:ok, owner} = Instances.register(instance_attrs("kodo@expired"))
+    {:ok, ownership} = Sessions.claim_ownership(session.id, owner.boot_id)
+
+    Kodo.Cluster.Instance
+    |> where([instance], instance.boot_id == ^owner.boot_id)
+    |> Repo.update_all(set: [last_seen_at: DateTime.add(DateTime.utc_now(), -120, :second)])
+
+    assert {:error, :stale_ownership} = Sessions.assert_owner(ownership)
+
+    assert {:error, :stale_ownership} =
+             Sessions.append_event(session.id, "user_message", %{"content" => "too late"},
+               ownership: ownership
+             )
+
+    assert {:error, :stale_ownership} =
+             Sessions.dispatch_if_owner(ownership, fn -> send(self(), :dispatched) end)
+
+    refute_receive :dispatched
+  end
+
   test "ownership activation is blocked while an eligible legacy instance lacks fencing", %{
     runner: runner,
     scope: scope

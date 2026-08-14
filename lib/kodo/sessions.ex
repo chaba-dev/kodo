@@ -131,7 +131,19 @@ defmodule Kodo.Sessions do
 
     query =
       if ownership.owner_boot_id do
-        where(query, [session], session.owner_boot_id == ^ownership.owner_boot_id)
+        query
+        |> join(:inner, [session], instance in Kodo.Cluster.Instance,
+          on: instance.boot_id == session.owner_boot_id
+        )
+        |> where(
+          [session, instance],
+          session.owner_boot_id == ^ownership.owner_boot_id and
+            fragment(
+              "? >= timezone('UTC', clock_timestamp()) - (? * interval '1 second')",
+              instance.last_seen_at,
+              ^@ownership_stale_after_seconds
+            )
+        )
       else
         where(query, [session], is_nil(session.owner_boot_id))
       end
@@ -810,9 +822,16 @@ defmodule Kodo.Sessions do
 
     cond do
       Keyword.get(opts, :allow_unowned, false) -> session
-      ownership_matches?(session, ownership) -> session
+      ownership_matches?(session, ownership) and owner_alive?(ownership) -> session
       true -> Repo.rollback(:stale_ownership)
     end
+  end
+
+  defp owner_alive?(nil), do: true
+  defp owner_alive?(%Ownership{owner_boot_id: nil}), do: true
+
+  defp owner_alive?(%Ownership{owner_boot_id: owner_boot_id}) do
+    Instances.alive?(owner_boot_id, @ownership_stale_after_seconds)
   end
 
   defp ownership_matches?(%Session{ownership_epoch: 0}, nil), do: true

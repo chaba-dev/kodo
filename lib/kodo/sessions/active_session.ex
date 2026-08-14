@@ -31,13 +31,20 @@ defmodule Kodo.Sessions.ActiveSession do
   def init(session_id) do
     Process.flag(:trap_exit, true)
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session_id}")
+    {boot_id, instance_manager_ref} = monitor_instance_manager()
 
-    with {:ok, ownership} <-
-           Sessions.claim_ownership(session_id, InstanceManager.current_boot_id()) do
+    with {:ok, ownership} <- Sessions.claim_ownership(session_id, boot_id) do
       projection = recover(session_id)
       task = maybe_start_loop(projection, ownership)
+      schedule_authority_check(ownership)
 
-      {:ok, %{projection: projection, task: task, ownership: ownership}}
+      {:ok,
+       %{
+         projection: projection,
+         task: task,
+         ownership: ownership,
+         instance_manager_ref: instance_manager_ref
+       }}
     end
   end
 
@@ -57,6 +64,9 @@ defmodule Kodo.Sessions.ActiveSession do
         task = start_loop(state.projection.id, state.ownership)
         {:reply, :ok, %{state | task: task}}
 
+      {:error, :stale_ownership} = error ->
+        {:stop, :normal, error, stop_task(state)}
+
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
@@ -66,8 +76,14 @@ defmodule Kodo.Sessions.ActiveSession do
     case Sessions.begin_turn(state.projection.id, content, client_request_id,
            ownership: state.ownership
          ) do
-      {:ok, []} -> {:reply, :ok, state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, []} ->
+        {:reply, :ok, state}
+
+      {:error, :stale_ownership} = error ->
+        {:stop, :normal, error, stop_task(state)}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -106,6 +122,24 @@ defmodule Kodo.Sessions.ActiveSession do
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{task: %{ref: ref}} = state) do
     finish_task(state, {:error, {:task_exit, reason}})
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, _reason},
+        %{instance_manager_ref: ref} = state
+      ) do
+    {:stop, :normal, stop_task(state)}
+  end
+
+  def handle_info(:check_authority, state) do
+    case Sessions.assert_owner(state.ownership) do
+      :ok ->
+        schedule_authority_check(state.ownership)
+        {:noreply, state}
+
+      {:error, _reason} ->
+        {:stop, :normal, stop_task(state)}
+    end
   end
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
@@ -156,6 +190,36 @@ defmodule Kodo.Sessions.ActiveSession do
 
   defp start_loop(session_id, ownership) do
     Task.async(fn -> Loop.run(session_id, ownership: ownership) end)
+  end
+
+  defp stop_task(%{task: nil} = state), do: state
+
+  defp stop_task(state) do
+    _ = Task.shutdown(state.task, :brutal_kill)
+    %{state | task: nil}
+  end
+
+  defp monitor_instance_manager do
+    case Process.whereis(InstanceManager) do
+      nil ->
+        {nil, nil}
+
+      pid ->
+        ref = Process.monitor(pid)
+        {InstanceManager.current_boot_id(pid), ref}
+    end
+  end
+
+  defp schedule_authority_check(%{owner_boot_id: nil}), do: :ok
+
+  defp schedule_authority_check(_ownership) do
+    interval =
+      :kodo
+      |> Application.fetch_env!(InstanceManager)
+      |> Keyword.fetch!(:heartbeat_interval)
+
+    if interval != :infinity, do: Process.send_after(self(), :check_authority, interval)
+    :ok
   end
 
   defp apply_committed_events(event, projection) when event.sequence <= projection.last_sequence,
