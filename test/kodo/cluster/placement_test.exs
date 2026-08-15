@@ -35,6 +35,39 @@ defmodule Kodo.Cluster.PlacementTest do
     assert selected_node == node()
   end
 
+  test "prefers the highest deployment generation and honors an audited expiring rollback",
+       context do
+    session = create_session(context)
+
+    {:ok, older} =
+      Instances.register(instance_attrs("older-revision", deployment_generation: 7))
+
+    {:ok, current} =
+      Instances.register(instance_attrs("current-revision", deployment_generation: 8))
+
+    assert {:ok, selected, _node} = Placement.select(session.id, 60)
+    assert selected.boot_id == current.boot_id
+
+    assert {:ok, override} =
+             Placement.create_rollback_override(context.scope, %{
+               "artifact_revision" => older.artifact_revision,
+               "reason" => "Provider regression in current artifact",
+               "expires_in_seconds" => 300
+             })
+
+    assert override.created_by_user_id == context.scope.user.id
+    assert override.reason == "Provider regression in current artifact"
+    assert {:ok, selected, _node} = Placement.select(session.id, 60)
+    assert selected.boot_id == older.boot_id
+
+    override
+    |> Ecto.Changeset.change(expires_at: DateTime.add(DateTime.utc_now(), -1, :second))
+    |> Kodo.Repo.update!()
+
+    assert {:ok, selected, _node} = Placement.select(session.id, 60)
+    assert selected.boot_id == current.boot_id
+  end
+
   test "excludes incompatible, draining, stale, and unreachable instances", context do
     session = create_session(context)
     {:ok, compatible} = Instances.register(instance_attrs("compatible"))

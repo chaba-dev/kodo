@@ -732,7 +732,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
   ready, non-draining nodes.
 - [X] Add bounded proactive drain and source-to-target rehoming at durable
   model, approval, and tool-request boundaries.
-- [ ] Prefer the current deployment generation during forward rollouts and
+- [X] Prefer the current deployment generation during forward rollouts and
   support an authenticated, audited, expiring rollback override to an older
   compatible artifact.
 - [ ] Add BEAM-distributed tests for competing claims, stale epochs, graceful

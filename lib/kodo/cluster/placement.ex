@@ -9,14 +9,61 @@ defmodule Kodo.Cluster.Placement do
 
   import Ecto.Query
 
+  alias Kodo.Accounts.Scope
   alias Kodo.Cluster.Instance
   alias Kodo.Cluster.Instances
+  alias Kodo.Cluster.PlacementOverride
   alias Kodo.Repo
   alias Kodo.Sessions.Session
 
   @required_capabilities ["session-events-v1", "session-ownership-v1", "session-placement-v1"]
   @rehoming_capability "session-rehoming-v1"
   @capacity_statuses ["idle", "running", "awaiting_approval"]
+
+  @stale_after_seconds Keyword.fetch!(
+                         Application.compile_env!(:kodo, Kodo.Cluster.InstanceManager),
+                         :ownership_stale_after_seconds
+                       )
+
+  @doc "Creates an expiring rollback target and retains the authenticated request as audit history."
+  def create_rollback_override(%Scope{user: user}, attrs) do
+    Repo.transaction(fn ->
+      changeset = PlacementOverride.create_changeset(%PlacementOverride{}, attrs)
+
+      unless changeset.valid?, do: Repo.rollback(changeset)
+
+      artifact_revision = Ecto.Changeset.get_field(changeset, :artifact_revision)
+      ttl = Ecto.Changeset.get_field(changeset, :expires_in_seconds)
+
+      candidates =
+        @stale_after_seconds
+        |> Instances.list_eligible()
+        |> Enum.filter(&compatible?(&1, @required_capabilities))
+
+      current_generation =
+        candidates |> Enum.map(& &1.deployment_generation) |> Enum.max(fn -> nil end)
+
+      target_generations =
+        for instance <- candidates,
+            instance.artifact_revision == artifact_revision,
+            do: instance.deployment_generation
+
+      target_generation = Enum.max(target_generations, fn -> nil end)
+
+      cond do
+        is_nil(target_generation) -> Repo.rollback(:target_unavailable)
+        target_generation >= current_generation -> Repo.rollback(:target_not_older)
+        true -> :ok
+      end
+
+      expires_at = DateTime.add(database_now!(), ttl, :second)
+
+      changeset
+      |> Ecto.Changeset.put_change(:expires_at, expires_at)
+      |> Ecto.Changeset.put_change(:created_by_user_id, user.id)
+      |> Repo.insert!()
+    end)
+  end
 
   @doc "Returns a reachable, compatible instance and its distributed Erlang node."
   def select(session_id, stale_after_seconds)
@@ -51,7 +98,7 @@ defmodule Kodo.Cluster.Placement do
       )
       |> with_load()
 
-    case choose(candidates, owner_boot_id, session_id) do
+    case choose(candidates, owner_boot_id, session_id, active_override_revision()) do
       nil -> {:error, :no_compatible_instance}
       {instance, _load} -> {:ok, instance, Map.fetch!(reachable_nodes, instance.node_name)}
     end
@@ -80,11 +127,36 @@ defmodule Kodo.Cluster.Placement do
     Enum.map(instances, &{&1, Map.get(loads, &1.boot_id, 0)})
   end
 
-  defp choose(candidates, owner_boot_id, session_id) do
+  defp choose(candidates, owner_boot_id, session_id, nil) do
     Enum.find(candidates, fn {instance, _load} -> instance.boot_id == owner_boot_id end) ||
+      candidates |> current_generation() |> choose_available(session_id)
+  end
+
+  defp choose(candidates, _owner_boot_id, session_id, artifact_revision) do
+    candidates
+    |> Enum.filter(fn {instance, _load} ->
+      instance.artifact_revision == artifact_revision
+    end)
+    |> choose_available(session_id)
+  end
+
+  defp current_generation([]), do: []
+
+  defp current_generation(candidates) do
+    generation =
       candidates
-      |> Enum.reject(fn {instance, load} -> load >= instance.capacity end)
-      |> Enum.min(&preferred?(&1, &2, session_id), fn -> nil end)
+      |> Enum.map(fn {instance, _load} -> instance.deployment_generation end)
+      |> Enum.max()
+
+    Enum.filter(candidates, fn {instance, _load} ->
+      instance.deployment_generation == generation
+    end)
+  end
+
+  defp choose_available(candidates, session_id) do
+    candidates
+    |> Enum.reject(fn {instance, load} -> load >= instance.capacity end)
+    |> Enum.min(&preferred?(&1, &2, session_id), fn -> nil end)
   end
 
   defp preferred?({left, left_load}, {right, right_load}, session_id) do
@@ -100,5 +172,21 @@ defmodule Kodo.Cluster.Placement do
 
   defp placement_key(session_id, boot_id) do
     :crypto.hash(:sha256, session_id <> boot_id)
+  end
+
+  defp active_override_revision do
+    Repo.one(
+      from(override in PlacementOverride,
+        where: override.expires_at > fragment("timezone('UTC', clock_timestamp())"),
+        order_by: [desc: override.inserted_at, desc: override.id],
+        select: override.artifact_revision,
+        limit: 1
+      )
+    )
+  end
+
+  defp database_now! do
+    %{rows: [[now]]} = Repo.query!("SELECT timezone('UTC', clock_timestamp())")
+    DateTime.from_naive!(now, "Etc/UTC")
   end
 end
