@@ -149,6 +149,112 @@ defmodule KodoWeb.SessionLiveTest do
     assert has_element?(view, "#flash-error", "Message cannot be empty")
   end
 
+  test "warns when changed files and diff content are truncated", %{
+    conn: conn,
+    session: session
+  } do
+    tool_call_id = Ecto.UUID.generate()
+
+    {:ok, _requested} =
+      Sessions.append_event(session.id, "tool_requested", %{
+        "tool_call_id" => tool_call_id,
+        "request_id" => Ecto.UUID.generate(),
+        "name" => "git_diff",
+        "arguments" => %{"paths" => []}
+      })
+
+    {:ok, _completed} =
+      Sessions.append_event(session.id, "tool_completed", %{
+        "tool_call_id" => tool_call_id,
+        "name" => "git_diff",
+        "output" => %{
+          "content" => "diff --git a/lib/visible.ex b/lib/visible.ex\n+visible\n",
+          "truncated" => true
+        }
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+    assert has_element?(view, "#diff-truncated-warning")
+    assert has_element?(view, "#changed-file-count", "1+")
+  end
+
+  test "replays tool activity in durable event order", %{conn: conn, session: session} do
+    {:ok, _first} =
+      Sessions.append_event(session.id, "tool_requested", %{
+        "tool_call_id" => "first",
+        "request_id" => "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "name" => "search_code",
+        "arguments" => %{"query" => "first", "paths" => []}
+      })
+
+    {:ok, _second} =
+      Sessions.append_event(session.id, "tool_requested", %{
+        "tool_call_id" => "second",
+        "request_id" => "00000000-0000-4000-8000-000000000000",
+        "name" => "read_file",
+        "arguments" => %{"path" => "second", "offset" => 0, "limit" => 1}
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+    assert has_element?(view, "#tool-first + #tool-second")
+  end
+
+  test "ignores duplicate and out-of-order event notifications", %{
+    conn: conn,
+    scope: scope,
+    session: session
+  } do
+    assert {:ok, _status} = Sessions.set_status(session.id, "running")
+    tool_call_id = Ecto.UUID.generate()
+
+    {:ok, _requested} =
+      Sessions.append_event(session.id, "tool_requested", %{
+        "tool_call_id" => tool_call_id,
+        "request_id" => Ecto.UUID.generate(),
+        "name" => "apply_patch",
+        "arguments" => %{"patch" => "patch"}
+      })
+
+    approval_id = Ecto.UUID.generate()
+
+    assert {:ok, {approval_requested, _awaiting}} =
+             Sessions.request_approval(session.id, %{
+               "approval_id" => approval_id,
+               "tool_call_id" => tool_call_id,
+               "name" => "apply_patch",
+               "arguments" => %{"patch" => "patch"},
+               "description" => "Apply patch"
+             })
+
+    assert {:ok, _resolved} =
+             Sessions.resolve_approval(scope, session.id, approval_id, "approved")
+
+    {:ok, tool_started} =
+      Sessions.append_event(session.id, "tool_started", %{
+        "tool_call_id" => tool_call_id,
+        "name" => "apply_patch"
+      })
+
+    {:ok, _tool_completed} =
+      Sessions.append_event(session.id, "tool_completed", %{
+        "tool_call_id" => tool_call_id,
+        "name" => "apply_patch",
+        "output" => %{"content" => "done"}
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+    refute has_element?(view, "#pending-approval")
+    assert has_element?(view, "#tool-#{tool_call_id}", "completed")
+
+    send(view.pid, {:session_event, tool_started})
+    send(view.pid, {:session_event, approval_requested})
+
+    refute has_element?(view, "#pending-approval")
+    assert has_element?(view, "#tool-#{tool_call_id}", "completed")
+  end
+
   test "streams new durable events and survives browser disconnect", %{
     conn: conn,
     session: session

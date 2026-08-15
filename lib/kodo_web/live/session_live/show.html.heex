@@ -226,17 +226,29 @@
             <h2 class="text-sm font-semibold text-zinc-900 dark:text-white">Changed files</h2>
             <span
               id="changed-file-count"
+              title={if(@diff.truncated?, do: "At least this many changed files", else: nil)}
               class="rounded-full bg-zinc-100 px-2 py-1 text-[0.65rem] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
             >
-              {length(diff_files(@diff))}
+              {changed_file_count(@diff)}
             </span>
           </div>
+          <div
+            :if={@diff.truncated?}
+            id="diff-truncated-warning"
+            role="alert"
+            class="border-b border-amber-200 bg-amber-50 px-5 py-3 text-xs leading-5 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            Diff output was truncated. The changed-file count and patch below are partial.
+          </div>
           <div id="changed-files" class="p-3">
-            <p :if={@diff == ""} class="px-3 py-8 text-center text-xs leading-5 text-zinc-500">
+            <p
+              :if={@diff.content == ""}
+              class="px-3 py-8 text-center text-xs leading-5 text-zinc-500"
+            >
               No diff has been recorded yet.
             </p>
             <div
-              :for={path <- diff_files(@diff)}
+              :for={path <- diff_files(@diff.content)}
               class="flex items-center gap-2 rounded-xl px-3 py-2.5 text-xs text-zinc-700 dark:text-zinc-300"
             >
               <.icon name="hero-document-text" class="size-4 shrink-0 text-violet-500" />
@@ -246,7 +258,7 @@
         </section>
 
         <details
-          :if={@diff != ""}
+          :if={@diff.content != ""}
           id="diff-viewer"
           open
           class="group overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-950 shadow-xl"
@@ -258,7 +270,7 @@
               class="size-4 text-zinc-500 transition group-open:rotate-180"
             />
           </summary>
-          <pre class="max-h-[38rem] overflow-auto whitespace-pre-wrap break-all border-t border-zinc-800 p-5 text-xs leading-5 text-zinc-300">{@diff}</pre>
+          <pre class="max-h-[38rem] overflow-auto whitespace-pre-wrap break-all border-t border-zinc-800 p-5 text-xs leading-5 text-zinc-300">{@diff.content}</pre>
         </details>
       </aside>
     </div>

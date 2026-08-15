@@ -44,7 +44,7 @@ defmodule KodoWeb.SessionLive.Show do
       |> assign(:diff, latest_diff(events))
       |> assign(:message_form, to_form(%{"content" => ""}, as: :message))
       |> stream(:messages, Enum.filter(events, &(&1.type in @message_types)))
-      |> stream(:tools, projection.tool_calls |> Map.values() |> Enum.sort_by(& &1["request_id"]))
+      |> stream(:tools, ordered_tools(events, projection))
 
     {:ok, socket}
   end
@@ -96,16 +96,11 @@ defmodule KodoWeb.SessionLive.Show do
 
   @impl true
   def handle_info({:session_event, event}, socket) do
-    projection = Projection.apply_event(event, socket.assigns.projection)
-
-    socket =
-      socket
-      |> assign(:projection, projection)
-      |> update_pending_approval(event, projection)
-      |> update_diff(event)
-      |> stream_event(event, projection)
-
-    {:noreply, socket}
+    if event.sequence > socket.assigns.projection.last_sequence do
+      {:noreply, replay_new_events(socket)}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info(
@@ -117,6 +112,25 @@ defmodule KodoWeb.SessionLive.Show do
 
   def handle_info(_message, socket), do: {:noreply, socket}
 
+  defp replay_new_events(socket) do
+    socket.assigns.current_scope
+    |> Sessions.events_after(
+      socket.assigns.session.id,
+      socket.assigns.projection.last_sequence
+    )
+    |> Enum.reduce(socket, &apply_event/2)
+  end
+
+  defp apply_event(event, socket) do
+    projection = Projection.apply_event(event, socket.assigns.projection)
+
+    socket
+    |> assign(:projection, projection)
+    |> update_pending_approval(event)
+    |> update_diff(event)
+    |> stream_event(event, projection)
+  end
+
   defp stream_event(socket, %{type: type} = event, _projection) when type in @message_types,
     do: stream_insert(socket, :messages, event)
 
@@ -127,13 +141,13 @@ defmodule KodoWeb.SessionLive.Show do
 
   defp stream_event(socket, _event, _projection), do: socket
 
-  defp update_pending_approval(socket, %{type: "approval_requested"} = event, _projection),
+  defp update_pending_approval(socket, %{type: "approval_requested"} = event),
     do: assign(socket, :pending_approval, event.payload)
 
-  defp update_pending_approval(socket, %{type: "approval_resolved"}, _projection),
+  defp update_pending_approval(socket, %{type: "approval_resolved"}),
     do: assign(socket, :pending_approval, nil)
 
-  defp update_pending_approval(socket, _event, _projection), do: socket
+  defp update_pending_approval(socket, _event), do: socket
 
   defp update_diff(socket, %{type: "tool_completed", payload: %{"name" => "git_diff"}} = event),
     do: assign(socket, :diff, diff_content(event.payload))
@@ -156,14 +170,18 @@ defmodule KodoWeb.SessionLive.Show do
     |> Enum.reverse()
     |> Enum.find(&(&1.type == "tool_completed" and &1.payload["name"] == "git_diff"))
     |> case do
-      nil -> ""
+      nil -> %{content: "", truncated?: false}
       event -> diff_content(event.payload)
     end
   end
 
   defp diff_content(payload) do
-    get_in(payload, ["output", "content"]) ||
-      get_in(payload, ["output", "response", "diff"]) || ""
+    output = payload["output"] || %{}
+
+    %{
+      content: output["content"] || get_in(output, ["response", "diff"]) || "",
+      truncated?: output["truncated"] == true || get_in(output, ["response", "truncated"]) == true
+    }
   end
 
   defp diff_files(diff) do
@@ -171,6 +189,19 @@ defmodule KodoWeb.SessionLive.Show do
     |> Regex.scan(diff, capture: :all_but_first)
     |> Enum.map(fn [_old_path, path] -> path end)
     |> Enum.uniq()
+  end
+
+  defp changed_file_count(diff) do
+    suffix = if diff.truncated?, do: "+", else: ""
+    "#{length(diff_files(diff.content))}#{suffix}"
+  end
+
+  defp ordered_tools(events, projection) do
+    events
+    |> Enum.filter(&(&1.type in @tool_types))
+    |> Enum.map(& &1.payload["tool_call_id"])
+    |> Enum.uniq()
+    |> Enum.map(&Map.fetch!(projection.tool_calls, &1))
   end
 
   defp tool_output(%{"output" => output}), do: format_output(output)
