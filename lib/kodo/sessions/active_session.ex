@@ -13,7 +13,17 @@ defmodule Kodo.Sessions.ActiveSession do
     GenServer.start_link(__MODULE__, {session_id, expected_boot_id}, name: via(session_id))
   end
 
-  def child_spec({session_id, _expected_boot_id} = init_arg) do
+  def start_link({session_id, expected_boot_id, previous_ownership}) do
+    GenServer.start_link(
+      __MODULE__,
+      {session_id, expected_boot_id, previous_ownership},
+      name: via(session_id)
+    )
+  end
+
+  def child_spec(init_arg) do
+    session_id = elem(init_arg, 0)
+
     %{
       id: {__MODULE__, session_id},
       start: {__MODULE__, :start_link, [init_arg]},
@@ -28,13 +38,24 @@ defmodule Kodo.Sessions.ActiveSession do
 
   def cancel(pid), do: GenServer.call(pid, :cancel)
 
+  def begin_drain(pid, owner_boot_id, timeout),
+    do: GenServer.call(pid, {:begin_drain, owner_boot_id}, timeout)
+
   @impl true
   def init({session_id, expected_boot_id}) do
+    init_session(session_id, expected_boot_id, nil)
+  end
+
+  def init({session_id, expected_boot_id, previous_ownership}) do
+    init_session(session_id, expected_boot_id, previous_ownership)
+  end
+
+  defp init_session(session_id, expected_boot_id, previous_ownership) do
     Process.flag(:trap_exit, true)
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session_id}")
 
     with {:ok, boot_id, instance_manager_ref} <- monitor_instance_manager(expected_boot_id),
-         {:ok, ownership} <- Sessions.claim_ownership(session_id, boot_id),
+         {:ok, ownership} <- acquire_ownership(session_id, boot_id, previous_ownership),
          :ok <- Discovery.join_session(session_id),
          projection = recover(session_id),
          :ok <- renew_runner_authority(projection.runner_id, ownership) do
@@ -55,6 +76,21 @@ defmodule Kodo.Sessions.ActiveSession do
 
   @impl true
   def handle_call(:state, _from, state), do: {:reply, state.projection, state}
+
+  def handle_call(
+        {:begin_drain, owner_boot_id},
+        from,
+        %{ownership: %{owner_boot_id: owner_boot_id}, task: task} = state
+      )
+      when not is_nil(task) do
+    send(task.pid, :rehoming_requested)
+    {:noreply, Map.update(state, :drain_waiters, [from], &[from | &1])}
+  end
+
+  def handle_call({:begin_drain, owner_boot_id}, _from, state) do
+    result = if state.ownership.owner_boot_id == owner_boot_id, do: :ok, else: :not_owned
+    {:reply, result, state}
+  end
 
   def handle_call(
         {:start_turn, content, client_request_id},
@@ -160,18 +196,41 @@ defmodule Kodo.Sessions.ActiveSession do
     Sessions.fail_session(session_id, reason, ownership: ownership)
   end
 
+  defp finish_task(state, {:error, :rehoming_requested}) do
+    state = %{state | task: nil}
+
+    case Sessions.rehome_active_session(state.ownership) do
+      {:ok, _pid} ->
+        reply_drain_waiters(state, :ok)
+        {:stop, :normal, state}
+
+      {:error, reason} ->
+        reply_drain_waiters(state, {:error, reason})
+        task = start_loop(state.projection.id, state.ownership)
+        {:noreply, state |> Map.put(:task, task) |> Map.delete(:drain_waiters)}
+    end
+  end
+
   defp finish_task(state, result) do
+    finish_regular_task(state, result)
+  end
+
+  defp finish_regular_task(state, result) do
     case finalize(state.projection.id, result, state.ownership) do
       {:ok, _events} ->
-        {:noreply, %{state | task: nil}}
+        reply_drain_waiters(state, :ok)
+        {:noreply, state |> Map.put(:task, nil) |> Map.delete(:drain_waiters)}
 
       {:error, :session_not_active} ->
-        {:noreply, %{state | task: nil}}
+        reply_drain_waiters(state, :ok)
+        {:noreply, state |> Map.put(:task, nil) |> Map.delete(:drain_waiters)}
 
       {:error, :stale_ownership} ->
+        reply_drain_waiters(state, {:error, :stale_ownership})
         {:stop, :normal, stop_task(state)}
 
       {:error, reason} ->
+        reply_drain_waiters(state, {:error, reason})
         {:stop, {:session_finalization_failed, reason}, state}
     end
   end
@@ -228,6 +287,16 @@ defmodule Kodo.Sessions.ActiveSession do
     end
   catch
     :exit, _reason -> {:error, :coordinator_unavailable}
+  end
+
+  defp acquire_ownership(session_id, boot_id, nil),
+    do: Sessions.claim_ownership(session_id, boot_id)
+
+  defp acquire_ownership(_session_id, boot_id, previous_ownership),
+    do: Sessions.transfer_ownership(previous_ownership, boot_id)
+
+  defp reply_drain_waiters(state, reply) do
+    Enum.each(Map.get(state, :drain_waiters, []), &GenServer.reply(&1, reply))
   end
 
   defp schedule_authority_check(%{owner_boot_id: nil}), do: :ok

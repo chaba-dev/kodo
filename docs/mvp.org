@@ -730,7 +730,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
   authoritative.
 - [X] Add revision-compatible placement and decentralized scheduling across
   ready, non-draining nodes.
-- [ ] Add bounded proactive drain and source-to-target rehoming at durable
+- [X] Add bounded proactive drain and source-to-target rehoming at durable
   model, approval, and tool-request boundaries.
 - [ ] Prefer the current deployment generation during forward rollouts and
   support an authenticated, audited, expiring rollback override to an older

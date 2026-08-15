@@ -30,20 +30,26 @@ defmodule Kodo.Agent.Loop do
 
     latest_response = List.last(responses)
 
-    case within_budget(invocations, tokens, budgets) do
+    case rehoming_boundary() do
       :ok ->
-        action = next_action(latest_invocation, latest_response)
+        case within_budget(invocations, tokens, budgets) do
+          :ok ->
+            action = next_action(latest_invocation, latest_response)
 
-        resume_action(
-          action,
-          session_id,
-          projection,
-          events,
-          adapter,
-          budgets,
-          invocations,
-          ownership
-        )
+            resume_action(
+              action,
+              session_id,
+              projection,
+              events,
+              adapter,
+              budgets,
+              invocations,
+              ownership
+            )
+
+          error ->
+            error
+        end
 
       error ->
         error
@@ -120,6 +126,7 @@ defmodule Kodo.Agent.Loop do
   defp infer(session_id, projection, events, adapter, budgets, invocation, ownership) do
     with :ok <- within_budget(invocation, usage(current_turn(events)), budgets),
          {:ok, invocation_id} <- start_invocation(session_id, invocation, ownership),
+         :ok <- rehoming_boundary(),
          {:ok, response} <-
            Sessions.dispatch_if_owner(ownership, fn ->
              adapter.generate(projection.model, transcript(events), Tools.definitions(),
@@ -402,6 +409,9 @@ defmodule Kodo.Agent.Loop do
            timeout,
            ownership
          ) do
+      {:error, :rehoming_requested} = error ->
+        error
+
       {:error, reason} = error ->
         reconcile_tool_failure(
           session_id,
@@ -449,6 +459,7 @@ defmodule Kodo.Agent.Loop do
 
     with {:ok, request} <- Tools.request(name, arguments),
          :ok <- persist_request(session_id, invocation_id, call, request_id, requested, ownership),
+         :ok <- rehoming_boundary(),
          :ok <- authorize_tool(session_id, invocation_id, call, facts, ownership),
          :ok <- persist_started(session_id, invocation_id, call, request_id, facts, ownership),
          {:ok, output} <-
@@ -597,7 +608,8 @@ defmodule Kodo.Agent.Loop do
         {:error, :approval_denied}
 
       requested ->
-        receive_approval(requested.payload["approval_id"])
+        with :ok <- rehoming_boundary(),
+             do: receive_approval(requested.payload["approval_id"])
 
       true ->
         approval_id = Ecto.UUID.generate()
@@ -615,12 +627,16 @@ defmodule Kodo.Agent.Loop do
                  parent_id: invocation_id,
                  ownership: ownership
                ),
+             :ok <- rehoming_boundary(),
              do: receive_approval(approval_id)
     end
   end
 
   defp receive_approval(approval_id) do
     receive do
+      :rehoming_requested ->
+        {:error, :rehoming_requested}
+
       {:session_event,
        %{
          type: "approval_resolved",
@@ -630,6 +646,16 @@ defmodule Kodo.Agent.Loop do
 
       {:session_event, %{type: "approval_resolved", payload: %{"approval_id" => ^approval_id}}} ->
         {:error, :approval_denied}
+    end
+  end
+
+  # A drain only interrupts the loop after its next operation has a durable replay point. External
+  # model and tool effects are allowed to finish so a replacement never races an in-flight effect.
+  defp rehoming_boundary do
+    receive do
+      :rehoming_requested -> {:error, :rehoming_requested}
+    after
+      0 -> :ok
     end
   end
 

@@ -15,11 +15,26 @@ defmodule Kodo.Cluster.Placement do
   alias Kodo.Sessions.Session
 
   @required_capabilities ["session-events-v1", "session-ownership-v1", "session-placement-v1"]
+  @rehoming_capability "session-rehoming-v1"
   @capacity_statuses ["idle", "running", "awaiting_approval"]
 
   @doc "Returns a reachable, compatible instance and its distributed Erlang node."
   def select(session_id, stale_after_seconds)
       when is_integer(stale_after_seconds) and stale_after_seconds >= 0 do
+    select_with_capabilities(session_id, stale_after_seconds, @required_capabilities)
+  end
+
+  @doc "Returns a placement target that implements proactive ownership handoff."
+  def select_rehome_target(session_id, stale_after_seconds)
+      when is_integer(stale_after_seconds) and stale_after_seconds >= 0 do
+    select_with_capabilities(
+      session_id,
+      stale_after_seconds,
+      [@rehoming_capability | @required_capabilities]
+    )
+  end
+
+  defp select_with_capabilities(session_id, stale_after_seconds, required_capabilities) do
     reachable_nodes = Map.new([node() | Node.list()], &{Atom.to_string(&1), &1})
 
     owner_boot_id =
@@ -30,7 +45,10 @@ defmodule Kodo.Cluster.Placement do
     candidates =
       stale_after_seconds
       |> Instances.list_eligible()
-      |> Enum.filter(&(compatible?(&1) and Map.has_key?(reachable_nodes, &1.node_name)))
+      |> Enum.filter(
+        &(compatible?(&1, required_capabilities) and
+            Map.has_key?(reachable_nodes, &1.node_name))
+      )
       |> with_load()
 
     case choose(candidates, owner_boot_id, session_id) do
@@ -39,8 +57,8 @@ defmodule Kodo.Cluster.Placement do
     end
   end
 
-  defp compatible?(%Instance{protocol_capabilities: capabilities}) do
-    Enum.all?(@required_capabilities, &(&1 in capabilities))
+  defp compatible?(%Instance{protocol_capabilities: capabilities}, required_capabilities) do
+    Enum.all?(required_capabilities, &(&1 in capabilities))
   end
 
   defp with_load([]), do: []

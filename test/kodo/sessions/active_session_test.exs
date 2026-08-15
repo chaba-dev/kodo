@@ -143,6 +143,65 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
   end
 
+  test "drain waits for an in-flight model effect and yields at its next durable boundary", %{
+    session: session
+  } do
+    manager = start_instance_manager!()
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
+    assert :ok = Sessions.start_turn(session.id, "ownership barrier")
+    assert_receive {:model_dispatch_started, dispatch_pid}
+
+    drain = Task.async(fn -> InstanceManager.begin_drain(manager) end)
+    drain_ref = drain.ref
+    refute_receive {^drain_ref, _result}
+
+    send(dispatch_pid, :release_model_dispatch)
+
+    assert {:error, {:drain_incomplete, [:no_compatible_instance]}} = Task.await(drain)
+
+    assert_receive {:session_event,
+                    %{type: "session_status_changed", payload: %{"status" => "completed"}}}
+
+    events = Sessions.events_after(session.id)
+    assert Enum.count(events, &(&1.type == "model_response")) == 1
+    refute Enum.any?(events, &(&1.type == "session_failed"))
+  end
+
+  test "drain preserves one durable approval while no replacement is available", %{
+    runner: runner,
+    scope: scope,
+    session: session
+  } do
+    manager = start_instance_manager!()
+    {:ok, _runner_registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+
+    {:ok, session} =
+      session |> Ecto.Changeset.change(approval_policy: "safe") |> Kodo.Repo.update()
+
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
+
+    assert :ok = Sessions.start_turn(session.id, "Fix it")
+
+    assert_receive {:session_event,
+                    %{type: "approval_requested", payload: %{"approval_id" => approval_id}}}
+
+    assert {:error, {:drain_incomplete, [:no_compatible_instance]}} =
+             InstanceManager.begin_drain(manager)
+
+    assert Enum.count(Sessions.events_after(session.id), &(&1.type == "approval_requested")) == 1
+
+    assert {:ok, {_resolved, _status}} =
+             Sessions.resolve_approval(scope, session.id, approval_id, "approved")
+
+    assert_receive {:tool_request, request}
+    respond_to_tool(runner.id, request)
+
+    assert_receive {:session_event,
+                    %{type: "session_status_changed", payload: %{"status" => "completed"}}}
+
+    assert Enum.count(Sessions.events_after(session.id), &(&1.type == "approval_requested")) == 1
+  end
+
   test "renews runner authority only after revalidating durable ownership", %{
     runner: runner,
     session: session
@@ -522,7 +581,12 @@ defmodule Kodo.Sessions.ActiveSessionTest do
         Keyword.get(
           overrides,
           :protocol_capabilities,
-          ["session-events-v1", "session-ownership-v1", "session-placement-v1"]
+          [
+            "session-events-v1",
+            "session-ownership-v1",
+            "session-placement-v1",
+            "session-rehoming-v1"
+          ]
         ),
       heartbeat_interval: :infinity
     })
@@ -561,7 +625,8 @@ defmodule Kodo.Sessions.ActiveSessionTest do
       protocol_capabilities: [
         "session-events-v1",
         "session-ownership-v1",
-        "session-placement-v1"
+        "session-placement-v1",
+        "session-rehoming-v1"
       ]
     }
   end

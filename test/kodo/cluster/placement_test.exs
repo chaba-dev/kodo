@@ -61,6 +61,26 @@ defmodule Kodo.Cluster.PlacementTest do
     assert selected.boot_id == compatible.boot_id
   end
 
+  test "rehoming requires the target handoff protocol without restricting normal placement",
+       context do
+    session = create_session(context)
+
+    {:ok, older} =
+      Instances.register(
+        instance_attrs("older",
+          protocol_capabilities: [
+            "session-events-v1",
+            "session-ownership-v1",
+            "session-placement-v1"
+          ]
+        )
+      )
+
+    assert {:ok, selected, _node} = Placement.select(session.id, 60)
+    assert selected.boot_id == older.boot_id
+    assert {:error, :no_compatible_instance} = Placement.select_rehome_target(session.id, 60)
+  end
+
   test "prefers the durable owner even when its declared capacity is full", context do
     owned = create_session(context)
     other = create_session(context)
@@ -136,7 +156,8 @@ defmodule Kodo.Cluster.PlacementTest do
         protocol_capabilities: [
           "session-events-v1",
           "session-ownership-v1",
-          "session-placement-v1"
+          "session-placement-v1",
+          "session-rehoming-v1"
         ]
       },
       Map.new(overrides)

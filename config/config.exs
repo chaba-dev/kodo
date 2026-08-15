@@ -39,8 +39,14 @@ config :kodo, Kodo.Cluster.InstanceManager,
   enabled: true,
   artifact_revision: "development",
   deployment_generation: 0,
-  protocol_capabilities: ["session-events-v1", "session-ownership-v1", "session-placement-v1"],
+  protocol_capabilities: [
+    "session-events-v1",
+    "session-ownership-v1",
+    "session-placement-v1",
+    "session-rehoming-v1"
+  ],
   heartbeat_interval: 5_000,
+  drain_timeout: 20_000,
   ownership_stale_after_seconds: 15
 
 # Phoenix messages are capped at the cross-language protocol limit. Bandit counts the largest
