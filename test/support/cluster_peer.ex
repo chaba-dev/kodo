@@ -17,7 +17,8 @@ defmodule Kodo.Test.ClusterPeer do
       {Registry, keys: :unique, name: Kodo.RunnerRegistry},
       {Registry, keys: :unique, name: Kodo.SessionRegistry},
       {DynamicSupervisor, name: Kodo.SessionSupervisor, strategy: :one_for_one},
-      {Kodo.Cluster.InstanceManager, instance_options}
+      {Kodo.Cluster.InstanceManager, Keyword.put(instance_options, :ready, false)},
+      {Kodo.Sessions.Recovery, []}
     ]
 
     with {:ok, supervisor} <- Supervisor.start_link(children, strategy: :one_for_one) do

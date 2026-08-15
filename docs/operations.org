@@ -109,7 +109,9 @@ The instance manager:
    shutdown;
 5. asks each local active session to yield at a durable model, approval, or tool
    request boundary and activates a compatible replacement before stopping the
-   source coordinator.
+   source coordinator. Current replicas also reconcile draining owners that
+   predate the rehoming protocol, which makes its first mixed-revision rollout
+   proactive without relying on old code to initiate the transfer.
 
 Readiness in this record means eligible for session ownership. It does not
 replace the HTTP or Kubernetes readiness probe. A crashed VM cannot mark itself

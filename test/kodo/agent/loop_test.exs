@@ -253,6 +253,43 @@ defmodule Kodo.Agent.LoopTest do
     assert Enum.map(failures, & &1.payload["tool_call_id"]) == ["first", "second"]
   end
 
+  test "rehoming during a multi-tool approval does not persist later calls as skipped", %{
+    session: session,
+    ownership: ownership
+  } do
+    {:ok, session} =
+      session |> Ecto.Changeset.change(approval_policy: "safe") |> Kodo.Repo.update()
+
+    {:ok, _status} = Sessions.set_status(session.id, "running", "agent", ownership: ownership)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "multiple tools"},
+        ownership: ownership
+      )
+
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:session_event, %{type: "approval_requested"}}
+    send(loop.pid, :rehoming_requested)
+    assert Task.await(loop) == {:error, :rehoming_requested}
+
+    refute Enum.any?(Sessions.events_after(session.id), fn event ->
+             event.type == "tool_failed" and event.payload["tool_call_id"] == "second"
+           end)
+  end
+
   defp budgets(overrides) do
     Keyword.merge(
       [max_continuations: 8, max_tokens: 1_000, model_timeout: 1_000, tool_timeout: 1_000],

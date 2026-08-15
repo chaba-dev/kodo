@@ -18,6 +18,7 @@ defmodule Kodo.Cluster.Placement do
 
   @required_capabilities ["session-events-v1", "session-ownership-v1", "session-placement-v1"]
   @rehoming_capability "session-rehoming-v1"
+  @rehoming_capabilities [@rehoming_capability | @required_capabilities]
   @capacity_statuses ["idle", "running", "awaiting_approval"]
 
   @stale_after_seconds Keyword.fetch!(
@@ -38,7 +39,7 @@ defmodule Kodo.Cluster.Placement do
       candidates =
         @stale_after_seconds
         |> Instances.list_eligible()
-        |> Enum.filter(&compatible?(&1, @required_capabilities))
+        |> Enum.filter(&(compatible?(&1, @rehoming_capabilities) and reachable?(&1)))
 
       current_generation =
         candidates |> Enum.map(& &1.deployment_generation) |> Enum.max(fn -> nil end)
@@ -77,7 +78,7 @@ defmodule Kodo.Cluster.Placement do
     select_with_capabilities(
       session_id,
       stale_after_seconds,
-      [@rehoming_capability | @required_capabilities]
+      @rehoming_capabilities
     )
   end
 
@@ -106,6 +107,10 @@ defmodule Kodo.Cluster.Placement do
 
   defp compatible?(%Instance{protocol_capabilities: capabilities}, required_capabilities) do
     Enum.all?(required_capabilities, &(&1 in capabilities))
+  end
+
+  defp reachable?(%Instance{node_name: node_name}) do
+    Enum.any?([node() | Node.list()], &(Atom.to_string(&1) == node_name))
   end
 
   defp with_load([]), do: []

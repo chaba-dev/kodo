@@ -202,6 +202,38 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert Enum.count(Sessions.events_after(session.id), &(&1.type == "approval_requested")) == 1
   end
 
+  test "drain timeout is one global deadline across all local coordinators" do
+    timeout = 200
+    coordinator_count = System.schedulers_online() * 2
+
+    coordinators =
+      for index <- 1..coordinator_count do
+        {:ok, pid} =
+          DynamicSupervisor.start_child(
+            Kodo.SessionSupervisor,
+            {Kodo.Test.BlockingDrainCoordinator, index}
+          )
+
+        pid
+      end
+
+    on_exit(fn ->
+      Enum.each(coordinators, fn pid ->
+        if Process.alive?(pid), do: DynamicSupervisor.terminate_child(Kodo.SessionSupervisor, pid)
+      end)
+    end)
+
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, {:drain_incomplete, errors}} =
+             Sessions.drain_owned_sessions(Ecto.UUID.generate(), timeout)
+
+    elapsed = System.monotonic_time(:millisecond) - started_at
+
+    assert length(errors) == coordinator_count
+    assert elapsed < timeout + 100
+  end
+
   test "renews runner authority only after revalidating durable ownership", %{
     runner: runner,
     session: session

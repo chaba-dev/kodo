@@ -4,11 +4,13 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
   alias Kodo.Accounts.Scope
   alias Kodo.Cluster.Discovery
   alias Kodo.Cluster.InstanceManager
+  alias Kodo.Cluster.Instances
   alias Kodo.Cluster.Placement
   alias Kodo.Repo
   alias Kodo.Runners
   alias Kodo.Sessions
 
+  import Ecto.Query
   import Kodo.AccountsFixtures
 
   @capabilities [
@@ -39,7 +41,11 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
     {:ok, peer, peer_node} = :peer.start_link(%{name: :kodo_handoff_peer})
     :ok = :erpc.call(peer_node, :code, :add_paths, [:code.get_path()])
 
-    source_manager = start_instance_manager!("old-artifact", 10)
+    source_manager =
+      start_instance_manager!("old-artifact", 10,
+        protocol_capabilities: Enum.reject(@capabilities, &(&1 == "session-rehoming-v1"))
+      )
+
     source = InstanceManager.current_instance(source_manager)
     remote_supervisor = start_remote_control_plane!(peer_node, "current-artifact", 11)
     target = :erpc.call(peer_node, InstanceManager, :current_instance, [])
@@ -79,11 +85,12 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
     assert :ok = Sessions.start_turn(session.id, "forward")
     first_approval = receive_approval_id()
 
-    assert {:ok, draining_source} = InstanceManager.begin_drain(source_manager)
+    assert {:ok, draining_source} = Instances.begin_drain(source)
     assert draining_source.boot_id == source.boot_id
+    :ok = :erpc.call(peer_node, Process, :send, [Kodo.Sessions.Recovery, :retry, []])
+    _ = :erpc.call(peer_node, :sys, :get_state, [Kodo.Sessions.Recovery])
     assert Sessions.get_session!(session.id).owner_boot_id == target.boot_id
-    assert {:ok, remote_pid} = Discovery.session(session.id)
-    assert node(remote_pid) == peer_node
+    assert Enum.any?(Discovery.members(:session, session.id), &(node(&1) == peer_node))
 
     complete_approved_tool(scope, session, runner, first_approval)
 
@@ -106,8 +113,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
 
     assert draining_target.boot_id == target.boot_id
     assert Sessions.get_session!(session.id).owner_boot_id == rollback_target.boot_id
-    assert {:ok, local_pid} = Discovery.session(session.id)
-    assert node(local_pid) == node()
+    assert Enum.any?(Discovery.members(:session, session.id), &(node(&1) == node()))
 
     complete_approved_tool(scope, session, runner, second_approval)
 
@@ -120,6 +126,76 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
     :ok = Discovery.subscribe()
     assert :ok = :peer.stop(peer)
     assert_receive {:cluster_node, :down, ^peer_node, _info}, 5_000
+  end
+
+  test "node loss replays one durable mutation without executing it twice" do
+    {:ok, peer, peer_node} = :peer.start_link(%{name: :kodo_node_loss_peer})
+    :ok = :erpc.call(peer_node, :code, :add_paths, [:code.get_path()])
+
+    _fallback_manager = start_instance_manager!("fallback-artifact", 10)
+    _remote_supervisor = start_remote_control_plane!(peer_node, "current-artifact", 11)
+    target = :erpc.call(peer_node, InstanceManager, :current_instance, [])
+
+    on_exit(fn ->
+      stop_peer(peer)
+      cleanup_cluster_rows()
+    end)
+
+    user = user_fixture()
+    scope = Scope.for_user(user)
+
+    {:ok, runner} =
+      Runners.register(scope, %{
+        workspace_root: "/work/#{Ecto.UUID.generate()}",
+        platform: "linux",
+        architecture: "x86_64",
+        runner_version: "0.1.0",
+        protocol_version: 4,
+        capabilities: []
+      })
+
+    runner_pid = start_supervised!({Kodo.Test.DurableTestRunner, {runner.id, self()}})
+
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Node-loss replay",
+        model: "test:model",
+        approval_policy: "safe"
+      })
+
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
+    assert {:ok, _ownership} = Sessions.claim_ownership(session.id, target.boot_id)
+    assert :ok = Sessions.start_turn(session.id, "node loss")
+    approval_id = receive_approval_id()
+
+    assert {:ok, {_resolved, _status}} =
+             Sessions.resolve_approval(scope, session.id, approval_id, "approved")
+
+    assert_receive {:tool_execution_started, request_id}, 5_000
+    refute_receive {:tool_execution_started, ^request_id}
+
+    :ok = Discovery.subscribe()
+    assert :ok = :peer.stop(peer)
+    assert_receive {:cluster_node, :down, ^peer_node, _info}, 5_000
+
+    Kodo.Cluster.Instance
+    |> where([instance], instance.boot_id == ^target.boot_id)
+    |> Repo.update_all(set: [last_seen_at: DateTime.add(DateTime.utc_now(), -120, :second)])
+
+    :ok = Kodo.Sessions.Recovery.recover_active_sessions()
+    assert_receive {:tool_request_replayed, ^request_id}, 5_000
+    refute_receive {:tool_execution_started, ^request_id}
+
+    send(runner_pid, {:complete, request_id})
+
+    assert_receive {:session_event,
+                    %{type: "session_status_changed", payload: %{"status" => "completed"}}},
+                   5_000
+
+    events = Sessions.events_after(session.id)
+    assert Enum.count(events, &(&1.type == "tool_requested")) == 1
+    assert Enum.count(events, &(&1.type == "tool_completed")) == 1
   end
 
   defp assert_competing_claims_are_fenced(source, target, peer_node) do
@@ -217,10 +293,13 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
     supervisor
   end
 
-  defp start_instance_manager!(revision, generation) do
-    start_supervised!(
-      {InstanceManager, instance_options(revision, generation, Atom.to_string(node()))}
-    )
+  defp start_instance_manager!(revision, generation, overrides \\ []) do
+    options =
+      revision
+      |> instance_options(generation, Atom.to_string(node()))
+      |> Keyword.merge(overrides)
+
+    start_supervised!({InstanceManager, options})
   end
 
   defp instance_options(revision, generation, node_name) do

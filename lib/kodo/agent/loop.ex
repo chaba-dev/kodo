@@ -289,6 +289,9 @@ defmodule Kodo.Agent.Loop do
       {:ok, result} ->
         {:cont, {:ok, results ++ [result]}}
 
+      {:error, :rehoming_requested} = error ->
+        {:halt, error}
+
       {:error, reason} ->
         halt_after_tool_failure(
           context.session_id,

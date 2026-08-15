@@ -74,6 +74,28 @@ defmodule KodoWeb.ClusterPlacementControllerTest do
            |> json_response(409) == %{"error" => "target artifact is not older"}
   end
 
+  test "rejects a rollback target that cannot receive a rehomed coordinator", %{conn: conn} do
+    {:ok, _legacy} =
+      Instances.register(
+        instance_attrs("legacy", 10)
+        |> Map.put(:protocol_capabilities, [
+          "session-events-v1",
+          "session-ownership-v1",
+          "session-placement-v1"
+        ])
+      )
+
+    {:ok, _current} = Instances.register(instance_attrs("current", 11))
+
+    assert conn
+           |> post_json(~p"/api/cluster/placement-overrides", %{
+             artifact_revision: "legacy",
+             reason: "Must still support reverse handoff",
+             expires_in_seconds: 600
+           })
+           |> json_response(409) == %{"error" => "target artifact is not available"}
+  end
+
   defp instance_attrs(revision, generation) do
     %{
       boot_id: Ecto.UUID.generate(),
