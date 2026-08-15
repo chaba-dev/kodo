@@ -44,6 +44,7 @@ defmodule KodoWeb.Router do
     post "/sessions/:id/messages", SessionController, :message
     post "/sessions/:id/cancel", SessionController, :cancel
     post "/sessions/:id/approvals/:approval_id", SessionController, :resolve_approval
+    post "/cluster/placement-overrides", ClusterPlacementController, :create_override
   end
 
   # Other scopes may use custom stacks.

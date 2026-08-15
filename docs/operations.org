@@ -3,16 +3,18 @@
 #+startup: showall
 #+options: toc:2
 
-* Current deployment boundary
+* Clustered deployment boundary
 
-Kodo currently supports exactly one Phoenix application node and replica.
-PostgreSQL persists session state and control-plane instance metadata, but
-session ownership epochs and fencing are not implemented yet. Running multiple
-replicas can therefore execute the same session concurrently.
+Kodo supports multiple Phoenix replicas connected as one distributed Erlang
+cluster and backed by one PostgreSQL database. PostgreSQL session ownership
+epochs are authoritative: every state transition and external effect carries
+the current epoch. BEAM process discovery and node monitors provide routing and
+fast failure hints, but never replace the database fence.
 
-Keep the Phoenix replica count at one until clustered session ownership is
-complete. The instance registration described below prepares for clustered
-operation; it does not make a replicated deployment safe by itself.
+All replicas must be mutually reachable over Erlang distribution, use the same
+cookie, use the same database, and advertise compatible session protocol
+capabilities. A replica that cannot maintain its database heartbeat or
+ownership authority fails closed.
 
 * Required production identity
 
@@ -104,7 +106,12 @@ The instance manager:
 2. marks the instance ready for future session placement;
 3. refreshes its heartbeat using PostgreSQL's UTC clock;
 4. marks the instance non-ready and draining during graceful application
-   shutdown.
+   shutdown;
+5. asks each local active session to yield at a durable model, approval, or tool
+   request boundary and activates a compatible replacement before stopping the
+   source coordinator. Current replicas also reconcile draining owners that
+   predate the rehoming protocol, which makes its first mixed-revision rollout
+   proactive without relying on old code to initiate the transfer.
 
 Readiness in this record means eligible for session ownership. It does not
 replace the HTTP or Kubernetes readiness probe. A crashed VM cannot mark itself
@@ -122,16 +129,97 @@ Kodo records draining state before its supervision tree stops. Process kills,
 VM crashes, and termination-grace expiry cannot perform this transition and
 fall back to heartbeat-based failure detection.
 
-Clustered session handoff is not implemented yet. Until it is, draining records
-deployment intent but does not transfer active sessions to another replica.
+Drain waits at most 20 seconds by default. A model or runner effect already in
+flight is allowed to reach its next durable boundary rather than being raced by
+a replacement. If no compatible target is ready or the bound expires, shutdown
+continues; PostgreSQL fencing and heartbeat-based recovery remain the fallback.
+Set the platform termination grace above the drain bound plus ordinary OTP
+shutdown time.
 
 * BEAM clustering
 
 ~DNS_CLUSTER_QUERY~ configures node discovery through ~DNSCluster~ in
-production. BEAM distribution provides fast process discovery, messaging, and
-failure signals. PostgreSQL remains authoritative for durable instance
-identity and, in later milestones, session ownership epochs.
+production. It must resolve to the A or AAAA records for all Kodo replicas. Use
+one fixed node basename on every replica, long names, and a unique host or pod IP:
 
-Operational requirements for distributed Erlang networking, Kubernetes
-readiness, rolling-update strategy, and termination grace will be added here as
-the remaining clustered ownership work is implemented.
+#+begin_src sh
+export RELEASE_DISTRIBUTION=name
+export RELEASE_NODE="kodo@${POD_IP}"
+export RELEASE_COOKIE="${KODO_ERLANG_COOKIE}"
+export DNS_CLUSTER_QUERY="kodo-headless.namespace.svc.cluster.local"
+#+end_src
+
+Protect the cookie as a secret and rotate it as a coordinated cluster restart.
+Do not expose Erlang distribution outside the trusted cluster network. Permit
+TCP 4369 for EPMD and configure a fixed distribution port or narrow range, for
+example with ~ERL_AFLAGS=-kernel inet_dist_listen_min 9100
+inet_dist_listen_max 9100~, then permit that range between replicas. Network
+policy, security groups, DNS, IP families, node names, and cookies must agree.
+
+DNSCluster only initiates connections to nodes with the same basename by
+default. A per-pod basename therefore prevents discovery with the current
+string-valued ~DNS_CLUSTER_QUERY~ configuration.
+
+* Placement and rollback
+
+For sessions without a still-live owner, placement chooses ready, non-draining,
+compatible instances from the highest available deployment generation, then
+balances by declared capacity. Existing coordinators remain in place until
+their node drains or loses authority.
+
+The normal rollback procedure deploys the older artifact under a new, higher
+generation. For an emergency move to replicas from an older generation, an
+authenticated agent token may create an override:
+
+#+begin_src sh
+curl -X POST "$KODO_URL/api/cluster/placement-overrides" \
+  -H "Authorization: Bearer $KODO_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"artifact_revision":"sha-old","reason":"regression 1234","expires_in_seconds":600}'
+#+end_src
+
+The target artifact must be ready, compatible, and older than the highest live
+generation. Overrides last from 60 to 3,600 seconds, use the PostgreSQL clock,
+and fail placement closed if their target disappears. Every request is retained
+with its reason, authenticated user, creation time, and expiry. The MVP has no
+administrator role, so every bearer-authenticated agent user has this
+cluster-wide authority; production operators must control token issuance
+accordingly.
+
+* Kubernetes without an operator
+
+Use a headless Service for ~DNS_CLUSTER_QUERY~ and a normal Service for HTTP.
+Inject these values into every Pod:
+
+- ~POD_IP~ through the downward API for ~RELEASE_NODE~;
+- one Secret-backed ~RELEASE_COOKIE~ shared by the deployment;
+- immutable ~KODO_ARTIFACT_REVISION~ from the built image or release;
+- one durable, monotonically increasing ~KODO_DEPLOYMENT_GENERATION~ for the
+  rollout, supplied by the release pipeline rather than a pod-local counter;
+- the shared ~DATABASE_URL~, ~SECRET_KEY_BASE~, and provider credentials.
+
+Use ~RollingUpdate~ with ~maxUnavailable: 0~ and ~maxSurge~ of at least one so a
+ready target exists before an old Pod terminates. The replacement must have
+enough declared capacity for sessions on draining Pods. Do not use ~Recreate~
+or delete all old Pods simultaneously.
+
+An HTTP readiness probe should verify the endpoint can serve requests; initial
+session placement is separately gated by Kodo's durable instance-ready flag,
+which is set only after session recovery runs. A startup probe should cover
+database migrations, instance registration, and initial recovery. Liveness
+must allow transient database or cluster delays and should not turn a rollout
+into repeated hard kills.
+
+Set ~terminationGracePeriodSeconds~ to at least 30 seconds with the default
+20-second drain bound, and increase it when provider or tool timing requires a
+larger operational margin. Let Kubernetes send SIGTERM to the release so OTP
+runs ~Application.prep_stop/1~; do not replace that with SIGKILL. A ~preStop~
+hook is unnecessary unless the platform wrapper otherwise bypasses OTP
+shutdown. A Pod that exceeds its grace may be killed, in which case ownership
+heartbeats and epochs provide conservative recovery without duplicate durable
+mutation.
+
+No Kubernetes operator, custom resource, or rollout controller is required.
+The release pipeline owns artifact and generation metadata; Kubernetes owns
+replica replacement; Kodo owns readiness for placement, draining, handoff, and
+database fencing.

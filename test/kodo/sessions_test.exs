@@ -365,7 +365,8 @@ defmodule Kodo.SessionsTest do
       protocol_capabilities: [
         "session-events-v1",
         "session-ownership-v1",
-        "session-placement-v1"
+        "session-placement-v1",
+        "session-rehoming-v1"
       ]
     }
   end

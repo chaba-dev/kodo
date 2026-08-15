@@ -1,5 +1,5 @@
 defmodule Kodo.Sessions.Recovery do
-  @moduledoc "Restores durable active-session coordinators and retries transient placement gaps."
+  @moduledoc "Restores active coordinators and reconciles durable legacy drain intent."
 
   use GenServer
 
@@ -24,28 +24,24 @@ defmodule Kodo.Sessions.Recovery do
   @impl true
   def init(_opts) do
     with :ok <- mark_placement_ready() do
-      pending =
-        Sessions.list_active_sessions()
-        |> Enum.map(& &1.id)
-        |> recover_sessions()
-
-      schedule_retry(pending)
-      {:ok, %{pending: pending}}
+      recover_active_sessions()
+      schedule_retry()
+      {:ok, %{}}
     end
   end
 
   @impl true
   def handle_info(:retry, state) do
-    pending = recover_sessions(state.pending)
-    schedule_retry(pending)
-    {:noreply, %{state | pending: pending}}
+    recover_active_sessions()
+    schedule_retry()
+    {:noreply, state}
   end
 
   defp recover_sessions(session_ids) do
     Enum.filter(session_ids, fn session_id ->
       case Sessions.get_session(session_id) do
         %{status: status} when status in ["running", "awaiting_approval"] ->
-          not match?({:ok, _pid}, Sessions.ensure_started(session_id))
+          not match?({:ok, _pid}, Sessions.reconcile_started(session_id))
 
         _inactive_or_missing ->
           false
@@ -66,6 +62,8 @@ defmodule Kodo.Sessions.Recovery do
     end
   end
 
-  defp schedule_retry([]), do: :ok
-  defp schedule_retry(_pending), do: Process.send_after(self(), :retry, @retry_interval)
+  defp schedule_retry do
+    if Process.whereis(InstanceManager), do: Process.send_after(self(), :retry, @retry_interval)
+    :ok
+  end
 end

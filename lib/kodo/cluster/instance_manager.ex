@@ -4,6 +4,7 @@ defmodule Kodo.Cluster.InstanceManager do
   use GenServer
 
   alias Kodo.Cluster.Instances
+  alias Kodo.Sessions
 
   def start_link(opts) do
     config = Keyword.merge(Application.fetch_env!(:kodo, __MODULE__), opts)
@@ -26,7 +27,7 @@ defmodule Kodo.Cluster.InstanceManager do
   end
 
   def mark_ready(server \\ __MODULE__), do: GenServer.call(server, :mark_ready)
-  def begin_drain(server \\ __MODULE__), do: GenServer.call(server, :begin_drain)
+  def begin_drain(server \\ __MODULE__), do: GenServer.call(server, :begin_drain, :infinity)
 
   @impl true
   def init(config) do
@@ -44,7 +45,13 @@ defmodule Kodo.Cluster.InstanceManager do
     case Instances.register_current(attrs) do
       {:ok, instance} ->
         schedule_heartbeat(Keyword.fetch!(config, :heartbeat_interval))
-        {:ok, %{instance: instance, heartbeat_interval: config[:heartbeat_interval]}}
+
+        {:ok,
+         %{
+           instance: instance,
+           heartbeat_interval: config[:heartbeat_interval],
+           drain_timeout: Keyword.fetch!(config, :drain_timeout)
+         }}
 
       {:error, reason} ->
         {:stop, {:instance_registration_failed, reason}}
@@ -63,8 +70,13 @@ defmodule Kodo.Cluster.InstanceManager do
 
   def handle_call(:begin_drain, _from, state) do
     case Instances.begin_drain(state.instance) do
-      {:ok, instance} -> {:reply, {:ok, instance}, %{state | instance: instance}}
-      {:error, changeset} -> {:reply, {:error, changeset}, state}
+      {:ok, instance} ->
+        result = Sessions.drain_owned_sessions(instance.boot_id, state.drain_timeout)
+        reply = if result == :ok, do: {:ok, instance}, else: result
+        {:reply, reply, %{state | instance: instance}}
+
+      {:error, changeset} ->
+        {:reply, {:error, changeset}, state}
     end
   end
 

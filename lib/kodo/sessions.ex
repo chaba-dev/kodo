@@ -250,7 +250,17 @@ defmodule Kodo.Sessions do
   end
 
   @doc "Returns the unique active coordinator, reconstructing it from events when needed."
-  def ensure_started(session_id) do
+  def ensure_started(session_id), do: locate_or_place_active_session(session_id)
+
+  @doc false
+  def reconcile_started(session_id) do
+    case rehome_legacy_draining_owner(session_id) do
+      {:ok, pid} -> {:ok, pid}
+      _not_rehomed -> locate_or_place_active_session(session_id)
+    end
+  end
+
+  defp locate_or_place_active_session(session_id) do
     case Discovery.session(session_id) do
       {:ok, pid} when node(pid) != node() ->
         {:ok, pid}
@@ -262,6 +272,21 @@ defmodule Kodo.Sessions do
 
       :error ->
         place_active_session(session_id)
+    end
+  end
+
+  # Older revisions only mark themselves draining. A current node detects that durable intent and
+  # performs the fenced transfer so the first rollout of rehoming code is still proactive.
+  defp rehome_legacy_draining_owner(session_id) do
+    with %Session{owner_boot_id: owner_boot_id} = session when not is_nil(owner_boot_id) <-
+           get_session(session_id),
+         %{draining: true, protocol_capabilities: capabilities} <- Instances.get(owner_boot_id),
+         false <- "session-rehoming-v1" in capabilities do
+      session
+      |> ownership_for()
+      |> rehome_active_session()
+    else
+      _not_legacy_draining -> :not_rehomed
     end
   end
 
@@ -418,6 +443,69 @@ defmodule Kodo.Sessions do
     end
   end
 
+  @doc false
+  def start_rehomed_active_session_here(session_id, expected_boot_id, previous_ownership) do
+    case DynamicSupervisor.start_child(
+           Kodo.SessionSupervisor,
+           {Kodo.Sessions.ActiveSession, {session_id, expected_boot_id, previous_ownership}}
+         ) do
+      {:error, {:already_started, pid}} -> {:ok, pid}
+      result -> result
+    end
+  end
+
+  @doc "Moves an active coordinator to a compatible non-draining instance."
+  def rehome_active_session(%Ownership{} = ownership) do
+    with {:ok, instance, target_node} <-
+           Placement.select_rehome_target(
+             ownership.session_id,
+             @ownership_stale_after_seconds
+           ) do
+      start_rehomed_active_session_on(target_node, ownership, instance.boot_id)
+    end
+  end
+
+  @doc "Requests every locally supervised coordinator owned by a boot to yield for rehoming."
+  def drain_owned_sessions(owner_boot_id, timeout) when is_integer(timeout) and timeout > 0 do
+    tasks =
+      Kodo.SessionSupervisor
+      |> DynamicSupervisor.which_children()
+      |> Enum.map(fn {_id, pid, _type, _modules} ->
+        Task.async(fn ->
+          try do
+            Kodo.Sessions.ActiveSession.begin_drain(pid, owner_boot_id, timeout)
+          rescue
+            exception -> {:task_error, exception}
+          catch
+            :exit, reason -> {:task_exit, reason}
+          end
+        end)
+      end)
+
+    tasks
+    |> Task.yield_many(timeout)
+    |> Enum.map(fn
+      {_task, {:ok, result}} ->
+        result
+
+      {_task, {:exit, reason}} ->
+        {:task_exit, reason}
+
+      {task, nil} ->
+        _ = Task.shutdown(task, :brutal_kill)
+        :timeout
+    end)
+    |> Enum.flat_map(fn
+      result when result in [:ok, :not_owned] -> []
+      {:error, reason} -> [reason]
+      error -> [error]
+    end)
+    |> case do
+      [] -> :ok
+      errors -> {:error, {:drain_incomplete, errors}}
+    end
+  end
+
   defp place_active_session(session_id, attempts \\ @placement_attempts)
 
   defp place_active_session(_session_id, 0), do: {:error, :placement_conflict}
@@ -453,6 +541,21 @@ defmodule Kodo.Sessions do
 
   defp start_active_session_on(target_node, session_id, expected_boot_id) do
     :erpc.call(target_node, __MODULE__, :start_active_session_here, [session_id, expected_boot_id])
+  catch
+    _kind, _reason -> {:error, :coordinator_unavailable}
+  end
+
+  defp start_rehomed_active_session_on(target_node, ownership, expected_boot_id)
+       when target_node == node() do
+    start_rehomed_active_session_here(ownership.session_id, expected_boot_id, ownership)
+  end
+
+  defp start_rehomed_active_session_on(target_node, ownership, expected_boot_id) do
+    :erpc.call(target_node, __MODULE__, :start_rehomed_active_session_here, [
+      ownership.session_id,
+      expected_boot_id,
+      ownership
+    ])
   catch
     _kind, _reason -> {:error, :coordinator_unavailable}
   end
