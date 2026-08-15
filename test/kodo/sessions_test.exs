@@ -56,6 +56,41 @@ defmodule Kodo.SessionsTest do
     assert hd(Sessions.events_after(session.id)).payload["approval_policy"] == "safe"
   end
 
+  test "lists only the current user's sessions with their runners", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, owned} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Owned session",
+        model: "test:model"
+      })
+
+    other_scope = user_scope_fixture()
+
+    {:ok, other_runner} =
+      Runners.register(other_scope, %{
+        workspace_root: "/work/#{Ecto.UUID.generate()}",
+        platform: "linux",
+        architecture: "x86_64",
+        runner_version: "0.1.0",
+        protocol_version: 4,
+        capabilities: []
+      })
+
+    {:ok, _other} =
+      Sessions.create_session(other_scope, %{
+        runner_id: other_runner.id,
+        title: "Other session",
+        model: "test:model"
+      })
+
+    assert [%{id: id, runner: %{id: runner_id}}] = Sessions.list_sessions(scope)
+    assert id == owned.id
+    assert runner_id == runner.id
+  end
+
   test "rejects a session without an owning user", %{runner: runner} do
     changeset =
       Session.create_changeset(%Session{}, %{

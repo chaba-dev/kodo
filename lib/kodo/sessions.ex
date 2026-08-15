@@ -48,6 +48,14 @@ defmodule Kodo.Sessions do
 
   def get_session!(id), do: Repo.get!(Session, id)
 
+  def list_sessions(%Scope{user: user}) do
+    Session
+    |> where([session], session.user_id == ^user.id)
+    |> order_by([session], desc: session.updated_at)
+    |> preload(:runner)
+    |> Repo.all()
+  end
+
   def list_active_sessions do
     Session
     |> where([session], session.status in ["running", "awaiting_approval"])
