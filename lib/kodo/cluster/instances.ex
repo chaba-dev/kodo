@@ -48,8 +48,13 @@ defmodule Kodo.Cluster.Instances do
         |> Repo.one()
 
       case instance do
-        nil -> Repo.rollback(:instance_registration_lost)
-        %Instance{} = instance -> resume_instance(instance, changeset)
+        nil ->
+          Repo.rollback(:instance_registration_lost)
+
+        %Instance{} = instance ->
+          instance = resume_instance(instance, changeset)
+          retire_prior_boots(instance)
+          instance
       end
     end)
   end
@@ -58,6 +63,25 @@ defmodule Kodo.Cluster.Instances do
 
   def heartbeat(%Instance{} = instance) do
     Repo.transaction(fn -> heartbeat_locked(instance) end)
+  end
+
+  def mark_ready(%Instance{} = instance) do
+    Repo.transaction(fn ->
+      query =
+        Instance
+        |> where([record], record.boot_id == ^instance.boot_id and not record.draining)
+        |> update([record],
+          set: [
+            ready: true,
+            last_seen_at: fragment("timezone('UTC', clock_timestamp())")
+          ]
+        )
+
+      case Repo.update_all(query, []) do
+        {1, nil} -> Repo.get!(Instance, instance.boot_id)
+        {0, nil} -> Repo.rollback(:instance_draining_or_not_found)
+      end
+    end)
   end
 
   def begin_drain(%Instance{} = instance) do
@@ -134,11 +158,13 @@ defmodule Kodo.Cluster.Instances do
       if instance.draining do
         heartbeat_locked(instance)
       else
+        ready = Ecto.Changeset.get_field(changeset, :ready)
+
         Instance
         |> where([record], record.boot_id == ^instance.boot_id)
         |> update([record],
           set: [
-            ready: true,
+            ready: ^ready,
             draining: false,
             last_seen_at: fragment("timezone('UTC', clock_timestamp())")
           ]
@@ -148,6 +174,15 @@ defmodule Kodo.Cluster.Instances do
     else
       Repo.rollback(:boot_identity_mismatch)
     end
+  end
+
+  defp retire_prior_boots(instance) do
+    Instance
+    |> where(
+      [record],
+      record.node_name == ^instance.node_name and record.boot_id != ^instance.boot_id
+    )
+    |> Repo.update_all(set: [ready: false])
   end
 
   defp heartbeat_locked(instance) do

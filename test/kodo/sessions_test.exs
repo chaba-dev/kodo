@@ -362,7 +362,11 @@ defmodule Kodo.SessionsTest do
       ready: true,
       draining: false,
       capacity: 1,
-      protocol_capabilities: ["session-events-v1", "session-ownership-v1"]
+      protocol_capabilities: [
+        "session-events-v1",
+        "session-ownership-v1",
+        "session-placement-v1"
+      ]
     }
   end
 end

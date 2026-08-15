@@ -96,6 +96,31 @@ defmodule Kodo.Cluster.InstancesTest do
     assert Instances.get(boot_id).draining
   end
 
+  test "manager can defer placement readiness until its dependents are running" do
+    pid =
+      start_supervised!({
+        InstanceManager,
+        enabled: true,
+        name: nil,
+        boot_id: Ecto.UUID.generate(),
+        node_name: "kodo@starting",
+        artifact_revision: "sha-starting",
+        deployment_generation: 13,
+        ready: false,
+        capacity: 2,
+        protocol_capabilities: [
+          "session-events-v1",
+          "session-ownership-v1",
+          "session-placement-v1"
+        ],
+        heartbeat_interval: :infinity
+      })
+
+    refute InstanceManager.current_instance(pid).ready
+    assert {:ok, ready} = InstanceManager.mark_ready(pid)
+    assert ready.ready
+  end
+
   test "application preparation for shutdown starts an explicit drain" do
     pid =
       start_supervised!({
@@ -156,6 +181,17 @@ defmodule Kodo.Cluster.InstancesTest do
            ) == 1
   end
 
+  test "a new boot incarnation retires a prior boot using the same node name" do
+    old_attrs = valid_attrs()
+    assert {:ok, old} = Instances.register_current(old_attrs)
+
+    assert {:ok, current} =
+             Instances.register_current(%{old_attrs | boot_id: Ecto.UUID.generate()})
+
+    refute Instances.get(old.boot_id).ready
+    assert current.ready
+  end
+
   test "concurrent registration of one boot incarnation is idempotent" do
     attrs = valid_attrs()
     parent = self()
@@ -201,9 +237,21 @@ defmodule Kodo.Cluster.InstancesTest do
   end
 
   test "eligible instances must be ready, non-draining, and recently seen by PostgreSQL" do
-    assert {:ok, fresh} = Instances.register_current(valid_attrs())
-    assert {:ok, draining} = Instances.register_current(valid_attrs())
-    assert {:ok, stale} = Instances.register_current(valid_attrs())
+    assert {:ok, fresh} =
+             valid_attrs()
+             |> Map.put(:node_name, "kodo@fresh")
+             |> Instances.register_current()
+
+    assert {:ok, draining} =
+             valid_attrs()
+             |> Map.put(:node_name, "kodo@draining")
+             |> Instances.register_current()
+
+    assert {:ok, stale} =
+             valid_attrs()
+             |> Map.put(:node_name, "kodo@stale")
+             |> Instances.register_current()
+
     assert {:ok, _draining} = Instances.begin_drain(draining)
 
     old_timestamp = DateTime.add(DateTime.utc_now(), -120, :second)

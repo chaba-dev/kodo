@@ -5,7 +5,9 @@ defmodule Kodo.Sessions do
 
   alias Kodo.Accounts.Scope
   alias Kodo.Cluster.Discovery
+  alias Kodo.Cluster.InstanceManager
   alias Kodo.Cluster.Instances
+  alias Kodo.Cluster.Placement
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
@@ -16,6 +18,8 @@ defmodule Kodo.Sessions do
   @initial_event_version 1
   @single_event_increment 1
   @single_updated_row 1
+  @placement_attempts 3
+  @capacity_statuses ["idle", "running", "awaiting_approval"]
   @stale_coordinator_shutdown_timeout 5_000
   @ownership_lock_sql "SELECT pg_advisory_lock(hashtextextended($1, 0))"
   @ownership_unlock_sql "SELECT pg_advisory_unlock(hashtextextended($1, 0))"
@@ -52,7 +56,7 @@ defmodule Kodo.Sessions do
 
   @doc "Claims an unowned session or replaces a coordinator from this node or a stale owner."
   def claim_ownership(session_id, owner_boot_id) do
-    with_ownership_lock(session_id, fn ->
+    with_placement_locks(session_id, owner_boot_id, fn ->
       Repo.transaction(fn -> claim_ownership_locked(session_id, owner_boot_id) end)
     end)
   end
@@ -61,6 +65,7 @@ defmodule Kodo.Sessions do
     session = lock_session!(session_id, allow_unowned: true)
 
     if claimable?(session, owner_boot_id) do
+      validate_capacity!(session, owner_boot_id)
       epoch = session.ownership_epoch + 1
 
       session
@@ -91,10 +96,11 @@ defmodule Kodo.Sessions do
 
   @doc "Transfers a session by advancing its epoch under the current owner's fence."
   def transfer_ownership(%Ownership{} = ownership, new_owner_boot_id) do
-    with_ownership_lock(ownership.session_id, fn ->
+    with_placement_locks(ownership.session_id, new_owner_boot_id, fn ->
       Repo.transaction(fn ->
         session = lock_session!(ownership.session_id, ownership: ownership)
         validate_owner_capability!(new_owner_boot_id)
+        validate_capacity!(session, new_owner_boot_id)
         epoch = session.ownership_epoch + 1
 
         session
@@ -119,6 +125,23 @@ defmodule Kodo.Sessions do
            ) do
       Repo.rollback(:ownership_capability_not_cluster_wide)
     end
+  end
+
+  defp validate_capacity!(%Session{owner_boot_id: owner_boot_id}, owner_boot_id), do: :ok
+  defp validate_capacity!(_session, nil), do: :ok
+
+  defp validate_capacity!(_session, owner_boot_id) do
+    instance = Instances.get(owner_boot_id) || Repo.rollback(:instance_not_found)
+
+    load =
+      Session
+      |> where(
+        [session],
+        session.owner_boot_id == ^owner_boot_id and session.status in ^@capacity_statuses
+      )
+      |> Repo.aggregate(:count)
+
+    if load >= instance.capacity, do: Repo.rollback(:instance_at_capacity)
   end
 
   @doc "Checks a fencing token immediately before dispatching an external effect."
@@ -159,14 +182,22 @@ defmodule Kodo.Sessions do
     end)
   end
 
-  # A separate checkout holds the PostgreSQL session lock so the caller can perform short database
+  # A separate checkout holds PostgreSQL advisory locks so the caller can perform short database
   # operations without keeping a transaction open across a potentially long external request.
-  defp with_ownership_lock(session_id, fun) do
+  defp with_ownership_lock(session_id, fun), do: with_locks([session_id], fun)
+
+  defp with_placement_locks(session_id, nil, fun), do: with_ownership_lock(session_id, fun)
+
+  defp with_placement_locks(session_id, owner_boot_id, fun) do
+    with_locks([session_id, "instance:#{owner_boot_id}"], fun)
+  end
+
+  defp with_locks(lock_keys, fun) do
     caller = self()
     lock_ref = make_ref()
 
     {holder, holder_ref} =
-      spawn_monitor(fn -> hold_ownership_lock(caller, lock_ref, session_id) end)
+      spawn_monitor(fn -> hold_locks(caller, lock_ref, Enum.sort(lock_keys)) end)
 
     receive do
       {^lock_ref, :acquired} ->
@@ -186,9 +217,12 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp hold_ownership_lock(caller, lock_ref, session_id) do
+  defp hold_locks(caller, lock_ref, lock_keys) do
     run_outside_sandbox(fn ->
-      Ecto.Adapters.SQL.query!(Repo, @ownership_lock_sql, [session_id])
+      Enum.each(lock_keys, fn key ->
+        Ecto.Adapters.SQL.query!(Repo, @ownership_lock_sql, [key])
+      end)
+
       caller_ref = Process.monitor(caller)
       send(caller, {lock_ref, :acquired})
 
@@ -198,7 +232,11 @@ defmodule Kodo.Sessions do
           {:DOWN, ^caller_ref, :process, ^caller, _reason} -> :ok
         end
       after
-        Ecto.Adapters.SQL.query!(Repo, @ownership_unlock_sql, [session_id])
+        lock_keys
+        |> Enum.reverse()
+        |> Enum.each(fn key ->
+          Ecto.Adapters.SQL.query!(Repo, @ownership_unlock_sql, [key])
+        end)
       end
     end)
   end
@@ -223,7 +261,7 @@ defmodule Kodo.Sessions do
           else: await_stale_coordinator(pid, session_id)
 
       :error ->
-        start_active_session(session_id)
+        place_active_session(session_id)
     end
   end
 
@@ -238,7 +276,7 @@ defmodule Kodo.Sessions do
     ref = Process.monitor(pid)
 
     receive do
-      {:DOWN, ^ref, :process, ^pid, _reason} -> start_active_session(session_id)
+      {:DOWN, ^ref, :process, ^pid, _reason} -> place_active_session(session_id)
     after
       @stale_coordinator_shutdown_timeout ->
         Process.demonitor(ref, [:flush])
@@ -369,14 +407,60 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp start_active_session(session_id) do
+  @doc false
+  def start_active_session_here(session_id, expected_boot_id) do
     case DynamicSupervisor.start_child(
            Kodo.SessionSupervisor,
-           {Kodo.Sessions.ActiveSession, session_id}
+           {Kodo.Sessions.ActiveSession, {session_id, expected_boot_id}}
          ) do
       {:error, {:already_started, pid}} -> {:ok, pid}
       result -> result
     end
+  end
+
+  defp place_active_session(session_id, attempts \\ @placement_attempts)
+
+  defp place_active_session(_session_id, 0), do: {:error, :placement_conflict}
+
+  defp place_active_session(session_id, attempts) do
+    case Process.whereis(InstanceManager) do
+      pid when is_pid(pid) ->
+        with {:ok, instance, target_node} <-
+               Placement.select(session_id, @ownership_stale_after_seconds) do
+          target_node
+          |> start_active_session_on(session_id, instance.boot_id)
+          |> reconcile_placement(session_id, attempts)
+        end
+
+      nil ->
+        if instance_manager_enabled?(),
+          do: {:error, :coordinator_unavailable},
+          else: start_active_session_here(session_id, nil)
+    end
+  end
+
+  defp reconcile_placement({:error, reason}, session_id, attempts)
+       when reason in [:instance_at_capacity, :session_owned, :target_boot_mismatch] do
+    place_active_session(session_id, attempts - 1)
+  end
+
+  defp reconcile_placement(result, _session_id, _attempts), do: result
+
+  defp start_active_session_on(target_node, session_id, expected_boot_id)
+       when target_node == node() do
+    start_active_session_here(session_id, expected_boot_id)
+  end
+
+  defp start_active_session_on(target_node, session_id, expected_boot_id) do
+    :erpc.call(target_node, __MODULE__, :start_active_session_here, [session_id, expected_boot_id])
+  catch
+    _kind, _reason -> {:error, :coordinator_unavailable}
+  end
+
+  defp instance_manager_enabled? do
+    :kodo
+    |> Application.fetch_env!(InstanceManager)
+    |> Keyword.fetch!(:enabled)
   end
 
   def create_session(%Scope{} = scope, attrs) do

@@ -9,14 +9,14 @@ defmodule Kodo.Sessions.ActiveSession do
   alias Kodo.Sessions
   alias Kodo.Sessions.Projection
 
-  def start_link(session_id) do
-    GenServer.start_link(__MODULE__, session_id, name: via(session_id))
+  def start_link({session_id, expected_boot_id}) do
+    GenServer.start_link(__MODULE__, {session_id, expected_boot_id}, name: via(session_id))
   end
 
-  def child_spec(session_id) do
+  def child_spec({session_id, _expected_boot_id} = init_arg) do
     %{
       id: {__MODULE__, session_id},
-      start: {__MODULE__, :start_link, [session_id]},
+      start: {__MODULE__, :start_link, [init_arg]},
       restart: :transient
     }
   end
@@ -29,12 +29,12 @@ defmodule Kodo.Sessions.ActiveSession do
   def cancel(pid), do: GenServer.call(pid, :cancel)
 
   @impl true
-  def init(session_id) do
+  def init({session_id, expected_boot_id}) do
     Process.flag(:trap_exit, true)
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session_id}")
-    {boot_id, instance_manager_ref} = monitor_instance_manager()
 
-    with {:ok, ownership} <- Sessions.claim_ownership(session_id, boot_id),
+    with {:ok, boot_id, instance_manager_ref} <- monitor_instance_manager(expected_boot_id),
+         {:ok, ownership} <- Sessions.claim_ownership(session_id, boot_id),
          :ok <- Discovery.join_session(session_id),
          projection = recover(session_id),
          :ok <- renew_runner_authority(projection.runner_id, ownership) do
@@ -48,6 +48,8 @@ defmodule Kodo.Sessions.ActiveSession do
          ownership: ownership,
          instance_manager_ref: instance_manager_ref
        }}
+    else
+      {:error, reason} -> {:stop, reason}
     end
   end
 
@@ -211,15 +213,21 @@ defmodule Kodo.Sessions.ActiveSession do
     %{state | task: nil}
   end
 
-  defp monitor_instance_manager do
-    case Process.whereis(InstanceManager) do
-      nil ->
-        {nil, nil}
+  defp monitor_instance_manager(nil) do
+    if Process.whereis(InstanceManager),
+      do: {:error, :target_boot_mismatch},
+      else: {:ok, nil, nil}
+  end
 
-      pid ->
-        ref = Process.monitor(pid)
-        {InstanceManager.current_boot_id(pid), ref}
+  defp monitor_instance_manager(expected_boot_id) do
+    with pid when is_pid(pid) <- Process.whereis(InstanceManager),
+         ^expected_boot_id <- InstanceManager.current_boot_id(pid) do
+      {:ok, expected_boot_id, Process.monitor(pid)}
+    else
+      _mismatch -> {:error, :target_boot_mismatch}
     end
+  catch
+    :exit, _reason -> {:error, :coordinator_unavailable}
   end
 
   defp schedule_authority_check(%{owner_boot_id: nil}), do: :ok
