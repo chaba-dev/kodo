@@ -737,7 +737,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
   compatible artifact.
 - [ ] Add BEAM-distributed tests for competing claims, stale epochs, graceful
   drain, node loss, mixed revisions, forward rollout, and rollback.
-- [ ] Document BEAM clustering and Kubernetes metadata, rolling-update,
+- [X] Document BEAM clustering and Kubernetes metadata, rolling-update,
   readiness, and termination-grace requirements without requiring an operator.
 - [ ] Exit criterion: with at least two Phoenix nodes, an active session moves
   from a draining revision to the preferred compatible revision without

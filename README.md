@@ -42,15 +42,14 @@ revision with that credential.
 
 ## Deployment boundary
 
-The MVP supports exactly one Phoenix application node/replica. PostgreSQL makes active sessions
-recoverable after that node restarts, but it does not yet provide a distributed coordinator lease;
-running multiple Phoenix replicas could execute one session concurrently. Keep the Phoenix replica
-count at one until the next planned milestone adds PostgreSQL ownership epochs, global BEAM process
-discovery, and revision-aware proactive deploy handoff.
+Kodo supports multiple clustered Phoenix replicas. PostgreSQL ownership epochs fence every durable
+session transition and external effect, while BEAM discovery routes live control and proactively
+rehomes sessions away from a draining replica. Replicas must share PostgreSQL, an Erlang cookie,
+DNS discovery, and compatible protocol capabilities.
 
 Production releases must identify their immutable artifact and ordered deployment generation. See
 the [server operations guide](docs/operations.org) for required values, rollback semantics, startup
-failure behavior, and the current clustering boundary.
+failure behavior, BEAM networking, and Kubernetes rollout requirements.
 
 The live test can also be run locally:
 
