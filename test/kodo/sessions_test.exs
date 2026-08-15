@@ -91,6 +91,24 @@ defmodule Kodo.SessionsTest do
     assert runner_id == runner.id
   end
 
+  test "tracks event activity on the session index", %{runner: runner, scope: scope} do
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Activity",
+        model: "test:model"
+      })
+
+    old_activity = DateTime.add(DateTime.utc_now(), -60, :second)
+    session |> Ecto.Changeset.change(updated_at: old_activity) |> Repo.update!()
+
+    assert {:ok, _event} =
+             Sessions.append_event(session.id, "assistant_message_started", %{})
+
+    [listed] = Sessions.list_sessions(scope)
+    assert DateTime.after?(listed.updated_at, old_activity)
+  end
+
   test "rejects a session without an owning user", %{runner: runner} do
     changeset =
       Session.create_changeset(%Session{}, %{

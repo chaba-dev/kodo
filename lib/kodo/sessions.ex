@@ -23,6 +23,7 @@ defmodule Kodo.Sessions do
   @stale_coordinator_shutdown_timeout 5_000
   @ownership_lock_sql "SELECT pg_advisory_lock(hashtextextended($1, 0))"
   @ownership_unlock_sql "SELECT pg_advisory_unlock(hashtextextended($1, 0))"
+  @session_index_topic "session_index"
 
   @ownership_stale_after_seconds Keyword.fetch!(
                                    Application.compile_env!(
@@ -55,6 +56,8 @@ defmodule Kodo.Sessions do
     |> preload(:runner)
     |> Repo.all()
   end
+
+  def subscribe_index, do: Phoenix.PubSub.subscribe(Kodo.PubSub, @session_index_topic)
 
   def list_active_sessions do
     Session
@@ -1075,7 +1078,10 @@ defmodule Kodo.Sessions do
          {@single_updated_row, nil} <-
            Session
            |> where([record], record.id == ^session.id)
-           |> Repo.update_all(inc: [next_event_sequence: @single_event_increment]) do
+           |> Repo.update_all(
+             inc: [next_event_sequence: @single_event_increment],
+             set: [updated_at: DateTime.utc_now()]
+           ) do
       {:ok, event}
     end
   end
@@ -1086,5 +1092,7 @@ defmodule Kodo.Sessions do
       "session:#{event.session_id}",
       {:session_event, event}
     )
+
+    Phoenix.PubSub.broadcast(Kodo.PubSub, @session_index_topic, :session_index_changed)
   end
 end

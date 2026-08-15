@@ -74,10 +74,10 @@ defmodule KodoWeb.Router do
   scope "/", KodoWeb do
     pipe_through [:browser, :require_authenticated_user]
 
-    get "/sessions/:id", PageController, :session_handoff
-
     live_session :require_authenticated_user,
       on_mount: [{KodoWeb.UserAuth, :require_authenticated}] do
+      live "/sessions", SessionLive.Index, :index
+      live "/sessions/:id", SessionLive.Show, :show
       live "/users/settings", UserLive.Settings, :edit
       live "/users/settings/confirm-email/:token", UserLive.Settings, :confirm_email
     end
