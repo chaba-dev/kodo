@@ -744,14 +744,14 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
   waiting for heartbeat expiry, losing durable progress, or duplicating a tool
   mutation; the same scenario passes in reverse under an explicit rollback.
 
-** TODO Milestone 5: LiveView frontend
+** DONE Milestone 5: LiveView frontend
 
-- [ ] Session list and session detail pages.
-- [ ] Live messages, tool events, and command output.
-- [ ] Composer, stop control, and approvals.
-- [ ] Changed-file list and diff viewer.
-- [ ] Runner connection status.
-- [ ] Exit criterion: CLI and browser can observe and control the same active
+- [X] Session list and session detail pages.
+- [X] Live messages, tool events, and command output.
+- [X] Composer, stop control, and approvals.
+- [X] Changed-file list and diff viewer.
+- [X] Runner connection status.
+- [X] Exit criterion: CLI and browser can observe and control the same active
   session, and either can disconnect without terminating it.
 
 ** TODO Milestone 6: Roles and recommended mapping
