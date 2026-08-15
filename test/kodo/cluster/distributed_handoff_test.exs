@@ -1,0 +1,267 @@
+defmodule Kodo.Cluster.DistributedHandoffTest do
+  use ExUnit.Case, async: false
+
+  alias Kodo.Accounts.Scope
+  alias Kodo.Cluster.Discovery
+  alias Kodo.Cluster.InstanceManager
+  alias Kodo.Cluster.Placement
+  alias Kodo.Repo
+  alias Kodo.Runners
+  alias Kodo.Sessions
+
+  import Kodo.AccountsFixtures
+
+  @capabilities [
+    "session-events-v1",
+    "session-ownership-v1",
+    "session-placement-v1",
+    "session-rehoming-v1"
+  ]
+
+  setup do
+    ensure_distributed_node!()
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, :auto)
+    previous_adapter = Application.get_env(:kodo, :llm_adapter)
+    previous_test_pid = Application.get_env(:kodo, :fake_llm_test_pid)
+    Application.put_env(:kodo, :llm_adapter, Kodo.Test.FakeLLM)
+    Application.put_env(:kodo, :fake_llm_test_pid, self())
+
+    on_exit(fn ->
+      Ecto.Adapters.SQL.Sandbox.mode(Repo, :manual)
+      restore_env(:llm_adapter, previous_adapter)
+      restore_env(:fake_llm_test_pid, previous_test_pid)
+    end)
+
+    :ok
+  end
+
+  test "two BEAM nodes fence competing claims and hand a session forward and back" do
+    {:ok, peer, peer_node} = :peer.start_link(%{name: :kodo_handoff_peer})
+    :ok = :erpc.call(peer_node, :code, :add_paths, [:code.get_path()])
+
+    source_manager = start_instance_manager!("old-artifact", 10)
+    source = InstanceManager.current_instance(source_manager)
+    remote_supervisor = start_remote_control_plane!(peer_node, "current-artifact", 11)
+    target = :erpc.call(peer_node, InstanceManager, :current_instance, [])
+
+    on_exit(fn ->
+      stop_peer(peer)
+      cleanup_cluster_rows()
+    end)
+
+    assert_competing_claims_are_fenced(source, target, peer_node)
+
+    user = user_fixture()
+    scope = Scope.for_user(user)
+
+    {:ok, runner} =
+      Runners.register(scope, %{
+        workspace_root: "/work/#{Ecto.UUID.generate()}",
+        platform: "linux",
+        architecture: "x86_64",
+        runner_version: "0.1.0",
+        protocol_version: 4,
+        capabilities: []
+      })
+
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Distributed handoff",
+        model: "test:model",
+        approval_policy: "safe"
+      })
+
+    :ok = Discovery.join_runner(runner.id)
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
+    assert {:ok, _ownership} = Sessions.claim_ownership(session.id, source.boot_id)
+
+    assert :ok = Sessions.start_turn(session.id, "forward")
+    first_approval = receive_approval_id()
+
+    assert {:ok, draining_source} = InstanceManager.begin_drain(source_manager)
+    assert draining_source.boot_id == source.boot_id
+    assert Sessions.get_session!(session.id).owner_boot_id == target.boot_id
+    assert {:ok, remote_pid} = Discovery.session(session.id)
+    assert node(remote_pid) == peer_node
+
+    complete_approved_tool(scope, session, runner, first_approval)
+
+    assert :ok = stop_supervised(InstanceManager)
+    rollback_manager = start_instance_manager!("old-artifact", 10)
+    rollback_target = InstanceManager.current_instance(rollback_manager)
+
+    assert {:ok, _override} =
+             Placement.create_rollback_override(scope, %{
+               "artifact_revision" => "old-artifact",
+               "reason" => "Distributed rollback test",
+               "expires_in_seconds" => 300
+             })
+
+    assert :ok = Sessions.start_turn(session.id, "rollback")
+    second_approval = receive_approval_id()
+
+    assert {:ok, draining_target} =
+             :erpc.call(peer_node, InstanceManager, :begin_drain, [])
+
+    assert draining_target.boot_id == target.boot_id
+    assert Sessions.get_session!(session.id).owner_boot_id == rollback_target.boot_id
+    assert {:ok, local_pid} = Discovery.session(session.id)
+    assert node(local_pid) == node()
+
+    complete_approved_tool(scope, session, runner, second_approval)
+
+    events = Sessions.events_after(session.id)
+    assert Enum.count(events, &(&1.type == "approval_requested")) == 2
+    assert Enum.count(events, &(&1.type == "tool_requested")) == 2
+    assert Enum.count(events, &(&1.type == "tool_completed")) == 2
+
+    assert :ok = :erpc.call(peer_node, Supervisor, :stop, [remote_supervisor])
+    :ok = Discovery.subscribe()
+    assert :ok = :peer.stop(peer)
+    assert_receive {:cluster_node, :down, ^peer_node, _info}, 5_000
+  end
+
+  defp assert_competing_claims_are_fenced(source, target, peer_node) do
+    user = user_fixture()
+    scope = Scope.for_user(user)
+
+    {:ok, runner} =
+      Runners.register(scope, %{
+        workspace_root: "/work/#{Ecto.UUID.generate()}",
+        platform: "linux",
+        architecture: "x86_64",
+        runner_version: "0.1.0",
+        protocol_version: 4,
+        capabilities: []
+      })
+
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Competing distributed claims",
+        model: "test:model"
+      })
+
+    local_claim = Task.async(fn -> Sessions.claim_ownership(session.id, source.boot_id) end)
+
+    remote_claim =
+      Task.async(fn ->
+        :erpc.call(peer_node, Sessions, :claim_ownership, [session.id, target.boot_id])
+      end)
+
+    results = Task.await_many([local_claim, remote_claim], :infinity)
+    assert Enum.count(results, &match?({:ok, %Kodo.Sessions.Ownership{}}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :session_owned})) == 1
+
+    {:ok, winning_ownership} = Enum.find(results, &match?({:ok, _ownership}, &1))
+    replacement = if winning_ownership.owner_boot_id == source.boot_id, do: target, else: source
+    {:ok, new_ownership} = Sessions.transfer_ownership(winning_ownership, replacement.boot_id)
+
+    assert {:error, :stale_ownership} =
+             Sessions.append_event(session.id, "user_message", %{"content" => "stale"},
+               ownership: winning_ownership
+             )
+
+    assert new_ownership.epoch > winning_ownership.epoch
+  end
+
+  defp complete_approved_tool(scope, session, runner, approval_id) do
+    assert {:ok, {_resolved, _status}} =
+             Sessions.resolve_approval(scope, session.id, approval_id, "approved")
+
+    assert_receive {:tool_request, request}, 5_000
+
+    Phoenix.PubSub.broadcast(
+      Kodo.PubSub,
+      "runner_responses:#{runner.id}",
+      {:runner_tool_response, runner.id,
+       %{
+         "protocol_version" => 4,
+         "request_id" => request["request_id"],
+         "status" => "success",
+         "response" => %{"result" => "files_changed", "paths" => []}
+       }}
+    )
+
+    assert_receive {:session_event,
+                    %{type: "session_status_changed", payload: %{"status" => "completed"}}},
+                   5_000
+  end
+
+  defp receive_approval_id do
+    assert_receive {:session_event,
+                    %{type: "approval_requested", payload: %{"approval_id" => approval_id}}},
+                   5_000
+
+    approval_id
+  end
+
+  defp start_remote_control_plane!(peer_node, revision, generation) do
+    repo_config =
+      Repo.config()
+      |> Keyword.delete(:pool)
+      |> Keyword.delete(:ownership_timeout)
+
+    options = instance_options(revision, generation, Atom.to_string(peer_node))
+    agent_budgets = Application.fetch_env!(:kodo, :agent_budgets)
+
+    {:ok, supervisor} =
+      :erpc.call(peer_node, Kodo.Test.ClusterPeer, :start, [
+        repo_config,
+        options,
+        agent_budgets,
+        self()
+      ])
+
+    supervisor
+  end
+
+  defp start_instance_manager!(revision, generation) do
+    start_supervised!(
+      {InstanceManager, instance_options(revision, generation, Atom.to_string(node()))}
+    )
+  end
+
+  defp instance_options(revision, generation, node_name) do
+    [
+      enabled: true,
+      boot_id: Ecto.UUID.generate(),
+      node_name: node_name,
+      artifact_revision: revision,
+      deployment_generation: generation,
+      capacity: 10,
+      protocol_capabilities: @capabilities,
+      heartbeat_interval: :infinity,
+      drain_timeout: 5_000
+    ]
+  end
+
+  defp cleanup_cluster_rows do
+    Repo.delete_all(Kodo.Cluster.PlacementOverride)
+    Repo.delete_all(Kodo.Sessions.Event)
+    Repo.delete_all(Kodo.Sessions.Session)
+    Repo.delete_all(Kodo.Runners.Runner)
+    Repo.delete_all(Kodo.Cluster.Instance)
+    Repo.delete_all(Kodo.Accounts.UserToken)
+    Repo.delete_all(Kodo.Accounts.User)
+  end
+
+  defp ensure_distributed_node! do
+    if node() == :nonode@nohost do
+      {_output, 0} = System.cmd("epmd", ["-daemon"])
+      {:ok, _pid} = :net_kernel.start([:kodo_distributed_handoff_test, :shortnames])
+    end
+  end
+
+  defp stop_peer(peer) do
+    try do
+      :peer.stop(peer)
+    catch
+      :exit, _reason -> :ok
+    end
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:kodo, key)
+  defp restore_env(key, value), do: Application.put_env(:kodo, key, value)
+end

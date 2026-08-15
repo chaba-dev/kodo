@@ -716,7 +716,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 - [X] Exit criterion: a developer can complete the core workflow without
   opening the browser.
 
-** TODO Milestone 4: Clustered ownership and deploy handoff
+** DONE Milestone 4: Clustered ownership and deploy handoff
 
 - [X] Register BEAM instances with boot incarnation, artifact revision,
   deployment generation, readiness, draining state, capacity, and protocol
@@ -735,11 +735,11 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 - [X] Prefer the current deployment generation during forward rollouts and
   support an authenticated, audited, expiring rollback override to an older
   compatible artifact.
-- [ ] Add BEAM-distributed tests for competing claims, stale epochs, graceful
+- [X] Add BEAM-distributed tests for competing claims, stale epochs, graceful
   drain, node loss, mixed revisions, forward rollout, and rollback.
 - [X] Document BEAM clustering and Kubernetes metadata, rolling-update,
   readiness, and termination-grace requirements without requiring an operator.
-- [ ] Exit criterion: with at least two Phoenix nodes, an active session moves
+- [X] Exit criterion: with at least two Phoenix nodes, an active session moves
   from a draining revision to the preferred compatible revision without
   waiting for heartbeat expiry, losing durable progress, or duplicating a tool
   mutation; the same scenario passes in reverse under an explicit rollback.
