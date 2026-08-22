@@ -754,7 +754,22 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 - [X] Exit criterion: CLI and browser can observe and control the same active
   session, and either can disconnect without terminating it.
 
-** TODO Milestone 6: Roles and recommended mapping
+** TODO Milestone 6: Bound control-plane database load
+
+- [ ] Stop terminal session coordinators after finalization and lazily restart
+  them when a follow-up turn arrives.
+- [ ] Add a partial index for sessions in ~running~ or ~awaiting_approval~ state
+  so recovery does not scan historical terminal sessions.
+- [ ] Replace fixed per-replica recovery scans with configurable,
+  cluster-coordinated recovery that preserves the ownership-failure detection
+  bound.
+- [ ] Add load-focused tests and operational metrics for heartbeat, recovery,
+  and ownership-fencing query rates.
+- [ ] Exit criterion: database work remains bounded by live replicas and active
+  sessions, not by historical sessions or completed coordinators, while failed
+  owners are still recovered within the documented availability bound.
+
+** TODO Milestone 7: Roles and recommended mapping
 
 - [ ] Versioned primary, search, and review contracts.
 - [ ] The versioned ~balanced~ profile.
@@ -765,7 +780,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 - [ ] Exit criterion: a user can override one role while inheriting all other
   recommendations, and the default mapping has recorded evaluation results.
 
-** TODO Milestone 7: Reliability and release candidate
+** TODO Milestone 8: Reliability and release candidate
 
 - [X] Runner reconnect and temporary-disconnection behavior.
 - [X] Phoenix session-process restart recovery.
