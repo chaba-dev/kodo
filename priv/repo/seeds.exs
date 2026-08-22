@@ -4,7 +4,8 @@ if Mix.env() == :dev do
   alias Kodo.Repo
 
   email = "dev@kodo.local"
-  password = "hello world!"
+  password = "supersecure!"
+  legacy_password = "hello world!"
 
   user =
     case Accounts.get_user_by_email(email) do
@@ -25,7 +26,7 @@ if Mix.env() == :dev do
       |> Repo.update!()
     end
 
-  if is_nil(user.hashed_password) do
+  if is_nil(user.hashed_password) or User.valid_password?(user, legacy_password) do
     {:ok, {_user, _expired_tokens}} =
       Accounts.update_user_password(user, %{password: password})
   end

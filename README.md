@@ -69,7 +69,7 @@ Start the supervised development server and print its portal URL with:
 amp orb services ensure
 ```
 
-Log in with the development-only account `dev@kodo.local` and password `hello world!`. To run an
+Log in with the development-only account `dev@kodo.local` and password `supersecure!`. To run an
 agent against the target repository, issue an agent token with `POST /api/auth/token`, then run:
 
 ```sh

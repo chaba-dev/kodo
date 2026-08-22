@@ -15,7 +15,7 @@ This is a web application written using the Phoenix web framework.
 - Run `amp orb services ensure` to start the supervised Phoenix server and obtain its portal URL. Never persist or guess a thread-specific portal URL
 - Use the ignored `tmp/kodo-work` clone as the target repository for Kodo agent sessions. Preserve its working changes and do not pull, reset, or recreate it unless the user asks
 - Fresh orb setup clones `https://github.com/chaba-dev/kodo-work` when the target is absent. To request a clean target, remove `tmp/kodo-work` and rerun `.agents/setup`
-- Development setup seeds the confirmed account `dev@kodo.local` with password `hello world!`; use it for browser and agent-token verification instead of asking the user to register
+- Development setup seeds the confirmed account `dev@kodo.local` with password `supersecure!`; use it for browser and agent-token verification instead of asking the user to register
 - Authenticated session pages remain in the existing `:require_authenticated_user` LiveView session because sessions are user-owned
 
 ### Phoenix v1.8 guidelines
