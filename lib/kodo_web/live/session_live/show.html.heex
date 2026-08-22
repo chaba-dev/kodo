@@ -10,25 +10,25 @@
     id="session-detail"
     class="min-h-[calc(100vh-4rem)] bg-white dark:bg-zinc-900 lg:min-h-screen"
   >
-    <header class="flex min-h-16 flex-col gap-3 border-b border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900 sm:px-5 lg:flex-row lg:items-center lg:justify-between">
-      <div class="min-w-0">
-        <h1 class="truncate text-sm font-semibold tracking-tight text-zinc-950 dark:text-white">
-          {@session.title}
-        </h1>
-        <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.7rem] text-zinc-500 dark:text-zinc-400">
-          <span class="font-semibold text-zinc-700 dark:text-zinc-300">
-            {repository_name(@runner)}
-          </span>
-          <span class="font-mono">{@session.model}</span>
-          <span>{@session.approval_policy} approvals</span>
-        </div>
-      </div>
-
-      <div class="flex flex-wrap items-center gap-3">
+    <header class="grid border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 lg:h-14 lg:grid-cols-[minmax(0,1fr)_minmax(30rem,38vw)]">
+      <div class="flex min-w-0 flex-col gap-3 px-4 py-3 sm:px-5 lg:flex-row lg:items-center lg:justify-between lg:border-r lg:border-zinc-200 lg:py-0 dark:lg:border-zinc-800">
         <div class="min-w-0">
+          <h1 class="truncate text-sm font-semibold tracking-tight text-zinc-950 dark:text-white">
+            {@session.title}
+          </h1>
+          <div class="mt-0.5 flex flex-wrap items-center gap-x-3 text-[0.65rem] text-zinc-500 dark:text-zinc-400">
+            <span class="font-semibold text-zinc-700 dark:text-zinc-300">
+              {repository_name(@runner)}
+            </span>
+            <span class="font-mono">{@session.model}</span>
+            <span>{@session.approval_policy} approvals</span>
+          </div>
+        </div>
+
+        <div class="flex shrink-0 flex-wrap items-center gap-2">
           <div
             id="runner-status"
-            class="flex items-center gap-2 rounded-lg border border-zinc-200 px-2.5 py-1.5 text-xs font-medium text-zinc-600 dark:border-zinc-700 dark:text-zinc-300"
+            class="flex items-center gap-2 text-xs font-medium text-zinc-500 dark:text-zinc-400"
           >
             <span class={[
               "size-2 rounded-full",
@@ -36,27 +36,37 @@
             ]}></span>
             Runner {if @runner_online?, do: "online", else: "offline"}
           </div>
+          <span
+            id="session-status"
+            class="rounded-md bg-zinc-100 px-2 py-1 text-[0.7rem] font-semibold capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+          >
+            {String.replace(@projection.status, "_", " ")}
+          </span>
+          <button
+            :if={@projection.status in ["running", "awaiting_approval"]}
+            id="stop-session"
+            type="button"
+            phx-click="cancel"
+            data-confirm="Stop this session? The durable transcript will be preserved."
+            class="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold text-rose-700 transition hover:bg-rose-50 phx-click-loading:opacity-60 dark:text-rose-300 dark:hover:bg-rose-500/10"
+          >
+            <.icon name="hero-stop-solid" class="size-3.5" /> Stop
+          </button>
         </div>
+      </div>
+      <div class="flex items-center justify-between px-5 py-3 lg:py-0">
+        <h2 class="text-sm font-semibold text-zinc-900 dark:text-white">Changes</h2>
         <span
-          id="session-status"
-          class="rounded-lg bg-zinc-100 px-2.5 py-1.5 text-xs font-semibold capitalize text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+          id="changed-file-count"
+          title={if(@diff.truncated?, do: "At least this many changed files", else: nil)}
+          class="text-xs font-medium text-zinc-500 dark:text-zinc-400"
         >
-          {String.replace(@projection.status, "_", " ")}
+          {changed_file_count(@diff)} files
         </span>
-        <button
-          :if={@projection.status in ["running", "awaiting_approval"]}
-          id="stop-session"
-          type="button"
-          phx-click="cancel"
-          data-confirm="Stop this session? The durable transcript will be preserved."
-          class="inline-flex items-center gap-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 phx-click-loading:opacity-60 dark:bg-rose-500/10 dark:text-rose-300 dark:hover:bg-rose-500/20"
-        >
-          <.icon name="hero-stop-solid" class="size-3.5" /> Stop
-        </button>
       </div>
     </header>
 
-    <div class="grid items-start lg:h-[calc(100vh-4rem)] lg:grid-cols-[minmax(0,1fr)_24rem] lg:items-stretch">
+    <div class="grid items-start lg:h-[calc(100vh-3.5rem)] lg:grid-cols-[minmax(0,1fr)_minmax(30rem,38vw)] lg:items-stretch">
       <main class="flex min-w-0 flex-col lg:h-full lg:min-h-0 lg:border-r lg:border-zinc-200 dark:lg:border-zinc-800">
         <section
           :if={@pending_approval}
@@ -100,14 +110,10 @@
         </section>
 
         <section class="flex min-h-0 flex-1 flex-col bg-white dark:bg-zinc-900">
-          <div class="border-b border-zinc-100 px-5 py-4 dark:border-zinc-800 sm:px-6">
-            <h2 class="text-sm font-semibold text-zinc-900 dark:text-white">Conversation</h2>
-          </div>
-
           <div
             id="messages"
             phx-update="stream"
-            class="min-h-0 flex-1 space-y-3 overflow-y-auto p-5 sm:p-6"
+            class="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-7 sm:px-8 lg:px-10"
           >
             <div
               id="messages-empty"
@@ -122,14 +128,13 @@
               <article
                 :if={item.kind == :message}
                 class={[
-                  "flex gap-3",
-                  item.value.type == "user_message" && "flex-row-reverse"
+                  "mx-auto flex w-full max-w-4xl gap-3",
+                  item.value.type == "user_message" && "justify-end"
                 ]}
               >
                 <div class={[
-                  "flex size-8 shrink-0 items-center justify-center rounded-xl",
-                  item.value.type == "user_message" &&
-                    "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300",
+                  "flex size-7 shrink-0 items-center justify-center rounded-full",
+                  item.value.type == "user_message" && "hidden",
                   item.value.type != "user_message" &&
                     "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
                 ]}>
@@ -144,11 +149,10 @@
                   />
                 </div>
                 <div class={[
-                  "max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-6",
+                  "max-w-[85%] text-sm leading-6",
                   item.value.type == "user_message" &&
-                    "rounded-tr-sm bg-violet-600 text-white",
-                  item.value.type != "user_message" &&
-                    "rounded-tl-sm bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100"
+                    "rounded-xl bg-[#e8efe2] px-4 py-2.5 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100",
+                  item.value.type != "user_message" && "pt-0.5 text-zinc-800 dark:text-zinc-100"
                 ]}>
                   <p class="whitespace-pre-wrap">{item.value.payload["content"]}</p>
                 </div>
@@ -156,10 +160,10 @@
 
               <details
                 :if={item.kind == :tool}
-                class="group mx-11 rounded-xl border border-zinc-200 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/40"
+                class="group mx-auto w-full max-w-4xl pl-10"
               >
-                <summary class="flex cursor-pointer list-none items-center gap-3 px-3 py-2.5">
-                  <span class="flex size-7 items-center justify-center rounded-lg bg-white text-zinc-500 shadow-sm dark:bg-zinc-800 dark:text-zinc-300">
+                <summary class="flex cursor-pointer list-none items-center gap-2 py-1.5 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">
+                  <span class="flex size-5 items-center justify-center">
                     <.icon name="hero-command-line" class="size-3.5" />
                   </span>
                   <span class="min-w-0 flex-1 truncate font-mono text-xs font-semibold text-zinc-700 dark:text-zinc-200">
@@ -173,7 +177,7 @@
                     class="size-3.5 text-zinc-400 transition group-open:rotate-180"
                   />
                 </summary>
-                <div class="border-t border-zinc-200 p-3 dark:border-zinc-800">
+                <div class="mt-2 border-l border-zinc-200 pl-4 dark:border-zinc-700">
                   <pre
                     :if={tool_output(item.value) != ""}
                     class="max-h-80 overflow-auto whitespace-pre-wrap rounded-lg bg-zinc-950 p-3 text-xs leading-5 text-zinc-200"
@@ -191,22 +195,24 @@
             for={@message_form}
             id="message-form"
             phx-submit="send_message"
-            class="border-t border-zinc-100 p-4 dark:border-zinc-800 sm:p-5"
+            class="bg-white px-5 pb-5 pt-3 dark:bg-zinc-900 sm:px-8"
           >
-            <div class="flex items-end gap-3">
-              <.input
-                field={@message_form[:content]}
-                type="textarea"
-                rows="2"
-                placeholder="Ask Kodo to inspect, change, or verify…"
-                disabled={@projection.status in ["running", "awaiting_approval"]}
-                class="block min-h-12 w-full resize-none rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-violet-400 focus:ring-4 focus:ring-violet-500/10 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-              />
+            <div class="mx-auto flex max-w-4xl items-end gap-2 rounded-2xl border border-zinc-300 bg-white p-2 shadow-sm focus-within:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-950">
+              <div class="min-w-0 flex-1 [&_.fieldset]:mb-0">
+                <.input
+                  field={@message_form[:content]}
+                  type="textarea"
+                  rows="2"
+                  placeholder="Ask Kodo to inspect, change, or verify…"
+                  disabled={@projection.status in ["running", "awaiting_approval"]}
+                  class="block min-h-12 w-full resize-none border-0 bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:ring-0 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-100"
+                />
+              </div>
               <button
                 id="send-message"
                 type="submit"
                 disabled={@projection.status in ["running", "awaiting_approval"]}
-                class="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-violet-600 text-white shadow-lg shadow-violet-600/20 transition hover:-translate-y-0.5 hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-40 phx-submit-loading:translate-y-0"
+                class="flex size-9 shrink-0 items-center justify-center rounded-lg bg-zinc-900 text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
                 aria-label="Send message"
               >
                 <.icon name="hero-arrow-up" class="size-5" />
@@ -218,15 +224,8 @@
 
       <aside class="lg:h-full lg:overflow-auto">
         <section class="overflow-hidden bg-white dark:bg-zinc-900">
-          <div class="flex items-center justify-between border-b border-zinc-100 px-5 py-4 dark:border-zinc-800">
+          <div class="flex items-center justify-between border-b border-zinc-100 px-5 py-3 dark:border-zinc-800">
             <h2 class="text-sm font-semibold text-zinc-900 dark:text-white">Changed files</h2>
-            <span
-              id="changed-file-count"
-              title={if(@diff.truncated?, do: "At least this many changed files", else: nil)}
-              class="rounded-full bg-zinc-100 px-2 py-1 text-[0.65rem] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-            >
-              {changed_file_count(@diff)}
-            </span>
           </div>
           <div
             :if={@diff.truncated?}

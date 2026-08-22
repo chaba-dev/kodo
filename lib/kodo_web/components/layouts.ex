@@ -43,7 +43,7 @@ defmodule KodoWeb.Layouts do
     <div class="min-h-screen bg-[#f4f6ef] text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 lg:flex">
       <aside
         :if={@current_scope}
-        class="flex border-b border-[#dce2d5] bg-[#eef2e9] dark:border-zinc-800 dark:bg-zinc-900 lg:sticky lg:top-0 lg:h-screen lg:w-64 lg:shrink-0 lg:flex-col lg:border-b-0 lg:border-r"
+        class="flex border-b border-[#dce2d5] bg-[#eef2e9] dark:border-zinc-800 dark:bg-zinc-900 lg:sticky lg:top-0 lg:h-screen lg:w-80 lg:shrink-0 lg:flex-col lg:border-b-0 lg:border-r"
       >
         <.link
           navigate={~p"/sessions"}
