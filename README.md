@@ -69,8 +69,8 @@ Start the supervised development server and print its portal URL with:
 amp orb services ensure
 ```
 
-Register a throwaway user at `/users/register`. To run an agent against the target repository,
-issue an agent token with `POST /api/auth/token`, then run:
+Log in with the development-only account `dev@kodo.local` and password `hello world!`. To run an
+agent against the target repository, issue an agent token with `POST /api/auth/token`, then run:
 
 ```sh
 KODO_TOKEN="..." cargo run -p kodo -- start \

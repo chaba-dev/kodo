@@ -4,7 +4,7 @@ services:
     env:
       DATABASE_PORT: "5432"
       PHX_BIND_IP: "0.0.0.0"
-    health: /users/register
+    health: /users/log-in
     portal:
       title: Kodo
-      description: Register a throwaway user to review the development UI.
+      description: Use the seeded development account documented in the README.
