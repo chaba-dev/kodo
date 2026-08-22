@@ -82,6 +82,32 @@ defmodule KodoWeb.SessionLiveTest do
     assert has_element?(view, "#sessions-#{new_session.id}", "Created while watching")
   end
 
+  test "loads older sessions through bounded navigation", %{
+    conn: conn,
+    runner: runner,
+    scope: scope,
+    session: oldest_session
+  } do
+    for number <- 1..50 do
+      {:ok, _session} =
+        Sessions.create_session(scope, %{
+          runner_id: runner.id,
+          title: "Newer session #{number}",
+          model: "test:model"
+        })
+    end
+
+    {:ok, view, _html} = live(conn, ~p"/sessions")
+
+    refute has_element?(view, "#sessions-#{oldest_session.id}")
+    assert has_element?(view, "#load-more-sessions")
+
+    view |> element("#load-more-sessions") |> render_click()
+
+    assert has_element?(view, "#sessions-#{oldest_session.id}")
+    refute has_element?(view, "#load-more-sessions")
+  end
+
   test "does not expose another user's session", %{conn: conn} do
     other_scope = user_scope_fixture()
 

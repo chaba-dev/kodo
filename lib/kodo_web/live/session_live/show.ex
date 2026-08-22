@@ -104,41 +104,45 @@ defmodule KodoWeb.SessionLive.Show do
         %{"before-updated-at" => updated_at, "before-id" => id},
         socket
       ) do
-    with {:ok, updated_at, _offset} <- DateTime.from_iso8601(updated_at) do
-      {sessions, cursor} =
-        Sessions.list_sessions_page(socket.assigns.current_scope,
-          before: %{updated_at: updated_at, id: id}
-        )
+    case DateTime.from_iso8601(updated_at) do
+      {:ok, updated_at, _offset} ->
+        {sessions, cursor} =
+          Sessions.list_sessions_page(socket.assigns.current_scope,
+            before: %{updated_at: updated_at, id: id}
+          )
 
-      {:noreply,
-       socket
-       |> assign(:sessions_cursor, cursor)
-       |> update(:session_runner_ids, &MapSet.union(&1, runner_ids(sessions)))
-       |> stream(:sessions, sessions, at: -1)}
-    else
-      _invalid_cursor -> {:noreply, socket}
+        {:noreply,
+         socket
+         |> assign(:sessions_cursor, cursor)
+         |> update(:session_runner_ids, &MapSet.union(&1, runner_ids(sessions)))
+         |> stream(:sessions, sessions, at: -1)}
+
+      _invalid_cursor ->
+        {:noreply, socket}
     end
   end
 
   def handle_event("load_older_timeline", %{"before-sequence" => sequence}, socket) do
-    with {sequence, ""} <- Integer.parse(sequence) do
-      page =
-        Sessions.timeline_page(socket.assigns.current_scope, socket.assigns.session.id,
-          before_sequence: sequence
-        )
+    case Integer.parse(sequence) do
+      {sequence, ""} ->
+        page =
+          Sessions.timeline_page(socket.assigns.current_scope, socket.assigns.session.id,
+            before_sequence: sequence
+          )
 
-      projection = %{
-        socket.assigns.projection
-        | tool_calls: Map.merge(socket.assigns.projection.tool_calls, page.tool_calls)
-      }
+        projection = %{
+          socket.assigns.projection
+          | tool_calls: Map.merge(socket.assigns.projection.tool_calls, page.tool_calls)
+        }
 
-      {:noreply,
-       socket
-       |> assign(:projection, projection)
-       |> assign(:timeline_cursor, page.before_sequence)
-       |> stream(:timeline, timeline_items(page.events, projection), at: 0)}
-    else
-      _invalid_cursor -> {:noreply, socket}
+        {:noreply,
+         socket
+         |> assign(:projection, projection)
+         |> assign(:timeline_cursor, page.before_sequence)
+         |> stream(:timeline, timeline_items(page.events, projection), at: 0)}
+
+      _invalid_cursor ->
+        {:noreply, socket}
     end
   end
 

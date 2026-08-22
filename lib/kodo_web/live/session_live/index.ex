@@ -33,19 +33,21 @@ defmodule KodoWeb.SessionLive.Index do
         %{"before-updated-at" => updated_at, "before-id" => id},
         socket
       ) do
-    with {:ok, updated_at, _offset} <- DateTime.from_iso8601(updated_at) do
-      {sessions, cursor} =
-        Sessions.list_sessions_page(socket.assigns.current_scope,
-          before: %{updated_at: updated_at, id: id}
-        )
+    case DateTime.from_iso8601(updated_at) do
+      {:ok, updated_at, _offset} ->
+        {sessions, cursor} =
+          Sessions.list_sessions_page(socket.assigns.current_scope,
+            before: %{updated_at: updated_at, id: id}
+          )
 
-      {:noreply,
-       socket
-       |> assign(:sessions_cursor, cursor)
-       |> update(:session_runner_ids, &MapSet.union(&1, runner_ids(sessions)))
-       |> stream(:sessions, sessions, at: -1)}
-    else
-      _invalid_cursor -> {:noreply, socket}
+        {:noreply,
+         socket
+         |> assign(:sessions_cursor, cursor)
+         |> update(:session_runner_ids, &MapSet.union(&1, runner_ids(sessions)))
+         |> stream(:sessions, sessions, at: -1)}
+
+      _invalid_cursor ->
+        {:noreply, socket}
     end
   end
 
