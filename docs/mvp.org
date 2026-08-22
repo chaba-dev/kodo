@@ -756,6 +756,10 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 
 ** TODO Milestone 6: Bound control-plane database load
 
+The design boundary and acceptance measurements are tracked in
+[[file:../rfd/0001/README.adoc][RFD 1: Bound control-plane database load]]. This milestone remains the MVP
+delivery checklist.
+
 - [ ] Stop terminal session coordinators after finalization and lazily restart
   them when a follow-up turn arrives.
 - [ ] Add a partial index for sessions in ~running~ or ~awaiting_approval~ state

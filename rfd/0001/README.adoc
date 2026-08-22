@@ -1,0 +1,118 @@
+:authors: Darwin D Wu <darwin67@users.noreply.github.com>
+:state: discussion
+:discussion: https://github.com/chaba-dev/kodo/pull/13
+:labels: software, performance, database, operations
+
+= RFD 1 Bound control-plane database load
+
+== Goal
+
+Keep Kodo's control-plane database work bounded by live replicas and active
+sessions while preserving durable execution, ownership fencing, and timely
+recovery after a control-plane failure.
+
+The current MVP correctly favors durable coordination, but its periodic and
+event-driven queries will become disproportionately expensive as completed
+sessions, connected clients, and control-plane replicas increase. This RFD
+defines the scaling boundary before those costs become part of the operational
+contract.
+
+== Current pressure
+
+One control-plane replica periodically heartbeats its instance record and scans
+all sessions in `running` or `awaiting_approval` state for recovery. Active
+session coordinators also perform ownership-fencing checks. Terminal
+coordinators currently remain alive, so coordinator count can grow with session
+history rather than current work.
+
+The browser session index adds another multiplier. Durable session events are
+broadcast on a global topic, and every connected session index or detail view
+responds by querying and preloading its complete user session list. A turn that
+emits many events therefore causes repeated full-list queries for users whose
+session index did not change, including unrelated users.
+
+The heartbeat itself is expected and remains necessary. The problem is the
+combined query amplification: work scales with replicas, retained coordinators,
+event count, connected clients, and unbounded session history rather than with
+the small set of live instances and active sessions that require coordination.
+
+== Required scaling boundary
+
+Kodo must satisfy these properties:
+
+* Heartbeat work is constant per live control-plane replica and does not depend
+  on session count.
+* Recovery discovery reads only active recovery candidates through an
+  appropriate partial index and does not scan historical terminal sessions.
+* Recovery polling is configurable and coordinated across the cluster so every
+  replica does not perform the same unbounded scan, while a failed owner is
+  still detected within the documented availability bound.
+* Terminal session coordinators stop after finalization and restart lazily when
+  a follow-up turn requires one.
+* Session-index notifications are scoped to the owning user and identify the
+  affected session. A connected client updates that row instead of reloading
+  the complete list for every durable event.
+* Bursts of events that do not change index-visible state do not produce one
+  index query per event.
+* Session navigation is bounded and uses stable pagination supported by an
+  index matching its user scope and ordering.
+* Ownership optimization never weakens epoch fencing or permits two
+  coordinators to mutate one session concurrently.
+
+== Recovery and ownership
+
+Recovery candidates remain sessions whose durable status can require a live
+coordinator. PostgreSQL provides the authoritative state; in-memory cluster
+membership may reduce redundant work but must not become the sole source of
+truth.
+
+Only one cluster participant needs to perform a recovery sweep for a given
+interval or partition of candidates. Coordination may use a database lease,
+advisory lock, deterministic partitioning, or an equivalent mechanism, provided
+loss of the elected participant cannot suppress recovery beyond the configured
+bound.
+
+Claims continue to increment and verify the durable ownership epoch. Heartbeat
+freshness and ownership assertions remain database-time based so clock skew
+between nodes cannot create authority.
+
+== Session-index updates
+
+Session index broadcasts use a user-scoped topic and carry the affected session
+identifier. Consumers fetch that session through the authenticated scope and
+use a targeted stream insertion or deletion. The event payload itself does not
+grant access and must never substitute for the scoped query.
+
+Index-visible changes may be emitted only when fields shown or ordered in the
+index change, or coalesced over a short bounded interval. Session detail events
+continue to use the session-specific durable sequence stream and are not routed
+through the index refresh path.
+
+Historical navigation uses keyset pagination with a stable tie-breaker. The
+supporting index begins with `user_id` and matches the selected ordering. The UI
+must not preload runners or sessions outside the visible page.
+
+== Measurement and rollout
+
+Telemetry distinguishes heartbeat, recovery discovery, ownership fencing, and
+session-index refresh queries. Metrics use bounded-cardinality labels; session,
+user, and instance identifiers belong in logs or traces rather than metric
+labels.
+
+Load tests cover increasing completed-session history, active sessions,
+replicas, connected users, and events per turn. They record query counts and
+database time, not only end-to-end latency. The acceptance threshold is a
+constant upper bound per heartbeat and index-visible update, plus work linear in
+the active recovery candidates assigned to a replica. Completed history and
+events that do not alter index-visible state must not increase steady-state
+query rates.
+
+The changes may roll out independently: indexes first, then coordinator
+lifecycle, scoped index updates, and coordinated recovery. Each step retains a
+fallback that preserves correctness even if it temporarily performs redundant
+work.
+
+== Implementation
+
+Progress against this proposal is tracked in the
+link:IMPLEMENTATION.org[RFD 1 implementation checklist].
