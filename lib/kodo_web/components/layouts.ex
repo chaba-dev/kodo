@@ -32,38 +32,95 @@ defmodule KodoWeb.Layouts do
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
 
   attr :content_class, :any, default: "mx-auto max-w-2xl space-y-4"
+  attr :main_class, :any, default: "px-3 py-3 sm:px-5 sm:py-5 lg:px-6"
 
   slot :inner_block, required: true
 
   def app(assigns) do
     ~H"""
-    <header class="flex items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
-      <div class="min-w-0 flex-1">
+    <div class="min-h-screen bg-[#f4f6ef] text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 lg:flex">
+      <aside
+        :if={@current_scope}
+        class="flex border-b border-[#dce2d5] bg-[#eef2e9] dark:border-zinc-800 dark:bg-zinc-900 lg:sticky lg:top-0 lg:h-screen lg:w-64 lg:shrink-0 lg:flex-col lg:border-b-0 lg:border-r"
+      >
         <.link
-          navigate={if(@current_scope, do: ~p"/sessions", else: ~p"/")}
-          class="flex w-fit items-center gap-2"
+          navigate={~p"/sessions"}
+          class="flex shrink-0 items-center gap-2.5 border-r border-[#dce2d5] px-4 py-3.5 dark:border-zinc-800 lg:border-b lg:border-r-0"
         >
-          <img src={~p"/images/logo.svg"} width="36" />
-          <span class="text-sm font-semibold tracking-tight text-zinc-900 dark:text-white">Kodo</span>
+          <span class="flex size-8 items-center justify-center rounded-lg bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900">
+            <.icon name="hero-command-line" class="size-4" />
+          </span>
+          <span class="text-sm font-semibold tracking-tight">Kodo</span>
         </.link>
-      </div>
-      <nav class="flex shrink-0 items-center gap-2" aria-label="Application navigation">
-        <ul class="flex items-center gap-2">
-          <li :if={@current_scope}>
-            <.link navigate={~p"/sessions"} class="btn btn-ghost btn-sm">Sessions</.link>
-          </li>
-          <li>
-            <.theme_toggle />
-          </li>
-        </ul>
-      </nav>
-    </header>
 
-    <main class="px-4 py-10 sm:px-6 lg:px-8">
-      <div class={@content_class}>
-        {render_slot(@inner_block)}
+        <nav
+          class="flex min-w-0 flex-1 items-center gap-1 px-3 py-2 lg:block lg:space-y-1 lg:px-3 lg:py-4"
+          aria-label="Application navigation"
+        >
+          <.link
+            navigate={~p"/sessions"}
+            class="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-white/70 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white"
+          >
+            <.icon name="hero-chat-bubble-left-right" class="size-4 text-zinc-500" />
+            <span>Sessions</span>
+          </.link>
+        </nav>
+
+        <div class="ml-auto flex items-center gap-1 px-3 lg:ml-0 lg:border-t lg:border-[#dce2d5] lg:px-3 lg:py-3 dark:lg:border-zinc-800">
+          <.link
+            navigate={~p"/users/settings"}
+            class="min-w-0 flex-1 rounded-lg px-3 py-2 transition hover:bg-white/70 dark:hover:bg-zinc-800"
+          >
+            <span class="block truncate text-xs font-medium">{@current_scope.user.email}</span>
+            <span class="hidden text-[0.65rem] text-zinc-500 lg:block">Account settings</span>
+          </.link>
+          <div class="shrink-0 scale-75">
+            <.theme_toggle />
+          </div>
+          <.link
+            href={~p"/users/log-out"}
+            method="delete"
+            class="flex size-8 shrink-0 items-center justify-center rounded-lg text-zinc-500 transition hover:bg-white/70 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-white"
+            aria-label="Log out"
+          >
+            <.icon name="hero-arrow-right-start-on-rectangle" class="size-4" />
+          </.link>
+        </div>
+      </aside>
+
+      <div class="min-w-0 flex-1">
+        <header
+          :if={!@current_scope}
+          class="flex items-center justify-between border-b border-[#dce2d5] bg-[#f7f8f4] px-4 py-3 sm:px-6 dark:border-zinc-800 dark:bg-zinc-900"
+        >
+          <.link navigate={~p"/"} class="flex items-center gap-2.5">
+            <img src={~p"/images/logo.svg"} width="32" />
+            <span class="text-sm font-semibold tracking-tight">Kodo</span>
+          </.link>
+          <nav class="flex items-center gap-2" aria-label="Account navigation">
+            <.link
+              href={~p"/users/register"}
+              class="rounded-lg px-3 py-2 text-sm font-medium text-zinc-600 transition hover:bg-white hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-white"
+            >
+              Register
+            </.link>
+            <.link
+              href={~p"/users/log-in"}
+              class="rounded-lg bg-zinc-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
+            >
+              Log in
+            </.link>
+            <div class="hidden sm:block"><.theme_toggle /></div>
+          </nav>
+        </header>
+
+        <main class={@main_class}>
+          <div class={@content_class}>
+            {render_slot(@inner_block)}
+          </div>
+        </main>
       </div>
-    </main>
+    </div>
 
     <.flash_group flash={@flash} />
     """

@@ -1,3 +1,17 @@
+<nav
+  class="relative z-10 flex flex-wrap items-center justify-end gap-x-4 px-4 py-3 text-sm sm:px-6 lg:px-8"
+  aria-label="Account navigation"
+>
+  <%= if @current_scope do %>
+    <span>{@current_scope.user.email}</span>
+    <.link href={~p"/users/settings"}>Settings</.link>
+    <.link href={~p"/users/log-out"} method="delete">Log out</.link>
+  <% else %>
+    <.link href={~p"/users/register"}>Register</.link>
+    <.link href={~p"/users/log-in"}>Log in</.link>
+  <% end %>
+</nav>
+
 <Layouts.flash_group flash={@flash} />
 <div class="left-[40rem] fixed inset-y-0 right-0 z-0 hidden lg:block xl:left-[50rem]">
   <svg
