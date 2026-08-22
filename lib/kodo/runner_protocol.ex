@@ -127,11 +127,15 @@ defmodule Kodo.RunnerProtocol do
           "truncated" => truncated
         } = response
       )
-      when tool in ["poll_command", "stop_command"] and is_list(output) and
-             is_integer(earliest_sequence) and earliest_sequence >= 0 and
-             is_integer(next_sequence) and next_sequence >= 0 and is_boolean(truncated) do
-    if Ecto.UUID.cast(process_id) == {:ok, process_id} and valid_process_status?(status) and
-         Enum.all?(output, &valid_command_output?/1),
+      when is_list(output) do
+    if valid_command_poll_metadata?(
+         tool,
+         process_id,
+         status,
+         earliest_sequence,
+         next_sequence,
+         truncated
+       ) and Enum.all?(output, &valid_command_output?/1),
        do: {:ok, response},
        else: :error
   end
@@ -209,6 +213,20 @@ defmodule Kodo.RunnerProtocol do
     do: is_nil(code) or is_integer(code)
 
   defp valid_process_status?(_status), do: false
+
+  defp valid_command_poll_metadata?(
+         tool,
+         process_id,
+         status,
+         earliest_sequence,
+         next_sequence,
+         truncated
+       ) do
+    tool in ["poll_command", "stop_command"] and
+      Ecto.UUID.cast(process_id) == {:ok, process_id} and valid_process_status?(status) and
+      is_integer(earliest_sequence) and earliest_sequence >= 0 and
+      is_integer(next_sequence) and next_sequence >= 0 and is_boolean(truncated)
+  end
 
   defp valid_command_output?(%{
          "sequence" => sequence,
