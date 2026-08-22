@@ -45,3 +45,4 @@ npm-debug.log
 # Added by cargo
 
 /target
+.env
