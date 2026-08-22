@@ -158,6 +158,52 @@ defmodule Kodo.Agent.LoopTest do
            end)
   end
 
+  test "records malformed successful runner output as a failed tool", %{
+    runner: runner,
+    session: session,
+    ownership: ownership
+  } do
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "Fix it"},
+        ownership: ownership
+      )
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:tool_request, request}
+
+    Phoenix.PubSub.broadcast(
+      Kodo.PubSub,
+      "runner_responses:#{runner.id}",
+      {:runner_tool_response, runner.id,
+       %{
+         "protocol_version" => 4,
+         "request_id" => request["request_id"],
+         "status" => "success",
+         "response" => "invalid"
+       }}
+    )
+
+    assert {:error, :invalid_runner_response} = Task.await(loop)
+
+    assert Enum.any?(Sessions.events_after(session.id), fn event ->
+             event.type == "tool_failed" and
+               event.payload["error"] == ":invalid_runner_response"
+           end)
+  end
+
   test "counts interrupted provider attempts against the durable continuation budget", %{
     session: session,
     ownership: ownership

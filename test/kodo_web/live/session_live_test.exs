@@ -181,6 +181,19 @@ defmodule KodoWeb.SessionLiveTest do
     assert has_element?(view, "#changed-file-count", "1+")
   end
 
+  test "survives malformed durable git diff output", %{conn: conn, session: session} do
+    {:ok, _completed} =
+      Sessions.append_event(session.id, "tool_completed", %{
+        "tool_call_id" => Ecto.UUID.generate(),
+        "name" => "git_diff",
+        "output" => "invalid"
+      })
+
+    assert {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+    assert has_element?(view, "#diff-unavailable-warning")
+    assert has_element?(view, "#session-detail")
+  end
+
   test "replays tool activity in durable event order", %{conn: conn, session: session} do
     {:ok, _first} =
       Sessions.append_event(session.id, "tool_requested", %{

@@ -193,12 +193,19 @@ defmodule KodoWeb.SessionLive.Show do
   end
 
   defp diff_content(payload) do
-    output = payload["output"] || %{}
+    case payload["output"] do
+      %{"content" => content} = output when is_binary(content) ->
+        %{content: content, truncated?: output["truncated"] == true, unavailable?: false}
 
-    %{
-      content: output["content"] || get_in(output, ["response", "diff"]) || "",
-      truncated?: output["truncated"] == true || get_in(output, ["response", "truncated"]) == true
-    }
+      %{"response" => %{"diff" => diff} = response} when is_binary(diff) ->
+        %{content: diff, truncated?: response["truncated"] == true, unavailable?: false}
+
+      nil ->
+        %{content: "", truncated?: false, unavailable?: false}
+
+      _invalid ->
+        %{content: "", truncated?: false, unavailable?: true}
+    end
   end
 
   defp diff_files(diff) do
