@@ -34,6 +34,7 @@ defmodule KodoWeb.Layouts do
   attr :content_class, :any, default: "mx-auto max-w-2xl space-y-4"
   attr :main_class, :any, default: "px-3 py-3 sm:px-5 sm:py-5 lg:px-6"
   attr :session_stream, :any, default: nil
+  attr :sessions_cursor, :map, default: nil
   attr :selected_session_id, :string, default: nil
 
   slot :inner_block, required: true
@@ -110,6 +111,17 @@ defmodule KodoWeb.Layouts do
               <span class="mt-1 block truncate text-xs font-medium">{session.title}</span>
             </.link>
           </div>
+          <button
+            :if={@sessions_cursor}
+            id="load-more-sessions"
+            type="button"
+            phx-click="load_more_sessions"
+            phx-value-before-updated-at={DateTime.to_iso8601(@sessions_cursor.updated_at)}
+            phx-value-before-id={@sessions_cursor.id}
+            class="mt-1 shrink-0 rounded-lg px-3 py-2 text-left text-xs font-medium text-zinc-500 transition hover:bg-white/70 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-white"
+          >
+            Load older sessions
+          </button>
         </nav>
 
         <div class="ml-auto flex items-center gap-1 px-3 lg:ml-0 lg:border-t lg:border-[#dce2d5] lg:px-3 lg:py-3 dark:lg:border-zinc-800">

@@ -23,7 +23,9 @@ defmodule Kodo.Sessions do
   @stale_coordinator_shutdown_timeout 5_000
   @ownership_lock_sql "SELECT pg_advisory_lock(hashtextextended($1, 0))"
   @ownership_unlock_sql "SELECT pg_advisory_unlock(hashtextextended($1, 0))"
-  @session_index_topic "session_index"
+  @session_index_topic_prefix "session_index:"
+  @session_index_event_types ["session_created", "session_status_changed", "session_cancelled"]
+  @default_session_page_size 50
 
   @ownership_stale_after_seconds Keyword.fetch!(
                                    Application.compile_env!(
@@ -57,7 +59,33 @@ defmodule Kodo.Sessions do
     |> Repo.all()
   end
 
-  def subscribe_index, do: Phoenix.PubSub.subscribe(Kodo.PubSub, @session_index_topic)
+  def list_sessions_page(%Scope{user: user}, opts \\ []) do
+    limit = Keyword.get(opts, :limit, @default_session_page_size)
+
+    sessions =
+      Session
+      |> where([session], session.user_id == ^user.id)
+      |> before_cursor(Keyword.get(opts, :before))
+      |> order_by([session], desc: session.updated_at, desc: session.id)
+      |> limit(^(limit + 1))
+      |> preload(:runner)
+      |> Repo.all()
+
+    page = Enum.take(sessions, limit)
+    cursor = if length(sessions) > limit, do: session_cursor(List.last(page))
+    {page, cursor}
+  end
+
+  def get_session_for_index(%Scope{} = scope, session_id) do
+    case get_session(scope, session_id) do
+      nil -> nil
+      session -> Repo.preload(session, :runner)
+    end
+  end
+
+  def subscribe_index(%Scope{user: user}) do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, session_index_topic(user.id))
+  end
 
   def list_active_sessions do
     Session
@@ -1093,6 +1121,32 @@ defmodule Kodo.Sessions do
       {:session_event, event}
     )
 
-    Phoenix.PubSub.broadcast(Kodo.PubSub, @session_index_topic, :session_index_changed)
+    if event.type in @session_index_event_types do
+      user_id =
+        Repo.one(
+          from session in Session, where: session.id == ^event.session_id, select: session.user_id
+        )
+
+      Phoenix.PubSub.broadcast(
+        Kodo.PubSub,
+        session_index_topic(user_id),
+        {:session_index_changed, event.session_id}
+      )
+    end
   end
+
+  defp before_cursor(query, nil), do: query
+
+  defp before_cursor(query, %{updated_at: updated_at, id: id}) do
+    where(
+      query,
+      [session],
+      session.updated_at < ^updated_at or
+        (session.updated_at == ^updated_at and session.id < ^id)
+    )
+  end
+
+  defp session_cursor(nil), do: nil
+  defp session_cursor(session), do: %{updated_at: session.updated_at, id: session.id}
+  defp session_index_topic(user_id), do: @session_index_topic_prefix <> Integer.to_string(user_id)
 end

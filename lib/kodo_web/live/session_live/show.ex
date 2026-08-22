@@ -27,11 +27,13 @@ defmodule KodoWeb.SessionLive.Show do
     if connected?(socket) do
       :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
       :ok = Discovery.subscribe()
-      :ok = Sessions.subscribe_index()
+      :ok = Sessions.subscribe_index(socket.assigns.current_scope)
     end
 
     events = Sessions.events_after(socket.assigns.current_scope, session.id)
     projection = Projection.from_events(events)
+    {sessions, sessions_cursor} = Sessions.list_sessions_page(socket.assigns.current_scope)
+    sessions = include_selected_session(sessions, socket.assigns.current_scope, session.id)
 
     socket =
       socket
@@ -44,7 +46,9 @@ defmodule KodoWeb.SessionLive.Show do
       |> assign(:pending_approval, pending_approval(events, projection.pending_approval_id))
       |> assign(:diff, latest_diff(events))
       |> assign(:message_form, to_form(%{"content" => ""}, as: :message))
-      |> stream(:sessions, Sessions.list_sessions(socket.assigns.current_scope))
+      |> assign(:sessions_cursor, sessions_cursor)
+      |> assign(:session_runner_ids, runner_ids(sessions))
+      |> stream(:sessions, sessions)
       |> stream(:timeline, timeline_items(events, projection))
 
     {:ok, socket}
@@ -81,6 +85,27 @@ defmodule KodoWeb.SessionLive.Show do
     end
   end
 
+  def handle_event(
+        "load_more_sessions",
+        %{"before-updated-at" => updated_at, "before-id" => id},
+        socket
+      ) do
+    with {:ok, updated_at, _offset} <- DateTime.from_iso8601(updated_at) do
+      {sessions, cursor} =
+        Sessions.list_sessions_page(socket.assigns.current_scope,
+          before: %{updated_at: updated_at, id: id}
+        )
+
+      {:noreply,
+       socket
+       |> assign(:sessions_cursor, cursor)
+       |> update(:session_runner_ids, &MapSet.union(&1, runner_ids(sessions)))
+       |> stream(:sessions, sessions, at: -1)}
+    else
+      _invalid_cursor -> {:noreply, socket}
+    end
+  end
+
   def handle_event("resolve_approval", %{"decision" => decision}, socket) do
     approval_id = socket.assigns.projection.pending_approval_id
 
@@ -104,13 +129,17 @@ defmodule KodoWeb.SessionLive.Show do
     end
   end
 
-  def handle_info(:session_index_changed, socket), do: {:noreply, refresh_sessions(socket)}
+  def handle_info({:session_index_changed, session_id}, socket),
+    do: {:noreply, refresh_session(socket, session_id)}
 
   def handle_info(
         {:cluster_membership, _action, :runner, runner_id, _changed, _remaining},
         socket
       ) do
-    socket = refresh_sessions(socket)
+    socket =
+      if MapSet.member?(socket.assigns.session_runner_ids, runner_id),
+        do: refresh_session_page(socket),
+        else: socket
 
     socket =
       if socket.assigns.session.runner_id == runner_id do
@@ -133,8 +162,28 @@ defmodule KodoWeb.SessionLive.Show do
     |> Enum.reduce(socket, &apply_event/2)
   end
 
-  defp refresh_sessions(socket) do
-    stream(socket, :sessions, Sessions.list_sessions(socket.assigns.current_scope), reset: true)
+  defp refresh_session(socket, session_id) do
+    case Sessions.get_session_for_index(socket.assigns.current_scope, session_id) do
+      nil ->
+        socket
+
+      session ->
+        socket
+        |> update(:session_runner_ids, &MapSet.put(&1, session.runner_id))
+        |> stream_insert(:sessions, session, at: 0)
+    end
+  end
+
+  defp refresh_session_page(socket) do
+    {sessions, cursor} = Sessions.list_sessions_page(socket.assigns.current_scope)
+
+    sessions =
+      include_selected_session(sessions, socket.assigns.current_scope, socket.assigns.session.id)
+
+    socket
+    |> assign(:sessions_cursor, cursor)
+    |> assign(:session_runner_ids, runner_ids(sessions))
+    |> stream(:sessions, sessions, reset: true)
   end
 
   defp apply_event(event, socket) do
@@ -249,6 +298,14 @@ defmodule KodoWeb.SessionLive.Show do
 
   defp tool_item(tool),
     do: %{id: "tool-#{tool["tool_call_id"]}", kind: :tool, value: tool}
+
+  defp include_selected_session(sessions, scope, selected_session_id) do
+    if Enum.any?(sessions, &(&1.id == selected_session_id)),
+      do: sessions,
+      else: [Sessions.get_session_for_index(scope, selected_session_id) | sessions]
+  end
+
+  defp runner_ids(sessions), do: sessions |> Enum.map(& &1.runner_id) |> MapSet.new()
 
   defp tool_output(%{"output" => output}), do: format_output(output)
   defp tool_output(%{"error" => error}), do: error
