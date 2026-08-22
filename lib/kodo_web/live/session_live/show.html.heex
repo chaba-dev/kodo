@@ -111,6 +111,17 @@
         </section>
 
         <section class="flex min-h-0 flex-1 flex-col bg-white dark:bg-zinc-900">
+          <div :if={@timeline_cursor} class="px-5 pt-4 text-center sm:px-8">
+            <button
+              id="load-older-events"
+              type="button"
+              phx-click="load_older_timeline"
+              phx-value-before-sequence={@timeline_cursor}
+              class="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-white"
+            >
+              Load older activity
+            </button>
+          </div>
           <div
             id="messages"
             phx-update="stream"

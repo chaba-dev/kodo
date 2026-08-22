@@ -16,7 +16,37 @@ defmodule Kodo.Sessions.Projection do
     tool_calls: %{}
   ]
 
-  def from_events(events), do: Enum.reduce(events, %__MODULE__{}, &apply_event/2)
+  def from_events(events) do
+    projection =
+      Enum.reduce(events, %__MODULE__{}, fn event, projection ->
+        projection =
+          if event.type in ["user_message", "assistant_message_completed"],
+            do: %{projection | messages: []},
+            else: projection
+
+        apply_event(event, projection)
+      end)
+
+    messages =
+      for event <- events,
+          event.type in ["user_message", "assistant_message_completed"],
+          do: %{"role" => event.payload["role"], "content" => event.payload["content"]}
+
+    %{projection | messages: messages}
+  end
+
+  def from_session(session, last_sequence, tool_calls \\ %{}) do
+    %__MODULE__{
+      id: session.id,
+      title: session.title,
+      runner_id: session.runner_id,
+      model: session.model,
+      approval_policy: session.approval_policy,
+      status: session.status,
+      last_sequence: last_sequence,
+      tool_calls: tool_calls
+    }
+  end
 
   def apply_event(event, projection) do
     projection

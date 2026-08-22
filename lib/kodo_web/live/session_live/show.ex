@@ -8,6 +8,7 @@ defmodule KodoWeb.SessionLive.Show do
 
   @message_types ["user_message", "assistant_message_completed"]
   @tool_types ["tool_requested", "tool_started", "tool_completed", "tool_failed"]
+  @timeline_page_size 50
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -30,8 +31,20 @@ defmodule KodoWeb.SessionLive.Show do
       :ok = Sessions.subscribe_index(socket.assigns.current_scope)
     end
 
-    events = Sessions.events_after(socket.assigns.current_scope, session.id)
-    projection = Projection.from_events(events)
+    timeline_page = Sessions.timeline_page(socket.assigns.current_scope, session.id)
+    pending_approval = pending_approval(socket.assigns.current_scope, session)
+
+    projection =
+      Projection.from_session(
+        session,
+        Sessions.latest_event_sequence(socket.assigns.current_scope, session.id),
+        timeline_page.tool_calls
+      )
+      |> Map.put(
+        :pending_approval_id,
+        pending_approval && pending_approval["approval_id"]
+      )
+
     {sessions, sessions_cursor} = Sessions.list_sessions_page(socket.assigns.current_scope)
     sessions = include_selected_session(sessions, socket.assigns.current_scope, session.id)
 
@@ -43,13 +56,14 @@ defmodule KodoWeb.SessionLive.Show do
       |> assign(:runner, Runners.get_runner(session.runner_id))
       |> assign(:runner_online?, Runners.online?(session.runner_id))
       |> assign(:projection, projection)
-      |> assign(:pending_approval, pending_approval(events, projection.pending_approval_id))
-      |> assign(:diff, latest_diff(events))
+      |> assign(:pending_approval, pending_approval)
+      |> assign(:diff, latest_diff(socket.assigns.current_scope, session.id))
+      |> assign(:timeline_cursor, timeline_page.before_sequence)
       |> assign(:message_form, to_form(%{"content" => ""}, as: :message))
       |> assign(:sessions_cursor, sessions_cursor)
       |> assign(:session_runner_ids, runner_ids(sessions))
       |> stream(:sessions, sessions)
-      |> stream(:timeline, timeline_items(events, projection))
+      |> stream(:timeline, timeline_items(timeline_page.events, projection))
 
     {:ok, socket}
   end
@@ -101,6 +115,28 @@ defmodule KodoWeb.SessionLive.Show do
        |> assign(:sessions_cursor, cursor)
        |> update(:session_runner_ids, &MapSet.union(&1, runner_ids(sessions)))
        |> stream(:sessions, sessions, at: -1)}
+    else
+      _invalid_cursor -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("load_older_timeline", %{"before-sequence" => sequence}, socket) do
+    with {sequence, ""} <- Integer.parse(sequence) do
+      page =
+        Sessions.timeline_page(socket.assigns.current_scope, socket.assigns.session.id,
+          before_sequence: sequence
+        )
+
+      projection = %{
+        socket.assigns.projection
+        | tool_calls: Map.merge(socket.assigns.projection.tool_calls, page.tool_calls)
+      }
+
+      {:noreply,
+       socket
+       |> assign(:projection, projection)
+       |> assign(:timeline_cursor, page.before_sequence)
+       |> stream(:timeline, timeline_items(page.events, projection), at: 0)}
     else
       _invalid_cursor -> {:noreply, socket}
     end
@@ -187,7 +223,10 @@ defmodule KodoWeb.SessionLive.Show do
   end
 
   defp apply_event(event, socket) do
-    projection = Projection.apply_event(event, socket.assigns.projection)
+    projection =
+      event
+      |> Projection.apply_event(socket.assigns.projection)
+      |> Map.put(:messages, [])
 
     socket
     |> assign(:projection, projection)
@@ -197,12 +236,15 @@ defmodule KodoWeb.SessionLive.Show do
   end
 
   defp stream_event(socket, %{type: type} = event, _projection) when type in @message_types,
-    do: stream_insert(socket, :timeline, message_item(event))
+    do: stream_insert(socket, :timeline, message_item(event), limit: -@timeline_page_size)
 
   defp stream_event(socket, %{type: type, payload: payload}, projection)
        when type in @tool_types do
     tool = Map.fetch!(projection.tool_calls, payload["tool_call_id"])
-    stream_insert(socket, :timeline, tool_item(tool))
+
+    if type == "tool_requested",
+      do: stream_insert(socket, :timeline, tool_item(tool), limit: -@timeline_page_size),
+      else: stream_insert(socket, :timeline, tool_item(tool))
   end
 
   defp stream_event(socket, _event, _projection), do: socket
@@ -220,22 +262,17 @@ defmodule KodoWeb.SessionLive.Show do
 
   defp update_diff(socket, _event), do: socket
 
-  defp pending_approval(_events, nil), do: nil
+  defp pending_approval(_scope, %{status: status}) when status != "awaiting_approval", do: nil
 
-  defp pending_approval(events, approval_id) do
-    events
-    |> Enum.find(&(&1.type == "approval_requested" and &1.payload["approval_id"] == approval_id))
-    |> case do
+  defp pending_approval(scope, session) do
+    case Sessions.pending_approval_event(scope, session.id) do
       nil -> nil
       event -> event.payload
     end
   end
 
-  defp latest_diff(events) do
-    events
-    |> Enum.reverse()
-    |> Enum.find(&(&1.type == "tool_completed" and &1.payload["name"] == "git_diff"))
-    |> case do
+  defp latest_diff(scope, session_id) do
+    case Sessions.latest_completed_tool_event(scope, session_id, "git_diff") do
       nil -> %{content: "", truncated?: false}
       event -> diff_content(event.payload)
     end

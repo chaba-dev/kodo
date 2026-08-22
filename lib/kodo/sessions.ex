@@ -11,6 +11,7 @@ defmodule Kodo.Sessions do
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
+  alias Kodo.Sessions.Projection
   alias Kodo.Sessions.Session
   alias Kodo.Runners.Runner
 
@@ -26,6 +27,9 @@ defmodule Kodo.Sessions do
   @session_index_topic_prefix "session_index:"
   @session_index_event_types ["session_created", "session_status_changed", "session_cancelled"]
   @default_session_page_size 50
+  @timeline_anchor_types ["user_message", "assistant_message_completed", "tool_requested"]
+  @timeline_tool_types ["tool_requested", "tool_started", "tool_completed", "tool_failed"]
+  @default_timeline_page_size 50
 
   @ownership_stale_after_seconds Keyword.fetch!(
                                    Application.compile_env!(
@@ -85,6 +89,70 @@ defmodule Kodo.Sessions do
 
   def subscribe_index(%Scope{user: user}) do
     Phoenix.PubSub.subscribe(Kodo.PubSub, session_index_topic(user.id))
+  end
+
+  def timeline_page(%Scope{user: user}, session_id, opts \\ []) do
+    limit = Keyword.get(opts, :limit, @default_timeline_page_size)
+
+    anchors =
+      Event
+      |> join(:inner, [event], session in assoc(event, :session))
+      |> where(
+        [event, session],
+        event.session_id == ^session_id and session.user_id == ^user.id and
+          event.type in @timeline_anchor_types
+      )
+      |> before_event_sequence(Keyword.get(opts, :before_sequence))
+      |> order_by([event], desc: event.sequence)
+      |> limit(^(limit + 1))
+      |> Repo.all()
+
+    page = Enum.take(anchors, limit)
+    events = Enum.reverse(page)
+
+    tool_call_ids =
+      for %{type: "tool_requested", payload: %{"tool_call_id" => tool_call_id}} <- events,
+          do: tool_call_id
+
+    tool_calls = visible_tool_calls(user.id, session_id, tool_call_ids)
+    before_sequence = if length(anchors) > limit, do: hd(events).sequence
+
+    %{events: events, tool_calls: tool_calls, before_sequence: before_sequence}
+  end
+
+  def pending_approval_event(%Scope{user: user}, session_id) do
+    Event
+    |> join(:inner, [event], session in assoc(event, :session))
+    |> where(
+      [event, session],
+      event.session_id == ^session_id and session.user_id == ^user.id and
+        event.type == "approval_requested"
+    )
+    |> order_by([event], desc: event.sequence)
+    |> limit(1)
+    |> Repo.one()
+  end
+
+  def latest_completed_tool_event(%Scope{user: user}, session_id, name) do
+    Event
+    |> join(:inner, [event], session in assoc(event, :session))
+    |> where(
+      [event, session],
+      event.session_id == ^session_id and session.user_id == ^user.id and
+        event.type == "tool_completed" and
+        fragment("?->>'name'", event.payload) == ^name
+    )
+    |> order_by([event], desc: event.sequence)
+    |> limit(1)
+    |> Repo.one()
+  end
+
+  def latest_event_sequence(%Scope{user: user}, session_id) do
+    Event
+    |> join(:inner, [event], session in assoc(event, :session))
+    |> where([event, session], event.session_id == ^session_id and session.user_id == ^user.id)
+    |> select([event], coalesce(max(event.sequence), @before_first_event_sequence))
+    |> Repo.one()
   end
 
   def list_active_sessions do
@@ -1149,4 +1217,27 @@ defmodule Kodo.Sessions do
   defp session_cursor(nil), do: nil
   defp session_cursor(session), do: %{updated_at: session.updated_at, id: session.id}
   defp session_index_topic(user_id), do: @session_index_topic_prefix <> Integer.to_string(user_id)
+
+  defp before_event_sequence(query, nil), do: query
+
+  defp before_event_sequence(query, sequence) when is_integer(sequence) do
+    where(query, [event], event.sequence < ^sequence)
+  end
+
+  defp visible_tool_calls(_user_id, _session_id, []), do: %{}
+
+  defp visible_tool_calls(user_id, session_id, tool_call_ids) do
+    Event
+    |> join(:inner, [event], session in assoc(event, :session))
+    |> where(
+      [event, session],
+      event.session_id == ^session_id and session.user_id == ^user_id and
+        event.type in @timeline_tool_types and
+        fragment("?->>'tool_call_id'", event.payload) in ^tool_call_ids
+    )
+    |> order_by([event], asc: event.sequence)
+    |> Repo.all()
+    |> Projection.from_events()
+    |> Map.fetch!(:tool_calls)
+  end
 end

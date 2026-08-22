@@ -228,6 +228,35 @@ defmodule KodoWeb.SessionLiveTest do
     assert has_element?(view, "#tool-first + #message-#{between.id} + #tool-second")
   end
 
+  test "bounds initial transcript replay and loads older durable events", %{
+    conn: conn,
+    session: session
+  } do
+    events =
+      for number <- 1..55 do
+        {:ok, event} =
+          Sessions.append_event(session.id, "user_message", %{
+            "role" => "user",
+            "content" => "Message #{number}"
+          })
+
+        event
+      end
+
+    oldest = hd(events)
+    newest = List.last(events)
+    {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+    assert has_element?(view, "#message-#{newest.id}")
+    refute has_element?(view, "#message-#{oldest.id}")
+    assert has_element?(view, "#load-older-events")
+
+    view |> element("#load-older-events") |> render_click()
+
+    assert has_element?(view, "#message-#{oldest.id}")
+    refute has_element?(view, "#load-older-events")
+  end
+
   test "ignores duplicate and out-of-order event notifications", %{
     conn: conn,
     scope: scope,
