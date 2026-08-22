@@ -34,6 +34,25 @@ if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
 fi
 
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
+if [[ ! -x "$HOME/.local/bin/jj" ]]; then
+  jj_tmp="$(mktemp -d)"
+  trap 'rm -rf "$jj_tmp"' EXIT
+  jj_archive="$jj_tmp/jj.tar.gz"
+  curl -fsSL \
+    https://github.com/jj-vcs/jj/releases/download/v0.44.0/jj-v0.44.0-x86_64-unknown-linux-musl.tar.gz \
+    -o "$jj_archive"
+  echo "0a07bab4641a55fd2bc2fd1563ba3a3f9a577584086ad74086a1c5b69b3ffce9  $jj_archive" |
+    sha256sum --check --status
+  tar -xzf "$jj_archive" -C "$jj_tmp"
+  install -m 0755 "$jj_tmp/jj" "$HOME/.local/bin/jj"
+  rm -rf "$jj_tmp"
+  trap - EXIT
+fi
+
+jj config set --user user.name "Darwin D Wu"
+jj config set --user user.email "darwin67@users.noreply.github.com"
+
 mise install erlang@28.5 elixir@1.20.3-otp-28
 mise use --global erlang@28.5 elixir@1.20.3-otp-28
 
@@ -70,4 +89,12 @@ agent_repo="$PWD/tmp/kodo-work"
 
 if [[ ! -d "$agent_repo/.git" ]]; then
   git clone https://github.com/chaba-dev/kodo-work "$agent_repo"
+fi
+
+if [[ ! -d "$PWD/.jj" ]]; then
+  jj git init --colocate "$PWD"
+fi
+
+if [[ ! -d "$agent_repo/.jj" ]]; then
+  jj git init --colocate "$agent_repo"
 fi

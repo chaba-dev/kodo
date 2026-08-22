@@ -60,10 +60,8 @@ LIVE_LLM_MODEL=openai:gpt-4o-mini OPENAI_API_KEY=... \
 
 ## Amp orb development
 
-The orb lifecycle setup installs both toolchains, prepares PostgreSQL and the application, builds
-the Rust runner, and clones [`chaba-dev/kodo-work`](https://github.com/chaba-dev/kodo-work) into the
-ignored `tmp/kodo-work` directory. Existing work in that repository is preserved when the orb
-resumes or setup runs again; setup does not pull or reset it.
+Fresh Amp orbs include the project toolchains, PostgreSQL, the built application and runner, and a
+local clone of [`chaba-dev/kodo-work`](https://github.com/chaba-dev/kodo-work) for agent sessions.
 
 Start the supervised development server and print its portal URL with:
 
@@ -79,5 +77,3 @@ KODO_TOKEN="..." cargo run -p kodo -- start \
   --workspace tmp/kodo-work \
   "Complete the requested task and verify the Git diff"
 ```
-
-Delete `tmp/kodo-work` and rerun `.agents/setup` whenever you want a fresh clone.

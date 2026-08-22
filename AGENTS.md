@@ -4,11 +4,18 @@ This is a web application written using the Phoenix web framework.
 
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues
 - Make small, logical commits as work is completed. Each commit should be independently reviewable, scoped to one concern, and backed by relevant tests run before committing
-- When Jujutsu is available for the workspace, use `jj` to record changes with detailed explanations; use Git commits only when `jj` is unavailable
+- Use Jujutsu (`jj`) as the primary interface for repository changes. It is provided by both the Nix flake and orb setup; use Git commits only if `jj` is unexpectedly unavailable
 - Use [Conventional Commits](https://www.conventionalcommits.org/) for Jujutsu change descriptions, Git commit messages, and pull request titles: `<type>(<optional-scope>): <description>`. Use `!` before the colon and a `BREAKING CHANGE:` footer for breaking changes when applicable
 - Use one of the commit types accepted by `.github/workflows/commits.yml`: `feat`, `fix`, `doc`, `docs`, `test`, `ci`, `refactor`, `perf`, `chore`, `revert`, `style`, or `security`. The workflow validates pull request titles, and `cliff.toml` uses these prefixes to group generated changelog entries
 - Add concise comments or module/function docs that explain intent, domain boundaries, security decisions, or non-obvious tradeoffs. Avoid comments that merely restate what the code does
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
+
+## Amp orb workflow
+
+- Run `amp orb services ensure` to start the supervised Phoenix server and obtain its portal URL. Never persist or guess a thread-specific portal URL
+- Use the ignored `tmp/kodo-work` clone as the target repository for Kodo agent sessions. Preserve its working changes and do not pull, reset, or recreate it unless the user asks
+- Fresh orb setup clones `https://github.com/chaba-dev/kodo-work` when the target is absent. To request a clean target, remove `tmp/kodo-work` and rerun `.agents/setup`
+- Browser reviewers can create a throwaway account through `/users/register`; authenticated session pages remain in the existing `:require_authenticated_user` LiveView session
 
 ### Phoenix v1.8 guidelines
 
