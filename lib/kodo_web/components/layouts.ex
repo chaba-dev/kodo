@@ -44,7 +44,7 @@ defmodule KodoWeb.Layouts do
     <div class="min-h-screen bg-[#f4f6ef] text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 lg:flex">
       <aside
         :if={@current_scope}
-        class="flex border-b border-[#dce2d5] bg-[#eef2e9] dark:border-zinc-800 dark:bg-zinc-900 lg:sticky lg:top-0 lg:h-screen lg:w-80 lg:shrink-0 lg:flex-col lg:border-b-0 lg:border-r"
+        class="flex flex-wrap border-b border-[#dce2d5] bg-[#eef2e9] dark:border-zinc-800 dark:bg-zinc-900 lg:sticky lg:top-0 lg:h-screen lg:w-80 lg:shrink-0 lg:flex-col lg:flex-nowrap lg:border-b-0 lg:border-r"
       >
         <.link
           navigate={~p"/sessions"}
@@ -57,7 +57,7 @@ defmodule KodoWeb.Layouts do
         </.link>
 
         <nav
-          class="flex min-w-0 flex-1 items-center gap-1 overflow-auto px-3 py-2 lg:block lg:space-y-1 lg:px-3 lg:py-4"
+          class="order-last flex min-w-0 basis-full items-center gap-1 overflow-auto border-t border-[#dce2d5] px-3 py-2 dark:border-zinc-800 lg:order-none lg:block lg:basis-auto lg:space-y-1 lg:border-t-0 lg:px-3 lg:py-4"
           aria-label="Application navigation"
         >
           <.link
