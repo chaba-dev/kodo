@@ -190,6 +190,12 @@ defmodule KodoWeb.SessionLiveTest do
         "arguments" => %{"query" => "first", "paths" => []}
       })
 
+    {:ok, between} =
+      Sessions.append_event(session.id, "user_message", %{
+        "role" => "user",
+        "content" => "Between tools"
+      })
+
     {:ok, _second} =
       Sessions.append_event(session.id, "tool_requested", %{
         "tool_call_id" => "second",
@@ -200,7 +206,7 @@ defmodule KodoWeb.SessionLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
 
-    assert has_element?(view, "#tool-first + #tool-second")
+    assert has_element?(view, "#tool-first + #message-#{between.id} + #tool-second")
   end
 
   test "ignores duplicate and out-of-order event notifications", %{

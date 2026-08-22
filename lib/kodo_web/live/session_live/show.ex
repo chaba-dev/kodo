@@ -35,7 +35,7 @@ defmodule KodoWeb.SessionLive.Show do
 
     socket =
       socket
-      |> stream_configure(:tools, dom_id: &"tool-#{&1["tool_call_id"]}")
+      |> stream_configure(:timeline, dom_id: & &1.id)
       |> assign(:page_title, session.title)
       |> assign(:session, session)
       |> assign(:runner, Runners.get_runner(session.runner_id))
@@ -45,8 +45,7 @@ defmodule KodoWeb.SessionLive.Show do
       |> assign(:diff, latest_diff(events))
       |> assign(:message_form, to_form(%{"content" => ""}, as: :message))
       |> stream(:sessions, Sessions.list_sessions(socket.assigns.current_scope))
-      |> stream(:messages, Enum.filter(events, &(&1.type in @message_types)))
-      |> stream(:tools, ordered_tools(events, projection))
+      |> stream(:timeline, timeline_items(events, projection))
 
     {:ok, socket}
   end
@@ -149,11 +148,12 @@ defmodule KodoWeb.SessionLive.Show do
   end
 
   defp stream_event(socket, %{type: type} = event, _projection) when type in @message_types,
-    do: stream_insert(socket, :messages, event)
+    do: stream_insert(socket, :timeline, message_item(event))
 
   defp stream_event(socket, %{type: type, payload: payload}, projection)
        when type in @tool_types do
-    stream_insert(socket, :tools, Map.fetch!(projection.tool_calls, payload["tool_call_id"]))
+    tool = Map.fetch!(projection.tool_calls, payload["tool_call_id"])
+    stream_insert(socket, :timeline, tool_item(tool))
   end
 
   defp stream_event(socket, _event, _projection), do: socket
@@ -213,13 +213,35 @@ defmodule KodoWeb.SessionLive.Show do
     "#{length(diff_files(diff.content))}#{suffix}"
   end
 
-  defp ordered_tools(events, projection) do
-    events
-    |> Enum.filter(&(&1.type in @tool_types))
-    |> Enum.map(& &1.payload["tool_call_id"])
-    |> Enum.uniq()
-    |> Enum.map(&Map.fetch!(projection.tool_calls, &1))
+  defp timeline_items(events, projection) do
+    {items, _seen_tools} =
+      Enum.reduce(events, {[], MapSet.new()}, &collect_timeline_item(&1, &2, projection))
+
+    Enum.reverse(items)
   end
+
+  defp collect_timeline_item(%{type: type} = event, {items, seen_tools}, _projection)
+       when type in @message_types,
+       do: {[message_item(event) | items], seen_tools}
+
+  defp collect_timeline_item(%{type: type} = event, {items, seen_tools}, projection)
+       when type in @tool_types do
+    tool_call_id = event.payload["tool_call_id"]
+
+    if MapSet.member?(seen_tools, tool_call_id) do
+      {items, seen_tools}
+    else
+      tool = Map.fetch!(projection.tool_calls, tool_call_id)
+      {[tool_item(tool) | items], MapSet.put(seen_tools, tool_call_id)}
+    end
+  end
+
+  defp collect_timeline_item(_event, accumulator, _projection), do: accumulator
+
+  defp message_item(event), do: %{id: "message-#{event.id}", kind: :message, value: event}
+
+  defp tool_item(tool),
+    do: %{id: "tool-#{tool["tool_call_id"]}", kind: :tool, value: tool}
 
   defp tool_output(%{"output" => output}), do: format_output(output)
   defp tool_output(%{"error" => error}), do: error
