@@ -71,7 +71,8 @@ defmodule KodoWeb.Layouts do
             :if={@session_stream}
             id="sessions"
             phx-update="stream"
-            class="hidden min-w-56 gap-1 lg:mt-5 lg:block lg:min-w-0 lg:space-y-1"
+            aria-label="Session navigation"
+            class="flex min-w-56 gap-1 lg:mt-5 lg:block lg:min-w-0 lg:space-y-1"
           >
             <p
               id="sessions-empty"

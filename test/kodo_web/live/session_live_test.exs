@@ -54,6 +54,12 @@ defmodule KodoWeb.SessionLiveTest do
 
     assert has_element?(view, "#session-index")
     assert has_element?(view, "#workspace-placeholder")
+
+    assert has_element?(
+             view,
+             "#sessions[aria-label='Session navigation'] #sessions-#{session.id}"
+           )
+
     assert has_element?(view, "#sessions-#{session.id}", "Fix the greeting")
     assert has_element?(view, "#sessions-#{session.id}", "Offline")
 
