@@ -57,3 +57,27 @@ The live test can also be run locally:
 LIVE_LLM_MODEL=openai:gpt-4o-mini OPENAI_API_KEY=... \
   mix test test/e2e/live_provider_full_stack_test.exs --include live_provider
 ```
+
+## Amp orb development
+
+The orb lifecycle setup installs both toolchains, prepares PostgreSQL and the application, builds
+the Rust runner, and clones [`chaba-dev/kodo-work`](https://github.com/chaba-dev/kodo-work) into the
+ignored `tmp/kodo-work` directory. Existing work in that repository is preserved when the orb
+resumes or setup runs again; setup does not pull or reset it.
+
+Start the supervised development server and print its portal URL with:
+
+```sh
+amp orb services ensure
+```
+
+Register a throwaway user at `/users/register`. To run an agent against the target repository,
+issue an agent token with `POST /api/auth/token`, then run:
+
+```sh
+KODO_TOKEN="..." cargo run -p kodo -- start \
+  --workspace tmp/kodo-work \
+  "Complete the requested task and verify the Git diff"
+```
+
+Delete `tmp/kodo-work` and rerun `.agents/setup` whenever you want a fresh clone.

@@ -7,6 +7,7 @@ git config --global user.email "darwin67@users.noreply.github.com"
 packages=(
   autoconf
   build-essential
+  inotify-tools
   libncurses-dev
   libssl-dev
   libwxgtk3.2-dev
@@ -61,3 +62,12 @@ eval "$(mise activate bash)"
 mix local.hex --force
 mix local.rebar --force
 mix deps.get
+export DATABASE_PORT="${DATABASE_PORT:-5432}"
+mix setup
+cargo build -p kodo
+
+agent_repo="$PWD/tmp/kodo-work"
+
+if [[ ! -d "$agent_repo/.git" ]]; then
+  git clone https://github.com/chaba-dev/kodo-work "$agent_repo"
+fi
