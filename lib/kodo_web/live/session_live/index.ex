@@ -2,7 +2,6 @@ defmodule KodoWeb.SessionLive.Index do
   use KodoWeb, :live_view
 
   alias Kodo.Cluster.Discovery
-  alias Kodo.Runners
   alias Kodo.Sessions
 
   @impl true
@@ -38,14 +37,4 @@ defmodule KodoWeb.SessionLive.Index do
   defp refresh(socket) do
     stream(socket, :sessions, Sessions.list_sessions(socket.assigns.current_scope), reset: true)
   end
-
-  defp repository_name(%{name: name}) when is_binary(name) and name != "", do: name
-  defp repository_name(%{workspace_root: root}), do: Path.basename(root)
-
-  defp status_tone("running"), do: "bg-sky-400"
-  defp status_tone("awaiting_approval"), do: "bg-amber-400"
-  defp status_tone("completed"), do: "bg-emerald-400"
-  defp status_tone("failed"), do: "bg-rose-400"
-  defp status_tone("cancelled"), do: "bg-zinc-400"
-  defp status_tone(_status), do: "bg-violet-400"
 end

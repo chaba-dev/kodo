@@ -53,6 +53,7 @@ defmodule KodoWeb.SessionLiveTest do
     {:ok, view, _html} = live(conn, ~p"/sessions")
 
     assert has_element?(view, "#session-index")
+    assert has_element?(view, "#workspace-placeholder")
     assert has_element?(view, "#sessions-#{session.id}", "Fix the greeting")
     assert has_element?(view, "#sessions-#{session.id}", "Offline")
 
@@ -137,6 +138,7 @@ defmodule KodoWeb.SessionLiveTest do
     {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
 
     assert has_element?(view, "#session-detail")
+    assert has_element?(view, "#sessions-#{session.id}[aria-current='page']")
     assert has_element?(view, "#message-form")
     assert has_element?(view, "#send-message")
     assert has_element?(view, "#messages", "Please fix it")

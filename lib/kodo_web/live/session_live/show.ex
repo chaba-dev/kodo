@@ -27,6 +27,7 @@ defmodule KodoWeb.SessionLive.Show do
     if connected?(socket) do
       :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
       :ok = Discovery.subscribe()
+      :ok = Sessions.subscribe_index()
     end
 
     events = Sessions.events_after(socket.assigns.current_scope, session.id)
@@ -43,6 +44,7 @@ defmodule KodoWeb.SessionLive.Show do
       |> assign(:pending_approval, pending_approval(events, projection.pending_approval_id))
       |> assign(:diff, latest_diff(events))
       |> assign(:message_form, to_form(%{"content" => ""}, as: :message))
+      |> stream(:sessions, Sessions.list_sessions(socket.assigns.current_scope))
       |> stream(:messages, Enum.filter(events, &(&1.type in @message_types)))
       |> stream(:tools, ordered_tools(events, projection))
 
@@ -103,11 +105,22 @@ defmodule KodoWeb.SessionLive.Show do
     end
   end
 
+  def handle_info(:session_index_changed, socket), do: {:noreply, refresh_sessions(socket)}
+
   def handle_info(
         {:cluster_membership, _action, :runner, runner_id, _changed, _remaining},
-        %{assigns: %{session: %{runner_id: runner_id}}} = socket
+        socket
       ) do
-    {:noreply, assign(socket, :runner_online?, Runners.online?(runner_id))}
+    socket = refresh_sessions(socket)
+
+    socket =
+      if socket.assigns.session.runner_id == runner_id do
+        assign(socket, :runner_online?, Runners.online?(runner_id))
+      else
+        socket
+      end
+
+    {:noreply, socket}
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
@@ -119,6 +132,10 @@ defmodule KodoWeb.SessionLive.Show do
       socket.assigns.projection.last_sequence
     )
     |> Enum.reduce(socket, &apply_event/2)
+  end
+
+  defp refresh_sessions(socket) do
+    stream(socket, :sessions, Sessions.list_sessions(socket.assigns.current_scope), reset: true)
   end
 
   defp apply_event(event, socket) do

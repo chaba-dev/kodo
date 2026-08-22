@@ -33,6 +33,8 @@ defmodule KodoWeb.Layouts do
 
   attr :content_class, :any, default: "mx-auto max-w-2xl space-y-4"
   attr :main_class, :any, default: "px-3 py-3 sm:px-5 sm:py-5 lg:px-6"
+  attr :session_stream, :any, default: nil
+  attr :selected_session_id, :string, default: nil
 
   slot :inner_block, required: true
 
@@ -54,7 +56,7 @@ defmodule KodoWeb.Layouts do
         </.link>
 
         <nav
-          class="flex min-w-0 flex-1 items-center gap-1 px-3 py-2 lg:block lg:space-y-1 lg:px-3 lg:py-4"
+          class="flex min-w-0 flex-1 items-center gap-1 overflow-auto px-3 py-2 lg:block lg:space-y-1 lg:px-3 lg:py-4"
           aria-label="Application navigation"
         >
           <.link
@@ -64,6 +66,49 @@ defmodule KodoWeb.Layouts do
             <.icon name="hero-chat-bubble-left-right" class="size-4 text-zinc-500" />
             <span>Sessions</span>
           </.link>
+
+          <div
+            :if={@session_stream}
+            id="sessions"
+            phx-update="stream"
+            class="hidden min-w-56 gap-1 lg:mt-5 lg:block lg:min-w-0 lg:space-y-1"
+          >
+            <p
+              id="sessions-empty"
+              class="hidden only:block px-3 py-2 text-xs leading-5 text-zinc-500"
+            >
+              No sessions yet
+            </p>
+            <.link
+              :for={{dom_id, session} <- @session_stream}
+              id={dom_id}
+              navigate={~p"/sessions/#{session.id}"}
+              aria-current={if(session.id == @selected_session_id, do: "page", else: nil)}
+              class={[
+                "group block rounded-lg px-3 py-2 transition",
+                session.id == @selected_session_id &&
+                  "bg-white text-zinc-950 shadow-sm dark:bg-zinc-800 dark:text-white",
+                session.id != @selected_session_id &&
+                  "text-zinc-600 hover:bg-white/70 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white"
+              ]}
+            >
+              <span class="flex items-center gap-2 text-[0.65rem] text-zinc-500">
+                <span class={[
+                  "size-1.5 rounded-full",
+                  if(Kodo.Runners.online?(session.runner_id),
+                    do: "bg-emerald-400",
+                    else: "bg-zinc-400"
+                  )
+                ]}></span>
+                <span class="sr-only">
+                  {if Kodo.Runners.online?(session.runner_id), do: "Online", else: "Offline"}
+                </span>
+                <span class="truncate">{repository_name(session.runner)}</span>
+                <span class="ml-auto capitalize">{String.replace(session.status, "_", " ")}</span>
+              </span>
+              <span class="mt-1 block truncate text-xs font-medium">{session.title}</span>
+            </.link>
+          </div>
         </nav>
 
         <div class="ml-auto flex items-center gap-1 px-3 lg:ml-0 lg:border-t lg:border-[#dce2d5] lg:px-3 lg:py-3 dark:lg:border-zinc-800">
@@ -125,6 +170,9 @@ defmodule KodoWeb.Layouts do
     <.flash_group flash={@flash} />
     """
   end
+
+  defp repository_name(%{name: name}) when is_binary(name) and name != "", do: name
+  defp repository_name(%{workspace_root: root}), do: Path.basename(root)
 
   @doc """
   Shows the flash group with standard titles and content.
