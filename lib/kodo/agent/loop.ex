@@ -741,7 +741,10 @@ defmodule Kodo.Agent.Loop do
          "status" => "success",
          "response" => response
        }} ->
-        {:ok, response}
+        case RunnerProtocol.validate_tool_response(request, response) do
+          {:ok, _validated} -> {:ok, response}
+          :error -> {:error, :invalid_runner_response}
+        end
 
       {:runner_tool_response, ^runner_id,
        %{"request_id" => ^request_id, "status" => "error", "error" => error}} ->

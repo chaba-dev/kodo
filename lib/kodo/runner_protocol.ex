@@ -53,6 +53,95 @@ defmodule Kodo.RunnerProtocol do
   def max_payload_bytes, do: @max_payload_bytes
   def limits, do: @limits
 
+  @doc "Validates a successful response against the dispatched protocol tool."
+  def validate_tool_response(%{"tool" => "list_files"}, %{
+        "result" => "files",
+        "paths" => paths,
+        "truncated" => truncated
+      })
+      when is_list(paths) and is_boolean(truncated),
+      do: validate_strings(paths)
+
+  def validate_tool_response(%{"tool" => "search_code"}, %{
+        "result" => "matches",
+        "matches" => matches,
+        "truncated" => truncated
+      })
+      when is_list(matches) and is_boolean(truncated) do
+    if Enum.all?(matches, &valid_search_match?/1), do: {:ok, matches}, else: :error
+  end
+
+  def validate_tool_response(
+        %{"tool" => "read_file"},
+        %{
+          "result" => "file",
+          "content" => content,
+          "offset" => offset,
+          "next_offset" => next_offset,
+          "truncated" => truncated
+        } = response
+      )
+      when is_binary(content) and is_integer(offset) and offset >= 0 and
+             (is_nil(next_offset) or (is_integer(next_offset) and next_offset >= 0)) and
+             is_boolean(truncated),
+      do: {:ok, response}
+
+  def validate_tool_response(
+        %{"tool" => tool},
+        %{
+          "result" => "output",
+          "content" => content,
+          "truncated" => truncated
+        } = response
+      )
+      when tool in ["git_status", "git_diff"] and is_binary(content) and
+             is_boolean(truncated),
+      do: {:ok, response}
+
+  def validate_tool_response(%{"tool" => "apply_patch"}, %{
+        "result" => "files_changed",
+        "paths" => paths
+      })
+      when is_list(paths),
+      do: validate_strings(paths)
+
+  def validate_tool_response(
+        %{"tool" => "start_command"},
+        %{
+          "result" => "command_started",
+          "process_id" => process_id
+        } = response
+      ) do
+    if Ecto.UUID.cast(process_id) == {:ok, process_id}, do: {:ok, response}, else: :error
+  end
+
+  def validate_tool_response(
+        %{"tool" => tool},
+        %{
+          "result" => "command_poll",
+          "process_id" => process_id,
+          "status" => status,
+          "output" => output,
+          "earliest_sequence" => earliest_sequence,
+          "next_sequence" => next_sequence,
+          "truncated" => truncated
+        } = response
+      )
+      when is_list(output) do
+    if valid_command_poll_metadata?(
+         tool,
+         process_id,
+         status,
+         earliest_sequence,
+         next_sequence,
+         truncated
+       ) and Enum.all?(output, &valid_command_output?/1),
+       do: {:ok, response},
+       else: :error
+  end
+
+  def validate_tool_response(_request, _response), do: :error
+
   @doc "Builds the short runner-enforced lease carried by every connected tool request."
   def authority_lease(%{session_id: session_id, epoch: epoch}) do
     %{
@@ -107,4 +196,47 @@ defmodule Kodo.RunnerProtocol do
       maximum_response_bytes <= limits.max_cached_response_bytes and
       maximum_patch_bytes <= @max_payload_bytes
   end
+
+  defp validate_strings(values) do
+    if Enum.all?(values, &is_binary/1), do: {:ok, values}, else: :error
+  end
+
+  defp valid_search_match?(%{"path" => path, "line" => line, "content" => content}),
+    do: is_binary(path) and is_integer(line) and line >= 0 and is_binary(content)
+
+  defp valid_search_match?(_match), do: false
+
+  defp valid_process_status?(status) when status in ["running", "timed_out", "stopped"],
+    do: true
+
+  defp valid_process_status?(%{"exited" => %{"code" => code}}),
+    do: is_nil(code) or is_integer(code)
+
+  defp valid_process_status?(_status), do: false
+
+  defp valid_command_poll_metadata?(
+         tool,
+         process_id,
+         status,
+         earliest_sequence,
+         next_sequence,
+         truncated
+       ) do
+    tool in ["poll_command", "stop_command"] and
+      Ecto.UUID.cast(process_id) == {:ok, process_id} and valid_process_status?(status) and
+      is_integer(earliest_sequence) and earliest_sequence >= 0 and
+      is_integer(next_sequence) and next_sequence >= 0 and is_boolean(truncated)
+  end
+
+  defp valid_command_output?(%{
+         "sequence" => sequence,
+         "stream" => stream,
+         "content" => content,
+         "truncated" => truncated
+       }),
+       do:
+         is_integer(sequence) and sequence >= 0 and stream in ["stdout", "stderr"] and
+           is_binary(content) and is_boolean(truncated)
+
+  defp valid_command_output?(_output), do: false
 end

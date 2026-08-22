@@ -1,0 +1,24 @@
+<Layouts.app
+  flash={@flash}
+  current_scope={@current_scope}
+  main_class="p-0"
+  content_class="w-full"
+  session_stream={@streams.sessions}
+  sessions_cursor={@sessions_cursor}
+>
+  <section
+    id="session-index"
+    class="flex min-h-[calc(100vh-4rem)] items-center justify-center p-8 lg:min-h-screen"
+  >
+    <div id="workspace-placeholder" class="max-w-sm text-center">
+      <div class="mx-auto size-10 rounded-xl border border-dashed border-zinc-300 bg-white/50 dark:border-zinc-700 dark:bg-zinc-900/50">
+      </div>
+      <h1 class="mt-4 text-sm font-semibold text-zinc-800 dark:text-zinc-200">
+        Select a session
+      </h1>
+      <p class="mt-1 text-xs leading-5 text-zinc-500">
+        Choose a session from the sidebar, or start one from the Kodo CLI.
+      </p>
+    </div>
+  </section>
+</Layouts.app>

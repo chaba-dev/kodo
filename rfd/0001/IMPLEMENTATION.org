@@ -1,0 +1,25 @@
+#+TITLE: RFD 0001 implementation checklist
+
+Implements [[file:README.adoc][RFD 1: Bound control-plane database load]].
+
+- [ ] Instrument bounded-cardinality query counts and durations for instance
+  heartbeats, recovery discovery, ownership fencing, and session-index refreshes.
+- [ ] Add a partial index covering sessions in ~running~ or
+  ~awaiting_approval~ state and verify the recovery query plan does not scan
+  terminal history.
+- [ ] Stop terminal session coordinators after finalization and restart them
+  lazily for follow-up turns without losing durable sequence reconciliation.
+- [ ] Replace fixed per-replica recovery scans with configurable,
+  cluster-coordinated work that preserves the documented failure-detection
+  bound and ownership epoch fencing.
+- [ ] Scope session-index notifications by user, fetch only the affected scoped
+  row, and coalesce event bursts that do not require repeated index updates.
+- [ ] Add stable keyset pagination and an ordering-compatible user-session index
+  so navigation does not load unbounded session and runner history.
+- [ ] Regression tests prove unrelated users perform no list query when another
+  user's session emits events and one turn does not trigger a full refresh per
+  durable event.
+- [ ] Load tests vary completed history, active sessions, replicas, connected
+  users, and events per turn while asserting the scaling boundaries in the RFD.
+- [ ] Operational documentation defines expected steady-state query rates,
+  recovery timing, metrics, and safe tuning ranges.

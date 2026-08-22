@@ -1,0 +1,293 @@
+<Layouts.app
+  flash={@flash}
+  current_scope={@current_scope}
+  main_class="p-0"
+  content_class="w-full"
+  session_stream={@streams.sessions}
+  sessions_cursor={@sessions_cursor}
+  selected_session_id={@session.id}
+>
+  <section
+    id="session-detail"
+    class="min-h-[calc(100vh-4rem)] bg-white dark:bg-zinc-900 lg:min-h-screen"
+  >
+    <header class="grid border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900 lg:h-14 lg:grid-cols-[minmax(0,1fr)_minmax(30rem,38vw)]">
+      <div class="flex min-w-0 flex-col gap-3 px-4 py-3 sm:px-5 lg:flex-row lg:items-center lg:justify-between lg:border-r lg:border-zinc-200 lg:py-0 dark:lg:border-zinc-800">
+        <div class="min-w-0">
+          <h1 class="truncate text-sm font-semibold tracking-tight text-zinc-950 dark:text-white">
+            {@session.title}
+          </h1>
+          <div class="mt-0.5 flex flex-wrap items-center gap-x-3 text-[0.65rem] text-zinc-500 dark:text-zinc-400">
+            <span class="font-semibold text-zinc-700 dark:text-zinc-300">
+              {repository_name(@runner)}
+            </span>
+            <span class="font-mono">{@session.model}</span>
+            <span>{@session.approval_policy} approvals</span>
+          </div>
+        </div>
+
+        <div class="flex shrink-0 flex-wrap items-center gap-2">
+          <div
+            id="runner-status"
+            class="flex items-center gap-2 text-xs font-medium text-zinc-500 dark:text-zinc-400"
+          >
+            <span class={[
+              "size-2 rounded-full",
+              if(@runner_online?, do: "bg-emerald-400", else: "bg-zinc-400")
+            ]}></span>
+            Runner {if @runner_online?, do: "online", else: "offline"}
+          </div>
+          <span
+            id="session-status"
+            class="rounded-md bg-zinc-100 px-2 py-1 text-[0.7rem] font-semibold capitalize text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+          >
+            {String.replace(@projection.status, "_", " ")}
+          </span>
+          <button
+            :if={@projection.status in ["running", "awaiting_approval"]}
+            id="stop-session"
+            type="button"
+            phx-click="cancel"
+            data-confirm="Stop this session? The durable transcript will be preserved."
+            class="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold text-rose-700 transition hover:bg-rose-50 phx-click-loading:opacity-60 dark:text-rose-300 dark:hover:bg-rose-500/10"
+          >
+            <.icon name="hero-stop-solid" class="size-3.5" /> Stop
+          </button>
+        </div>
+      </div>
+      <div class="flex items-center justify-between px-5 py-3 lg:py-0">
+        <h2 class="text-sm font-semibold text-zinc-900 dark:text-white">Changes</h2>
+        <span
+          id="changed-file-count"
+          title={if(@diff.truncated?, do: "At least this many changed files", else: nil)}
+          class="text-xs font-medium text-zinc-500 dark:text-zinc-400"
+        >
+          {changed_file_count(@diff)} files
+        </span>
+      </div>
+    </header>
+
+    <div class="grid items-start lg:h-[calc(100vh-3.5rem)] lg:grid-cols-[minmax(0,1fr)_minmax(30rem,38vw)] lg:items-stretch">
+      <main class="flex min-w-0 flex-col lg:h-full lg:min-h-0 lg:border-r lg:border-zinc-200 dark:lg:border-zinc-800">
+        <section
+          :if={@pending_approval}
+          id="pending-approval"
+          class="m-4 overflow-hidden rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700/70 dark:bg-amber-950/30"
+        >
+          <div class="flex gap-4 p-5 sm:p-6">
+            <div class="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-amber-200/70 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300">
+              <.icon name="hero-shield-exclamation" class="size-5" />
+            </div>
+            <div class="min-w-0 flex-1">
+              <p class="text-xs font-semibold uppercase tracking-[0.18em] text-amber-700 dark:text-amber-400">
+                Approval required
+              </p>
+              <h2 class="mt-1 font-semibold text-amber-950 dark:text-amber-100">
+                {@pending_approval["description"] || "Run #{@pending_approval["name"]}"}
+              </h2>
+              <pre class="mt-3 max-h-40 overflow-auto whitespace-pre-wrap rounded-xl bg-white/70 p-3 text-xs text-amber-950 dark:bg-black/20 dark:text-amber-100">{Jason.encode!(@pending_approval["arguments"] || %{}, pretty: true)}</pre>
+              <div class="mt-4 flex gap-3">
+                <button
+                  id="approve-action"
+                  type="button"
+                  phx-click="resolve_approval"
+                  phx-value-decision="approved"
+                  class="rounded-xl bg-amber-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-amber-800 phx-click-loading:opacity-60 dark:bg-amber-300 dark:text-amber-950"
+                >
+                  Approve
+                </button>
+                <button
+                  id="deny-action"
+                  type="button"
+                  phx-click="resolve_approval"
+                  phx-value-decision="denied"
+                  class="rounded-xl border border-amber-400 px-4 py-2 text-sm font-semibold text-amber-900 transition hover:bg-amber-100 phx-click-loading:opacity-60 dark:text-amber-200"
+                >
+                  Deny
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="flex min-h-0 flex-1 flex-col bg-white dark:bg-zinc-900">
+          <div :if={@timeline_cursor} class="px-5 pt-4 text-center sm:px-8">
+            <button
+              id="load-older-events"
+              type="button"
+              phx-click="load_older_timeline"
+              phx-value-before-sequence={@timeline_cursor}
+              class="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-white"
+            >
+              Load older activity
+            </button>
+          </div>
+          <div
+            id="messages"
+            phx-update="stream"
+            class="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-7 sm:px-8 lg:px-10"
+          >
+            <div
+              id="messages-empty"
+              class="hidden only:block py-12 text-center text-sm text-zinc-500"
+            >
+              Send a message to begin this session.
+            </div>
+            <div
+              :for={{dom_id, item} <- @streams.timeline}
+              id={dom_id}
+            >
+              <article
+                :if={item.kind == :message}
+                class={[
+                  "mx-auto flex w-full max-w-4xl gap-3",
+                  item.value.type == "user_message" && "justify-end"
+                ]}
+              >
+                <div class={[
+                  "flex size-7 shrink-0 items-center justify-center rounded-full",
+                  item.value.type == "user_message" && "hidden",
+                  item.value.type != "user_message" &&
+                    "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                ]}>
+                  <.icon
+                    name={
+                      if(item.value.type == "user_message",
+                        do: "hero-user",
+                        else: "hero-sparkles"
+                      )
+                    }
+                    class="size-4"
+                  />
+                </div>
+                <div class={[
+                  "max-w-[85%] text-sm leading-6",
+                  item.value.type == "user_message" &&
+                    "rounded-xl bg-[#e8efe2] px-4 py-2.5 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100",
+                  item.value.type != "user_message" && "pt-0.5 text-zinc-800 dark:text-zinc-100"
+                ]}>
+                  <p class="whitespace-pre-wrap">{item.value.payload["content"]}</p>
+                </div>
+              </article>
+
+              <details
+                :if={item.kind == :tool}
+                class="group mx-auto w-full max-w-4xl pl-10"
+              >
+                <summary class="flex cursor-pointer list-none items-center gap-2 py-1.5 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">
+                  <span class="flex size-5 items-center justify-center">
+                    <.icon name="hero-command-line" class="size-3.5" />
+                  </span>
+                  <span class="min-w-0 flex-1 truncate font-mono text-xs font-semibold text-zinc-700 dark:text-zinc-200">
+                    {item.value["name"]}
+                  </span>
+                  <span class="text-[0.7rem] capitalize text-zinc-500">
+                    {String.replace(item.value["state"], "tool_", "")}
+                  </span>
+                  <.icon
+                    name="hero-chevron-down"
+                    class="size-3.5 text-zinc-400 transition group-open:rotate-180"
+                  />
+                </summary>
+                <div class="mt-2 border-l border-zinc-200 pl-4 dark:border-zinc-700">
+                  <pre
+                    :if={tool_output(item.value) != ""}
+                    class="max-h-80 overflow-auto whitespace-pre-wrap rounded-lg bg-zinc-950 p-3 text-xs leading-5 text-zinc-200"
+                  >{tool_output(item.value)}</pre>
+                  <pre
+                    :if={item.value["arguments"]}
+                    class="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-zinc-100 p-3 text-xs text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                  >{Jason.encode!(item.value["arguments"], pretty: true)}</pre>
+                </div>
+              </details>
+            </div>
+          </div>
+
+          <.form
+            for={@message_form}
+            id="message-form"
+            phx-submit="send_message"
+            class="bg-white px-5 pb-5 pt-3 dark:bg-zinc-900 sm:px-8"
+          >
+            <div class="mx-auto flex max-w-4xl items-end gap-2 rounded-2xl border border-zinc-300 bg-white p-2 shadow-sm focus-within:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-950">
+              <div class="min-w-0 flex-1 [&_.fieldset]:mb-0">
+                <.input
+                  field={@message_form[:content]}
+                  type="textarea"
+                  rows="2"
+                  placeholder="Ask Kodo to inspect, change, or verify…"
+                  disabled={@projection.status in ["running", "awaiting_approval"]}
+                  class="block min-h-12 w-full resize-none border-0 bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:ring-0 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-100"
+                />
+              </div>
+              <button
+                id="send-message"
+                type="submit"
+                disabled={@projection.status in ["running", "awaiting_approval"]}
+                class="flex size-9 shrink-0 items-center justify-center rounded-lg bg-zinc-900 text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
+                aria-label="Send message"
+              >
+                <.icon name="hero-arrow-up" class="size-5" />
+              </button>
+            </div>
+          </.form>
+        </section>
+      </main>
+
+      <aside class="lg:h-full lg:overflow-auto">
+        <section class="overflow-hidden bg-white dark:bg-zinc-900">
+          <div class="flex items-center justify-between border-b border-zinc-100 px-5 py-3 dark:border-zinc-800">
+            <h2 class="text-sm font-semibold text-zinc-900 dark:text-white">Changed files</h2>
+          </div>
+          <div
+            :if={@diff.truncated?}
+            id="diff-truncated-warning"
+            role="alert"
+            class="border-b border-amber-200 bg-amber-50 px-5 py-3 text-xs leading-5 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            Diff output was truncated. The changed-file count and patch below are partial.
+          </div>
+          <div
+            :if={@diff[:unavailable?]}
+            id="diff-unavailable-warning"
+            role="alert"
+            class="border-b border-rose-200 bg-rose-50 px-5 py-3 text-xs leading-5 text-rose-900 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-200"
+          >
+            The runner returned an invalid diff result. The session transcript remains available.
+          </div>
+          <div id="changed-files" class="p-3">
+            <p
+              :if={@diff.content == ""}
+              class="px-3 py-8 text-center text-xs leading-5 text-zinc-500"
+            >
+              No diff has been recorded yet.
+            </p>
+            <div
+              :for={path <- diff_files(@diff.content)}
+              class="flex items-center gap-2 rounded-xl px-3 py-2.5 text-xs text-zinc-700 dark:text-zinc-300"
+            >
+              <.icon name="hero-document-text" class="size-4 shrink-0 text-violet-500" />
+              <span class="truncate font-mono">{path}</span>
+            </div>
+          </div>
+        </section>
+
+        <details
+          :if={@diff.content != ""}
+          id="diff-viewer"
+          open
+          class="group overflow-hidden border-t border-zinc-800 bg-zinc-950"
+        >
+          <summary class="flex cursor-pointer list-none items-center justify-between px-5 py-4 text-sm font-semibold text-zinc-100">
+            Latest diff
+            <.icon
+              name="hero-chevron-down"
+              class="size-4 text-zinc-500 transition group-open:rotate-180"
+            />
+          </summary>
+          <pre class="max-h-[38rem] overflow-auto whitespace-pre border-t border-zinc-800 p-5 text-xs leading-5 text-zinc-300">{@diff.content}</pre>
+        </details>
+      </aside>
+    </div>
+  </section>
+</Layouts.app>

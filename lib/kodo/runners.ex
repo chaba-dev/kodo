@@ -24,6 +24,9 @@ defmodule Kodo.Runners do
   @doc "Returns a durable runner identity, whether or not it is currently connected."
   def get_runner(id), do: Repo.get(Runner, id)
 
+  @doc "Reports ephemeral connection state from cluster discovery."
+  def online?(runner_id), do: match?({:ok, _pid}, Discovery.runner(runner_id))
+
   @doc "Routes one bounded request directly to a discovered live runner channel."
   def dispatch(runner_id, request) when is_map(request) do
     with {:ok, encoded} <- Jason.encode(request),
