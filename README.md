@@ -57,3 +57,23 @@ The live test can also be run locally:
 LIVE_LLM_MODEL=openai:gpt-4o-mini OPENAI_API_KEY=... \
   mix test test/e2e/live_provider_full_stack_test.exs --include live_provider
 ```
+
+## Amp orb development
+
+Fresh Amp orbs include the project toolchains, PostgreSQL, the built application and runner, and a
+local clone of [`chaba-dev/kodo-work`](https://github.com/chaba-dev/kodo-work) for agent sessions.
+
+Start the supervised development server and print its portal URL with:
+
+```sh
+amp orb services ensure
+```
+
+Log in with the development-only account `dev@kodo.local` and password `supersecure!`. To run an
+agent against the target repository, issue an agent token with `POST /api/auth/token`, then run:
+
+```sh
+KODO_TOKEN="..." cargo run -p kodo -- start \
+  --workspace tmp/kodo-work \
+  "Complete the requested task and verify the Git diff"
+```

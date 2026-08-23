@@ -62,6 +62,7 @@
             shfmt
             shellcheck
             git-cliff
+            jujutsu
             postgresql
           ];
 

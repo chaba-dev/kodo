@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-git config --global user.name "Darwin D Wu"
-git config --global user.email "darwin67@users.noreply.github.com"
-
 packages=(
   autoconf
   build-essential
+  inotify-tools
   libncurses-dev
   libssl-dev
   libwxgtk3.2-dev
@@ -33,6 +31,37 @@ if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
 fi
 
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
+if [[ ! -x "$HOME/.local/bin/jj" ]]; then
+  jj_tmp="$(mktemp -d)"
+  trap 'rm -rf "$jj_tmp"' EXIT
+  jj_archive="$jj_tmp/jj.tar.gz"
+  curl -fsSL \
+    https://github.com/jj-vcs/jj/releases/download/v0.44.0/jj-v0.44.0-x86_64-unknown-linux-musl.tar.gz \
+    -o "$jj_archive"
+  echo "0a07bab4641a55fd2bc2fd1563ba3a3f9a577584086ad74086a1c5b69b3ffce9  $jj_archive" |
+    sha256sum --check --status
+  tar -xzf "$jj_archive" -C "$jj_tmp"
+  install -m 0755 "$jj_tmp/jj" "$HOME/.local/bin/jj"
+  rm -rf "$jj_tmp"
+  trap - EXIT
+fi
+
+git_user_name="$(git config user.name || true)"
+git_user_email="$(git config user.email || true)"
+
+if [[ -z "$git_user_name" || -z "$git_user_email" ]]; then
+  echo "Git user.name and user.email must be configured before orb setup" >&2
+  exit 1
+fi
+
+jj config set --user user.name "$git_user_name"
+jj config set --user user.email "$git_user_email"
+
+if jj root >/dev/null 2>&1; then
+  jj metaedit --update-author
+fi
+
 mise install erlang@28.5 elixir@1.20.3-otp-28
 mise use --global erlang@28.5 elixir@1.20.3-otp-28
 
@@ -61,3 +90,29 @@ eval "$(mise activate bash)"
 mix local.hex --force
 mix local.rebar --force
 mix deps.get
+export DATABASE_PORT="${DATABASE_PORT:-5432}"
+mix setup
+cargo build -p kodo
+
+agent_repo="$PWD/tmp/kodo-work"
+
+if [[ ! -e "$agent_repo" ]]; then
+  mkdir -p "$PWD/tmp"
+  agent_repo_tmp="$(mktemp -d "$PWD/tmp/.kodo-work.XXXXXX")"
+  trap 'rm -rf "$agent_repo_tmp"' EXIT
+  git clone https://github.com/chaba-dev/kodo-work "$agent_repo_tmp"
+  git -C "$agent_repo_tmp" rev-parse --verify 'HEAD^{commit}' >/dev/null
+  mv -T "$agent_repo_tmp" "$agent_repo"
+  trap - EXIT
+elif ! git -C "$agent_repo" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1; then
+  echo "Existing $agent_repo is not a complete Git checkout; remove it and rerun setup" >&2
+  exit 1
+fi
+
+if [[ ! -d "$PWD/.jj" ]]; then
+  jj git init --colocate "$PWD"
+fi
+
+if [[ ! -d "$agent_repo/.jj" ]]; then
+  jj git init --colocate "$agent_repo"
+fi

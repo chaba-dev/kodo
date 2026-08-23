@@ -1,0 +1,10 @@
+services:
+  web:
+    command: mix phx.server
+    env:
+      DATABASE_PORT: "5432"
+      PHX_BIND_IP: "0.0.0.0"
+    health: /users/log-in
+    portal:
+      title: Kodo
+      description: Use the seeded development account documented in the README.
