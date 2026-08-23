@@ -14,8 +14,11 @@ Implements [[file:README.adoc][RFD 2: Extend Kodo to mobile and tablet clients]]
   events, and does not create duplicate turns when a response is lost.
 - [ ] Add a web app manifest, installable icons, safe-area support, and the
   minimal static-asset caching needed to preserve the disconnected screen.
-- [ ] Add privacy-preserving Web Push for selected session events, with deep
-  links that require normal authentication before showing session details.
+- [ ] Register and revoke per-device Web Push subscriptions and deliver selected
+  durable session events with event-appropriate time-to-live values.
+- [ ] Keep push payloads private, deep-link through normal authentication,
+  discard invalid subscriptions, and reconcile persisted unread state when a
+  client reconnects even if push delivery failed or expired.
 - [ ] Exercise representative phones and tablets for touch targets,
   accessibility, software-keyboard behavior, long timelines, and wide diffs.
 - [ ] Measure PWA limitations and user demand before selecting a native wrapper,

@@ -65,6 +65,14 @@ Native clients may follow if notifications, background operation, platform
 integration, app-store expectations, or measured product usage justify the
 additional codebase.
 
+This decision does not require replacing LiveView with Svelte, React, or
+another client-side UI framework. LiveView remains the primary UI and owns
+server-rendered state, authenticated navigation, and connected interactions. A
+web app manifest, service worker, responsive styles, connection-state handling,
+and small client hooks add PWA capabilities around that interface. Rewriting
+the UI would introduce a second state-management and API layer without making
+server and runner operations available offline.
+
 Phone layouts use navigation between the session list and session detail.
 Tablet layouts use the available width for a persistent session sidebar and a
 detail pane. Both layouts prioritize the timeline, pending approvals, runner
@@ -143,6 +151,25 @@ event category and opens the authenticated session, where current authorization
 and session ownership are checked again. Approval actions should not execute
 directly from a notification until the product defines an authenticated,
 fresh-state confirmation flow.
+
+Each installed PWA registers a separate Web Push subscription associated with
+the user and device. When a durable session event becomes notification-worthy,
+Kodo sends a push to each enabled subscription. The browser may wake the
+service worker and display an operating-system notification even when the PWA
+and its LiveView connection are closed.
+
+A powered-off or disconnected device cannot display the notification
+immediately. The push service may retain it until the device reconnects,
+subject to the event's time-to-live, but delivery is best effort. Completion
+notifications may use a longer time-to-live than approval requests, whose
+meaning can become stale quickly. Kodo removes invalid subscriptions and lets
+users disable or revoke individual devices.
+
+Push delivery is not a record of whether a user has seen an event. Kodo
+persists notification-worthy state and reconciles it when any client reconnects
+so a dropped or expired push cannot hide a completed task or pending approval.
+When a session is already visible in a connected client, Kodo may suppress a
+duplicate operating-system notification for that client.
 
 Browser sessions continue to use the existing authenticated LiveView router
 scope. Any future native API passes the authenticated user scope into context
