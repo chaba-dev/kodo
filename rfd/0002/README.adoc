@@ -102,14 +102,25 @@ The PWA must therefore provide these disconnected behaviors:
   them after reconnection.
 * Reconnect and refresh authoritative session, approval, runner, and timeline
   state automatically.
-* Cache the application manifest and static assets needed to preserve a useful
-  disconnected screen where browser support permits it.
+* Cache the application manifest and static assets needed to show a generic
+  offline fallback after an offline reload or cold launch.
 
 Kodo must not automatically queue approvals, denials, or cancellation. Those
 commands can become invalid or unsafe while the device is disconnected and
-must be confirmed against fresh state. Message submission may use a client
-request identifier for idempotency, but the initial PWA preserves only the
-draft rather than silently queueing it.
+must be confirmed against fresh state. The initial PWA preserves message drafts
+but does not silently queue their submission.
+
+The initial offline guarantee applies to a page whose rendered document remains
+open. Reloading that page, launching the PWA while offline, or returning after
+the browser evicts it shows only the generic fallback. The service worker must
+not cache authenticated HTML or API responses. Persisted session snapshots
+would require a separate design for freshness, storage protection, retention,
+account transitions, and shared-device disclosure.
+
+Locally stored drafts may contain repository content or secrets. They are
+namespaced by account and session, have a bounded retention period, can be
+cleared by the user, and are purged on logout or account transition before a
+different account can use the installation.
 
 == Reconnection and consistency
 
@@ -119,8 +130,12 @@ After reconnecting, it refreshes the current projection and replays events after
 its last durable sequence or accepts an equivalent full LiveView remount.
 
 Approval and cancellation controls remain unavailable until fresh state is
-known. Repeated message requests use a stable client request identifier so a
-lost response cannot produce duplicate turns when the user retries.
+known. Before submitting a message, the client generates and persists a stable
+client request identifier with the draft. It reuses that identifier for every
+explicit retry until authoritative session state confirms the turn. Editing the
+message into a genuinely new submission creates a new identifier. The server
+must not generate a replacement identifier for a retried client submission;
+otherwise a response lost after commit can produce a duplicate turn.
 
 == Future native-client boundary
 
@@ -152,24 +167,37 @@ and session ownership are checked again. Approval actions should not execute
 directly from a notification until the product defines an authenticated,
 fresh-state confirmation flow.
 
-Each installed PWA registers a separate Web Push subscription associated with
-the user and device. When a durable session event becomes notification-worthy,
-Kodo sends a push to each enabled subscription. The browser may wake the
-service worker and display an operating-system notification even when the PWA
-and its LiveView connection are closed.
+Each installed PWA may have a separate Web Push subscription owned by its
+browser service-worker registration. A subscription represents a browser
+installation, not a reliably identifiable physical device, and has at most one
+active user binding. Creating, replacing, or deleting that binding requires an
+authenticated, CSRF-protected request. Kodo unbinds it on logout, account
+transition, account deletion, and global session invalidation before it can be
+associated with another user.
+
+When a durable session event becomes notification-worthy, Kodo sends a push to
+each enabled subscription bound to that user. The browser may wake the service
+worker and display an operating-system notification even when the PWA and its
+LiveView connection are closed. Subscription refresh replaces the prior
+endpoint atomically, and permanent push-service rejection invalidates the
+stored binding.
 
 A powered-off or disconnected device cannot display the notification
 immediately. The push service may retain it until the device reconnects,
 subject to the event's time-to-live, but delivery is best effort. Completion
 notifications may use a longer time-to-live than approval requests, whose
-meaning can become stale quickly. Kodo removes invalid subscriptions and lets
-users disable or revoke individual devices.
+meaning can become stale quickly. Users can disable or revoke individual
+browser installations.
 
 Push delivery is not a record of whether a user has seen an event. Kodo
-persists notification-worthy state and reconciles it when any client reconnects
-so a dropped or expired push cannot hide a completed task or pending approval.
-When a session is already visible in a connected client, Kodo may suppress a
-duplicate operating-system notification for that client.
+reconciles the authoritative session projection and durable event history when
+a client reconnects, so a dropped or expired push cannot hide a completed task
+or pending approval. The initial rollout does not infer read state from push
+delivery and does not add notification badges or a separate unread model. If a
+later product requirement adds them, it must define acknowledgement scope,
+deduplication, retention, and behavior across installations. When a session is
+already visible in a connected client, Kodo may suppress a duplicate
+operating-system notification for that browser installation.
 
 Browser sessions continue to use the existing authenticated LiveView router
 scope. Any future native API passes the authenticated user scope into context

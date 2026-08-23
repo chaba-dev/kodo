@@ -8,17 +8,26 @@ Implements [[file:README.adoc][RFD 2: Extend Kodo to mobile and tablet clients]]
   content, and clearly identify stale disconnected state.
 - [ ] Disable server mutations while disconnected and keep approval and
   cancellation controls disabled until fresh state is loaded after reconnect.
-- [ ] Persist message drafts locally per session and require explicit submission
-  after reconnection rather than silently queueing them.
+- [ ] Persist message drafts by account and session with bounded retention,
+  user-controlled clearing, and purge on logout or account transition; require
+  explicit submission after reconnection rather than silently queueing them.
+- [ ] Generate and persist a client request identifier before message
+  submission, reuse it through explicit retries until authoritative
+  confirmation, and replace it only for a genuinely new or edited message.
 - [ ] Verify reconnect reloads the authoritative projection, catches up durable
   events, and does not create duplicate turns when a response is lost.
 - [ ] Add a web app manifest, installable icons, safe-area support, and the
-  minimal static-asset caching needed to preserve the disconnected screen.
-- [ ] Register and revoke per-device Web Push subscriptions and deliver selected
-  durable session events with event-appropriate time-to-live values.
+  static-asset caching needed for a generic offline fallback without caching
+  authenticated HTML or API responses.
+- [ ] Bind each Web Push service-worker subscription to at most one user through
+  authenticated, CSRF-protected requests; replace refreshed endpoints and
+  unbind on logout, account transition, account deletion, or global session
+  invalidation.
+- [ ] Deliver selected durable session events with event-appropriate
+  time-to-live values and let users revoke individual browser installations.
 - [ ] Keep push payloads private, deep-link through normal authentication,
-  discard invalid subscriptions, and reconcile persisted unread state when a
-  client reconnects even if push delivery failed or expired.
+  discard invalid subscriptions, and reconcile authoritative session state when
+  a client reconnects even if push delivery failed or expired.
 - [ ] Exercise representative phones and tablets for touch targets,
   accessibility, software-keyboard behavior, long timelines, and wide diffs.
 - [ ] Measure PWA limitations and user demand before selecting a native wrapper,
