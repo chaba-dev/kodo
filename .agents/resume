@@ -2,3 +2,18 @@
 set -euo pipefail
 
 sudo pg_ctlcluster 15 main start || true
+
+git_user_name="$(git config user.name || true)"
+git_user_email="$(git config user.email || true)"
+
+if [[ -z "$git_user_name" || -z "$git_user_email" ]]; then
+  echo "Git user.name and user.email must be configured before orb resume" >&2
+  exit 1
+fi
+
+jj config set --user user.name "$git_user_name"
+jj config set --user user.email "$git_user_email"
+
+if jj root >/dev/null 2>&1; then
+  jj metaedit --update-author
+fi

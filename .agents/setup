@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-git config --global user.name "Darwin D Wu"
-git config --global user.email "darwin67@users.noreply.github.com"
-
 packages=(
   autoconf
   build-essential
@@ -50,8 +47,20 @@ if [[ ! -x "$HOME/.local/bin/jj" ]]; then
   trap - EXIT
 fi
 
-jj config set --user user.name "Darwin D Wu"
-jj config set --user user.email "darwin67@users.noreply.github.com"
+git_user_name="$(git config user.name || true)"
+git_user_email="$(git config user.email || true)"
+
+if [[ -z "$git_user_name" || -z "$git_user_email" ]]; then
+  echo "Git user.name and user.email must be configured before orb setup" >&2
+  exit 1
+fi
+
+jj config set --user user.name "$git_user_name"
+jj config set --user user.email "$git_user_email"
+
+if jj root >/dev/null 2>&1; then
+  jj metaedit --update-author
+fi
 
 mise install erlang@28.5 elixir@1.20.3-otp-28
 mise use --global erlang@28.5 elixir@1.20.3-otp-28
@@ -87,8 +96,17 @@ cargo build -p kodo
 
 agent_repo="$PWD/tmp/kodo-work"
 
-if [[ ! -d "$agent_repo/.git" ]]; then
-  git clone https://github.com/chaba-dev/kodo-work "$agent_repo"
+if [[ ! -e "$agent_repo" ]]; then
+  mkdir -p "$PWD/tmp"
+  agent_repo_tmp="$(mktemp -d "$PWD/tmp/.kodo-work.XXXXXX")"
+  trap 'rm -rf "$agent_repo_tmp"' EXIT
+  git clone https://github.com/chaba-dev/kodo-work "$agent_repo_tmp"
+  git -C "$agent_repo_tmp" rev-parse --verify 'HEAD^{commit}' >/dev/null
+  mv -T "$agent_repo_tmp" "$agent_repo"
+  trap - EXIT
+elif ! git -C "$agent_repo" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1; then
+  echo "Existing $agent_repo is not a complete Git checkout; remove it and rerun setup" >&2
+  exit 1
 fi
 
 if [[ ! -d "$PWD/.jj" ]]; then
