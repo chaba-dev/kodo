@@ -1,0 +1,25 @@
+#+TITLE: RFD 0002 implementation checklist
+
+Implements [[file:README.adoc][RFD 2: Extend Kodo to mobile and tablet clients]].
+
+- [ ] Define and test responsive phone and tablet layouts for the session list,
+  session detail, timeline, approvals, composer, runner state, and diff viewer.
+- [ ] Expose connection state in the interface, preserve the last rendered
+  content, and clearly identify stale disconnected state.
+- [ ] Disable server mutations while disconnected and keep approval and
+  cancellation controls disabled until fresh state is loaded after reconnect.
+- [ ] Persist message drafts locally per session and require explicit submission
+  after reconnection rather than silently queueing them.
+- [ ] Verify reconnect reloads the authoritative projection, catches up durable
+  events, and does not create duplicate turns when a response is lost.
+- [ ] Add a web app manifest, installable icons, safe-area support, and the
+  minimal static-asset caching needed to preserve the disconnected screen.
+- [ ] Add privacy-preserving Web Push for selected session events, with deep
+  links that require normal authentication before showing session details.
+- [ ] Exercise representative phones and tablets for touch targets,
+  accessibility, software-keyboard behavior, long timelines, and wide diffs.
+- [ ] Measure PWA limitations and user demand before selecting a native wrapper,
+  cross-platform client, or separate platform-native applications.
+- [ ] If a native client is approved, define and test the versioned user API,
+  device-session lifecycle, realtime recovery, push registration, idempotency,
+  and compatibility contract described by the RFD.

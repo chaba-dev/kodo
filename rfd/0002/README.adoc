@@ -1,0 +1,166 @@
+:authors: Darwin D Wu <darwin67@users.noreply.github.com>
+:state: prediscussion
+:discussion:
+:labels: software, mobile, pwa, user-interface
+
+= RFD 2 Extend Kodo to mobile and tablet clients
+
+== Goal
+
+Allow phones and tablets to monitor and control Kodo sessions without moving
+repository access or command execution onto those devices. The first client
+should be a responsive Progressive Web App built on the existing Phoenix
+LiveView interface, while the control-plane boundary must leave room for native
+clients if product needs later justify a separate application.
+
+Mobile and tablet devices are control surfaces. They display session history,
+agent output, tool activity, runner status, and diffs; send follow-up messages;
+and resolve approval requests. Existing desktop or hosted runners continue to
+own workspaces and execute tools.
+
+== Options considered
+
+=== Responsive LiveView PWA
+
+A responsive PWA reuses the existing browser authentication, LiveView session
+pages, server-side rendering, and realtime updates. It provides one client
+implementation across desktop browsers, phones, and tablets and is the fastest
+way to validate the mobile information architecture.
+
+The PWA may be installed to a device home screen and can later add Web Push for
+completed turns, failures, and approval requests. Its principal limitation is
+that LiveView navigation and interaction require a connection to the control
+plane.
+
+=== Native wrapper
+
+A Capacitor or small platform WebView wrapper could distribute the responsive
+application through app stores and incrementally add deep links, secure
+credential integration, and native notifications. This remains an option after
+the PWA is usable, but it should not drive the initial architecture. A wrapper
+introduces cookie, navigation, file-handling, and app-review concerns without
+removing the server connectivity requirement.
+
+=== Cross-platform native client
+
+A React Native, Expo, Flutter, or equivalent client could provide stronger
+platform integration, background behavior, secure storage, and adaptive tablet
+navigation. It would also create a second UI implementation and require a
+stable, versioned client API with device authentication and realtime event
+delivery.
+
+=== Platform-native clients
+
+Separate SwiftUI and Android clients offer the greatest platform-specific
+polish and the highest implementation and maintenance cost. They are not
+justified for the first mobile release. LiveView Native may be evaluated as a
+prototype, but ecosystem maturity, library availability, debugging, and
+staffing must be assessed before relying on it for primary clients.
+
+== Decision
+
+Kodo will begin with a responsive LiveView PWA. It will be a connected
+application with graceful disconnection, not an offline-first application.
+Native clients may follow if notifications, background operation, platform
+integration, app-store expectations, or measured product usage justify the
+additional codebase.
+
+Phone layouts use navigation between the session list and session detail.
+Tablet layouts use the available width for a persistent session sidebar and a
+detail pane. Both layouts prioritize the timeline, pending approvals, runner
+state, a message composer, and readable diffs. Touch targets, safe areas,
+keyboard behavior, horizontal diff navigation, and accessibility are part of
+the supported interface rather than later polish.
+
+== Connectivity and offline boundary
+
+LiveView initially renders HTML on the server and then maintains the page over
+a WebSocket. When connectivity is lost, the already rendered page can remain
+visible, but server-driven updates, navigation, and controls cannot complete.
+LiveView reconnects automatically; after reconnection Kodo reloads
+authoritative session state and resumes durable event delivery.
+
+This limitation matches Kodo's execution boundary. Sending a prompt, resolving
+an approval, cancelling work, receiving new output, and operating a remote
+runner all require the control plane. A native client could cache more data but
+could not perform those operations while the backend is unavailable.
+
+The PWA must therefore provide these disconnected behaviors:
+
+* Keep the last rendered session visible and clearly label it stale.
+* Disable send, approve, deny, cancel, and other server mutations while
+  disconnected.
+* Preserve unsent message drafts locally and let the user explicitly submit
+  them after reconnection.
+* Reconnect and refresh authoritative session, approval, runner, and timeline
+  state automatically.
+* Cache the application manifest and static assets needed to preserve a useful
+  disconnected screen where browser support permits it.
+
+Kodo must not automatically queue approvals, denials, or cancellation. Those
+commands can become invalid or unsafe while the device is disconnected and
+must be confirmed against fresh state. Message submission may use a client
+request identifier for idempotency, but the initial PWA preserves only the
+draft rather than silently queueing it.
+
+== Reconnection and consistency
+
+PostgreSQL events and session projections remain authoritative. The client
+must never infer that a control action succeeded merely because it was tapped.
+After reconnecting, it refreshes the current projection and replays events after
+its last durable sequence or accepts an equivalent full LiveView remount.
+
+Approval and cancellation controls remain unavailable until fresh state is
+known. Repeated message requests use a stable client request identifier so a
+lost response cannot produce duplicate turns when the user retries.
+
+== Future native-client boundary
+
+The initial PWA does not require a new mobile API. If a native client is
+approved, Kodo should expose a versioned, user-facing API rather than treating
+the existing agent token and CLI-oriented endpoints as the permanent mobile
+contract. That boundary should include:
+
+* Separately revocable device sessions, secure credential storage, and token
+  rotation appropriate for untrusted mobile devices.
+* Paginated session, timeline, and runner queries scoped to the authenticated
+  user.
+* Realtime session events through an authenticated user WebSocket channel or
+  server-sent events, with cursor-based recovery after disconnection.
+* Stable schemas, machine-readable errors, idempotent retryable mutations, and
+  compatibility rules across client and server releases.
+* Device registration, push notification preferences, and deep links to the
+  affected session or pending approval.
+
+The runner WebSocket remains private to runners and is not reused as a user
+client protocol.
+
+== Security and notifications
+
+Notification bodies should disclose no repository content, command text, diff,
+or model output on a locked device by default. A notification identifies the
+event category and opens the authenticated session, where current authorization
+and session ownership are checked again. Approval actions should not execute
+directly from a notification until the product defines an authenticated,
+fresh-state confirmation flow.
+
+Browser sessions continue to use the existing authenticated LiveView router
+scope. Any future native API passes the authenticated user scope into context
+operations and enforces ownership in database queries.
+
+== Rollout and acceptance
+
+The responsive interface and disconnected state ship before installability or
+push notifications. Representative phone and tablet viewport tests cover the
+session list, active timeline, long diff, pending approval, software keyboard,
+disconnection, and reconnection. Reconnection tests verify that controls remain
+disabled until fresh state arrives and that missed events and changed approval
+state are rendered without duplicate turns.
+
+Native-client work requires a separate decision based on observed PWA limits
+and must not delay a usable mobile web experience.
+
+== Implementation
+
+Progress against this proposal is tracked in the
+link:IMPLEMENTATION.org[RFD 2 implementation checklist].
