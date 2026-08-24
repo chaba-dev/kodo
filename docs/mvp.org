@@ -754,22 +754,22 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 - [X] Exit criterion: CLI and browser can observe and control the same active
   session, and either can disconnect without terminating it.
 
-** TODO Milestone 6: Bound control-plane database load
+** DONE Milestone 6: Bound control-plane database load
 
 The design boundary and acceptance measurements are tracked in
 [[file:../rfd/0001/README.adoc][RFD 1: Bound control-plane database load]]. This milestone remains the MVP
 delivery checklist.
 
-- [ ] Stop terminal session coordinators after finalization and lazily restart
+- [X] Stop terminal session coordinators after finalization and lazily restart
   them when a follow-up turn arrives.
-- [ ] Add a partial index for sessions in ~running~ or ~awaiting_approval~ state
+- [X] Add a partial index for sessions in ~running~ or ~awaiting_approval~ state
   so recovery does not scan historical terminal sessions.
-- [ ] Replace fixed per-replica recovery scans with configurable,
+- [X] Replace fixed per-replica recovery scans with configurable,
   cluster-coordinated recovery that preserves the ownership-failure detection
   bound.
-- [ ] Add load-focused tests and operational metrics for heartbeat, recovery,
+- [X] Add load-focused tests and operational metrics for heartbeat, recovery,
   and ownership-fencing query rates.
-- [ ] Exit criterion: database work remains bounded by live replicas and active
+- [X] Exit criterion: database work remains bounded by live replicas and active
   sessions, not by historical sessions or completed coordinators, while failed
   owners are still recovered within the documented availability bound.
 

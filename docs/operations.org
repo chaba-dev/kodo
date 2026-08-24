@@ -122,6 +122,55 @@ Instance registration and heartbeat failures are fatal to the instance manager
 so supervision can fail closed rather than continue advertising state it can no
 longer maintain.
 
+* Control-plane database load
+
+One replica holds the PostgreSQL advisory-lock lease for active-session
+recovery. The lease is connection-scoped and is released automatically when the
+recovery process, database connection, or replica exits. Non-leaders retry the
+election every second by default; only the leader scans recovery candidates.
+The candidate query uses the ~sessions_active_recovery_index~ partial index and
+therefore reads ~running~ and ~awaiting_approval~ sessions rather than terminal
+history.
+
+The leader sweeps every 5 seconds by default. Set
+~KODO_RECOVERY_SWEEP_INTERVAL~ to a positive number of milliseconds to change
+that interval. With the default 15-second ownership staleness threshold,
+5-second sweep, and 1-second election retry, a failed owner is normally
+eligible and rediscovered within 20 seconds. Increasing the sweep interval adds
+the same amount to the worst-case rediscovery bound. Decreasing it increases
+database and placement traffic linearly; keep it below the required recovery
+objective and avoid setting it below the heartbeat interval without measured
+need. The elected recovery worker reserves one database-pool connection while
+holding its lease, so production pool sizing must leave one connection for it.
+
+Terminal coordinators stop normally after completion, failure, or cancellation.
+A follow-up message reconstructs a coordinator from the durable event log. The
+steady-state coordinator count should consequently follow active work, not
+retained session history.
+
+The following bounded-cardinality metrics are available in LiveDashboard and
+to configured Telemetry reporters:
+
+| Metric                                  | Tag ~operation~ values                                                    |
+|-----------------------------------------+---------------------------------------------------------------------------|
+| ~kodo.control_plane.query.count~        | ~instance_heartbeat~, ~recovery_discovery~, ~ownership_fencing~, ~session_index_refresh~ |
+| ~kodo.control_plane.query.total_time~   | The same fixed operation set                                              |
+
+User, session, instance, and replica identifiers are deliberately excluded
+from metric labels. Under the current query contracts, one heartbeat emits two
+instrumented queries, one recovery sweep emits one discovery query plus work
+linear in active candidates, one ownership assertion emits one fencing query,
+and one session-index row refresh emits two queries (the scoped session and its
+runner). Index-invisible durable events and events owned by unrelated users
+emit no session-index refresh query.
+
+Alert on sustained changes from these ratios rather than raw cluster totals.
+Investigate recovery work that grows with completed history, heartbeat work
+that grows with sessions, or index refreshes without index-visible changes.
+Use query duration together with count: stable counts with rising duration
+usually indicate database contention or a changed query plan, while rising
+counts indicate amplification in application behavior.
+
 * Graceful shutdown
 
 Use an application shutdown path that invokes OTP's ~Application.prep_stop/1~.
