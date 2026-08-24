@@ -19,7 +19,7 @@ jobs:
       github.event.issue.pull_request &&
       github.event.comment.body == '/live-smoke-test' &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       issues: write
@@ -56,7 +56,7 @@ jobs:
     name: Run live OpenAI smoke test
     needs: resolve
     environment: live-smoke
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
@@ -131,7 +131,7 @@ jobs:
     name: Report live smoke result
     needs: [resolve, smoke]
     if: ${{ always() && needs.resolve.result == 'success' }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       issues: write
     steps:
