@@ -44,6 +44,7 @@ defmodule Kodo.LLM.ReqLLM do
         receive_timeout: Keyword.fetch!(opts, :timeout),
         total_timeout: Keyword.fetch!(opts, :timeout)
       ]
+      |> put_reasoning_effort(opts[:reasoning])
 
     with {:ok, response} <- ReqLLM.generate_text(model, context, request_opts) do
       classified = Response.classify(response)
@@ -59,6 +60,17 @@ defmodule Kodo.LLM.ReqLLM do
        }}
     end
   end
+
+  defp put_reasoning_effort(opts, reasoning) when reasoning in [nil, "none"], do: opts
+
+  defp put_reasoning_effort(opts, reasoning) when reasoning in ~w(minimal low medium high) do
+    Keyword.put(opts, :reasoning_effort, reasoning_effort(reasoning))
+  end
+
+  defp reasoning_effort("minimal"), do: :minimal
+  defp reasoning_effort("low"), do: :low
+  defp reasoning_effort("medium"), do: :medium
+  defp reasoning_effort("high"), do: :high
 
   defp message(%{"role" => "system", "content" => content}), do: Context.system(content)
   defp message(%{"role" => "user", "content" => content}), do: Context.user(content)

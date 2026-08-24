@@ -41,6 +41,12 @@ defmodule Kodo.SessionsTest do
     assert event.payload["runner_id"] == runner.id
     assert event.payload["approval_policy"] == "standard"
     assert event.payload["status"] == "idle"
+    assert event.payload["model_mapping"]["profile"] == "balanced"
+
+    assert event.payload["model_mapping"]["roles"]["primary"]["model"] ==
+             "openai:gpt-4o-mini"
+
+    assert event.payload["model_mapping"]["roles"]["search"]["sources"]["model"] == "profile"
   end
 
   test "persists a selected approval policy", %{runner: runner, scope: scope} do
@@ -54,6 +60,39 @@ defmodule Kodo.SessionsTest do
 
     assert session.approval_policy == "safe"
     assert hd(Sessions.events_after(session.id)).payload["approval_policy"] == "safe"
+  end
+
+  test "uses the balanced profile when no session model is selected", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Recommended model"
+             })
+
+    assert session.model == "openai:gpt-4o-mini"
+
+    mapping = hd(Sessions.events_after(session.id)).payload["model_mapping"]
+    assert mapping["profile"] == "balanced"
+    assert mapping["roles"]["primary"]["sources"]["model"] == "profile"
+  end
+
+  test "rejects a present invalid session model instead of using the profile default", %{
+    runner: runner,
+    scope: scope
+  } do
+    for model <- [nil, "", 123] do
+      assert {:error, changeset} =
+               Sessions.create_session(scope, %{
+                 runner_id: runner.id,
+                 title: "Invalid model",
+                 model: model
+               })
+
+      assert errors_on(changeset).model != []
+    end
   end
 
   test "lists only the current user's sessions with their runners", %{

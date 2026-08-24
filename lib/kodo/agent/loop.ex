@@ -1,6 +1,8 @@
 defmodule Kodo.Agent.Loop do
   @moduledoc "Event-driven, restartable primary-agent model and runner loop."
 
+  alias Kodo.Agent.ModelMapping
+  alias Kodo.Agent.Roles
   alias Kodo.Agent.Tools
   alias Kodo.LLM
   alias Kodo.RunnerProtocol
@@ -124,13 +126,20 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp infer(session_id, projection, events, adapter, budgets, invocation, ownership) do
+    mapping = projection.model_mapping || legacy_mapping(projection.model)
+    primary = ModelMapping.role!(mapping, :primary)
+    contract = Roles.fetch!(:primary, primary["role_contract_version"])
+    tools = Tools.definitions(contract.toolset_version)
+
     with :ok <- within_budget(invocation, usage(current_turn(events)), budgets),
-         {:ok, invocation_id} <- start_invocation(session_id, invocation, ownership),
+         {:ok, invocation_id} <-
+           start_invocation(session_id, invocation, mapping, primary, ownership),
          :ok <- rehoming_boundary(),
          {:ok, response} <-
            Sessions.dispatch_if_owner(ownership, fn ->
-             adapter.generate(projection.model, transcript(events), Tools.definitions(),
-               timeout: budgets[:model_timeout]
+             adapter.generate(primary["model"], transcript(events, contract), tools,
+               timeout: budgets[:model_timeout],
+               reasoning: primary["reasoning"]
              )
            end),
          {:ok, _event} <-
@@ -146,8 +155,8 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp transcript(events) do
-    system = %{"role" => "system", "content" => system_prompt()}
+  defp transcript(events, contract) do
+    system = %{"role" => "system", "content" => contract.prompt}
 
     Enum.reduce(events, [system], fn event, messages ->
       case transcript_message(event) do
@@ -189,7 +198,7 @@ defmodule Kodo.Agent.Loop do
   defp assistant_message(%{"assistant" => provider_state}),
     do: %{"role" => "assistant", "provider_state" => provider_state}
 
-  defp start_invocation(session_id, continuation, ownership) do
+  defp start_invocation(session_id, continuation, mapping, primary, ownership) do
     invocation_id = Ecto.UUID.generate()
 
     case Sessions.append_event(
@@ -197,8 +206,17 @@ defmodule Kodo.Agent.Loop do
            "model_invocation_started",
            %{
              "invocation_id" => invocation_id,
-             "continuation" => continuation
+             "continuation" => continuation,
+             "role" => "primary",
+             "provider" => primary["provider"],
+             "model" => primary["model"],
+             "reasoning" => primary["reasoning"],
+             "role_contract_version" => primary["role_contract_version"],
+             "role_prompt_version" => primary["role_contract_version"],
+             "toolset_version" => primary["toolset_version"],
+             "model_mapping" => mapping
            },
+           version: 2,
            ownership: ownership
          ) do
       {:ok, _event} -> {:ok, invocation_id}
@@ -816,7 +834,6 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp system_prompt,
-    do:
-      "You are Kodo's primary coding agent. Inspect evidence, make the smallest correct patch, and verify it."
+  defp legacy_mapping(model),
+    do: ModelMapping.balanced([{"session", %{primary: %{model: model}}}])
 end

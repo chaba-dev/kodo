@@ -22,8 +22,9 @@ enum Commands {
         task: String,
         #[arg(long)]
         title: Option<String>,
-        #[arg(long, default_value = "openai:gpt-4o-mini")]
-        model: String,
+        /// Override the balanced profile's primary model for this session.
+        #[arg(long)]
+        model: Option<String>,
         #[arg(long, default_value = "standard", value_parser = ["standard", "safe", "read-only"])]
         approval_policy: String,
         #[arg(

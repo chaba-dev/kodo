@@ -1163,6 +1163,7 @@ defmodule Kodo.Sessions do
   defp create_session_locked(user, attrs) do
     _runner = authorize_runner!(user, attrs[:runner_id] || attrs["runner_id"])
     session = if user, do: %Session{user_id: user.id}, else: %Session{}
+    {model_mapping, attrs} = resolve_session_model(attrs)
 
     with {:ok, session} <- session |> Session.create_changeset(attrs) |> Repo.insert(),
          {:ok, event} <-
@@ -1173,6 +1174,7 @@ defmodule Kodo.Sessions do
                "title" => session.title,
                "runner_id" => session.runner_id,
                "model" => session.model,
+               "model_mapping" => model_mapping,
                "approval_policy" => session.approval_policy,
                "status" => session.status
              },
@@ -1181,6 +1183,36 @@ defmodule Kodo.Sessions do
       {Repo.get!(Session, session.id), event}
     else
       {:error, changeset} -> Repo.rollback(changeset)
+    end
+  end
+
+  defp resolve_session_model(attrs) do
+    case fetch_attr(attrs, :model) do
+      :error ->
+        mapping = Kodo.Agent.ModelMapping.balanced()
+        primary = Kodo.Agent.ModelMapping.role!(mapping, :primary)
+        {mapping, put_session_model(attrs, primary["model"])}
+
+      {:ok, model} when is_binary(model) and model != "" ->
+        {Kodo.Agent.ModelMapping.balanced([{"session", %{primary: %{model: model}}}]), attrs}
+
+      {:ok, _invalid} ->
+        {Kodo.Agent.ModelMapping.balanced(), attrs}
+    end
+  end
+
+  defp fetch_attr(attrs, key) do
+    case Map.fetch(attrs, key) do
+      :error -> Map.fetch(attrs, Atom.to_string(key))
+      result -> result
+    end
+  end
+
+  defp put_session_model(attrs, model) do
+    if Enum.any?(Map.keys(attrs), &is_binary/1) do
+      Map.put(attrs, "model", model)
+    else
+      Map.put(attrs, :model, model)
     end
   end
 
