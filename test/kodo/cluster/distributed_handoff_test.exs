@@ -88,8 +88,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
     assert {:ok, draining_source} = Instances.begin_drain(source)
     assert draining_source.boot_id == source.boot_id
     :ok = :erpc.call(peer_node, Process, :send, [Kodo.Sessions.Recovery, :retry, []])
-    _ = :erpc.call(peer_node, :sys, :get_state, [Kodo.Sessions.Recovery])
-    assert Sessions.get_session!(session.id).owner_boot_id == target.boot_id
+    assert_eventually_owned(session.id, target.boot_id, peer_node)
     assert Enum.any?(Discovery.members(:session, session.id), &(node(&1) == peer_node))
 
     complete_approved_tool(scope, session, runner, first_approval)
@@ -240,6 +239,29 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
              )
 
     assert new_ownership.epoch > winning_ownership.epoch
+  end
+
+  defp assert_eventually_owned(session_id, expected_boot_id, peer_node, attempts \\ 10)
+
+  defp assert_eventually_owned(session_id, expected_boot_id, _peer_node, 0) do
+    assert Sessions.get_session!(session_id).owner_boot_id == expected_boot_id
+  end
+
+  defp assert_eventually_owned(session_id, expected_boot_id, peer_node, attempts) do
+    if Sessions.get_session!(session_id).owner_boot_id == expected_boot_id do
+      :ok
+    else
+      state = :erpc.call(peer_node, :sys, :get_state, [Kodo.Sessions.Recovery])
+
+      if state.sweep_task do
+        task_ref = Process.monitor(state.sweep_task.pid)
+        assert_receive {:DOWN, ^task_ref, :process, _pid, _reason}, 1_000
+      else
+        :ok = :erpc.call(peer_node, Process, :send, [Kodo.Sessions.Recovery, :retry, []])
+      end
+
+      assert_eventually_owned(session_id, expected_boot_id, peer_node, attempts - 1)
+    end
   end
 
   defp complete_approved_tool(scope, session, runner, approval_id) do

@@ -33,6 +33,8 @@ defmodule Kodo.Sessions.ActiveSession do
 
   def state(pid), do: GenServer.call(pid, :state)
 
+  def stop_if_terminal(pid), do: GenServer.call(pid, :stop_if_terminal)
+
   def start_turn(pid, content, client_request_id \\ nil),
     do: GenServer.call(pid, {:start_turn, content, client_request_id})
 
@@ -75,7 +77,17 @@ defmodule Kodo.Sessions.ActiveSession do
   end
 
   @impl true
-  def handle_call(:state, _from, state), do: {:reply, state.projection, state}
+  def handle_call(:state, _from, state) do
+    if terminal?(state.projection),
+      do: {:stop, :normal, state.projection, state},
+      else: {:reply, state.projection, state}
+  end
+
+  def handle_call(:stop_if_terminal, _from, state) do
+    if terminal?(state.projection),
+      do: {:stop, :normal, :ok, state},
+      else: {:reply, :ok, state}
+  end
 
   def handle_call(
         {:begin_drain, owner_boot_id},
@@ -129,7 +141,7 @@ defmodule Kodo.Sessions.ActiveSession do
   end
 
   def handle_call(:cancel, _from, %{task: nil} = state),
-    do: {:reply, {:error, :not_running}, state}
+    do: {:stop, :normal, {:error, :not_running}, state}
 
   def handle_call(:cancel, _from, state) do
     case Task.shutdown(state.task, :brutal_kill) do
@@ -260,6 +272,9 @@ defmodule Kodo.Sessions.ActiveSession do
        do: start_loop(session_id, ownership)
 
   defp maybe_start_loop(_projection, _ownership), do: nil
+
+  defp terminal?(%{status: status}),
+    do: status not in ["idle", "running", "awaiting_approval"]
 
   defp start_loop(session_id, ownership) do
     Task.async(fn -> Loop.run(session_id, ownership: ownership) end)

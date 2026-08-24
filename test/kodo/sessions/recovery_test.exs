@@ -112,6 +112,45 @@ defmodule Kodo.Sessions.RecoveryTest do
     stop_recovery!(:second_blocked_recovery, second)
   end
 
+  test "ignores a sweep timer scheduled by an earlier lease" do
+    attach_recovery_query_telemetry()
+    test_pid = self()
+
+    sweep = fn ->
+      send(test_pid, {:timed_recovery_sweep_started, self()})
+
+      receive do
+        :finish_sweep -> :ok
+      end
+    end
+
+    recovery =
+      start_recovery!(:timed_recovery,
+        lease_backend: :database,
+        sweep: sweep,
+        sweep_interval: 500
+      )
+
+    await_database_leader(recovery)
+    assert_receive {:timed_recovery_sweep_started, first_sweep}
+    send(first_sweep, :finish_sweep)
+    await_sweep_completion(recovery)
+
+    old_lease = :sys.get_state(recovery).lease_pid
+    old_lease_ref = Process.monitor(old_lease)
+    backend_pid = :sys.get_state(recovery).lease_backend_pid
+    assert [[true]] = Repo.query!("SELECT pg_terminate_backend($1)", [backend_pid]).rows
+    assert_receive {:DOWN, ^old_lease_ref, :process, ^old_lease, _reason}, 1_000
+    assert_receive {:timed_recovery_sweep_started, second_sweep}, 1_000
+
+    _timer_ref = Process.send_after(self(), :old_sweep_timer_elapsed, 600)
+    assert_receive :old_sweep_timer_elapsed, 1_000
+    assert :sys.get_state(recovery).sweep_task.pid != nil
+
+    send(second_sweep, :finish_sweep)
+    stop_recovery!(:timed_recovery, recovery)
+  end
+
   defp start_recovery!(id, extra_opts \\ []) do
     start_supervised!(%{
       id: id,
@@ -147,6 +186,16 @@ defmodule Kodo.Sessions.RecoveryTest do
     end
   end
 
+  defp await_database_leader(recovery) do
+    if :sys.get_state(recovery).leader? do
+      recovery
+    else
+      assert_receive {:recovery_query, operation, _pid}, 1_000
+      assert operation in [:recovery_election, :recovery_lease, :recovery_discovery]
+      await_database_leader(recovery)
+    end
+  end
+
   defp attach_recovery_query_telemetry do
     handler_id = "recovery-database-lease-test-#{System.unique_integer([:positive])}"
 
@@ -161,6 +210,13 @@ defmodule Kodo.Sessions.RecoveryTest do
       )
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp await_sweep_completion(recovery) do
+    case :sys.get_state(recovery).sweep_task do
+      nil -> :ok
+      _task -> await_sweep_completion(recovery)
+    end
   end
 
   defp stop_recovery!(id, recovery) do

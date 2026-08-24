@@ -7,6 +7,7 @@ defmodule Kodo.Sessions.Recovery do
   alias Kodo.ControlPlaneTelemetry
   alias Kodo.Repo
   alias Kodo.Sessions
+  alias Kodo.Sessions.ActiveSession
 
   @lease_key "kodo:active-session-recovery"
   @try_lock_sql "SELECT pg_try_advisory_lock(hashtextextended($1, 0)), pg_backend_pid()"
@@ -38,6 +39,7 @@ defmodule Kodo.Sessions.Recovery do
         leader?: false,
         lease_pid: nil,
         lease_ref: nil,
+        retry_pending?: false,
         sweep: Keyword.get(config, :sweep, &recover_active_sessions/0),
         sweep_interval: Keyword.fetch!(config, :sweep_interval),
         sweep_task: nil,
@@ -88,8 +90,14 @@ defmodule Kodo.Sessions.Recovery do
         %{sweep_task: %Task{ref: task_ref}} = state
       ) do
     Process.demonitor(task_ref, [:flush])
-    schedule_sweep(state.sweep_interval)
-    {:noreply, %{state | sweep_task: nil}}
+    state = %{state | sweep_task: nil}
+
+    if state.retry_pending? do
+      {:noreply, state |> Map.put(:retry_pending?, false) |> validate_lease()}
+    else
+      schedule_sweep(state.sweep_interval, state.lease_ref)
+      {:noreply, state}
+    end
   end
 
   def handle_info(
@@ -100,10 +108,13 @@ defmodule Kodo.Sessions.Recovery do
     {:stop, {:recovery_sweep_failed, result}, %{state | sweep_task: nil}}
   end
 
-  def handle_info(:sweep, %{leader?: true, validation_ref: nil} = state),
-    do: {:noreply, validate_lease(state)}
+  def handle_info(
+        {:sweep, lease_ref},
+        %{leader?: true, lease_ref: lease_ref, sweep_task: nil, validation_ref: nil} = state
+      ),
+      do: {:noreply, validate_lease(state)}
 
-  def handle_info(:sweep, state), do: {:noreply, state}
+  def handle_info({:sweep, _lease_ref}, state), do: {:noreply, state}
 
   # Retain explicit retries for uncoordinated tests and single-process recovery tools.
   def handle_info(:retry, %{coordinated?: false} = state) do
@@ -111,8 +122,11 @@ defmodule Kodo.Sessions.Recovery do
     {:noreply, state}
   end
 
-  def handle_info(:retry, %{leader?: true, validation_ref: nil} = state),
+  def handle_info(:retry, %{leader?: true, sweep_task: nil, validation_ref: nil} = state),
     do: {:noreply, validate_lease(state)}
+
+  def handle_info(:retry, %{leader?: true} = state),
+    do: {:noreply, %{state | retry_pending?: true}}
 
   def handle_info(:retry, state), do: {:noreply, state}
 
@@ -127,6 +141,7 @@ defmodule Kodo.Sessions.Recovery do
          lease_backend_pid: nil,
          lease_pid: nil,
          lease_ref: nil,
+         retry_pending?: false,
          validation_ref: nil
      }}
   end
@@ -148,12 +163,23 @@ defmodule Kodo.Sessions.Recovery do
     Enum.filter(session_ids, fn session_id ->
       case Sessions.get_session(session_id) do
         %{status: status} when status in ["running", "awaiting_approval"] ->
-          not match?({:ok, _pid}, Sessions.reconcile_started(session_id))
+          recover_session(session_id)
 
         _inactive_or_missing ->
           false
       end
     end)
+  end
+
+  defp recover_session(session_id) do
+    case Sessions.reconcile_started(session_id) do
+      {:ok, pid} ->
+        stop_if_terminal(pid)
+        false
+
+      _error ->
+        true
+    end
   end
 
   defp mark_placement_ready do
@@ -288,6 +314,14 @@ defmodule Kodo.Sessions.Recovery do
     %{state | sweep_task: nil}
   end
 
-  defp schedule_sweep(:infinity), do: :ok
-  defp schedule_sweep(interval), do: Process.send_after(self(), :sweep, interval)
+  defp stop_if_terminal(pid) do
+    ActiveSession.stop_if_terminal(pid)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp schedule_sweep(:infinity, _lease_ref), do: :ok
+
+  defp schedule_sweep(interval, lease_ref),
+    do: Process.send_after(self(), {:sweep, lease_ref}, interval)
 end

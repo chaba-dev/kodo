@@ -455,6 +455,30 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
   end
 
+  test "a state read stops a terminal coordinator created during a storage race", %{
+    session: session
+  } do
+    assert {:ok, _event} = Sessions.set_status(session.id, "completed")
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    coordinator_ref = Process.monitor(coordinator)
+
+    assert {:ok, %{status: "completed"}} = Sessions.active_state(session.id)
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
+  end
+
+  test "recovery stops a coordinator when an active discovery row became terminal", %{
+    session: session
+  } do
+    assert {:ok, _event} = Sessions.set_status(session.id, "running")
+    assert Enum.any?(Sessions.list_active_sessions(), &(&1.id == session.id))
+    assert {:ok, _event} = Sessions.set_status(session.id, "completed")
+    assert {:ok, coordinator} = Sessions.reconcile_started(session.id)
+    coordinator_ref = Process.monitor(coordinator)
+
+    assert :ok = ActiveSession.stop_if_terminal(coordinator)
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
+  end
+
   test "retries a follow-up that races with a terminal coordinator exit", %{session: session} do
     {:ok, exiting} =
       DynamicSupervisor.start_child(

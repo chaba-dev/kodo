@@ -18,6 +18,7 @@ defmodule Kodo.Test.ClusterPeer do
       {Registry, keys: :unique, name: Kodo.SessionRegistry},
       {DynamicSupervisor, name: Kodo.SessionSupervisor, strategy: :one_for_one},
       {Kodo.Cluster.InstanceManager, Keyword.put(instance_options, :ready, false)},
+      {Task.Supervisor, name: Kodo.ControlPlaneTaskSupervisor},
       {Kodo.Sessions.Recovery, []}
     ]
 
