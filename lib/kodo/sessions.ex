@@ -433,6 +433,46 @@ defmodule Kodo.Sessions do
   end
 
   def active_state(session_id) do
+    case Discovery.session(session_id) do
+      {:ok, pid} ->
+        active_state_from_coordinator(pid, session_id)
+
+      :error ->
+        active_state_from_storage(session_id)
+    end
+  end
+
+  defp active_state_from_coordinator(pid, session_id) do
+    result = call_coordinator(pid, fn -> {:ok, Kodo.Sessions.ActiveSession.state(pid)} end)
+
+    if node(pid) == node(),
+      do: reconcile_unavailable_state(result, session_id),
+      else: result
+  end
+
+  defp reconcile_unavailable_state({:error, :coordinator_unavailable} = error, session_id) do
+    case active_state_from_storage(session_id) do
+      {:error, :not_found} -> error
+      result -> result
+    end
+  end
+
+  defp reconcile_unavailable_state(result, _session_id), do: result
+
+  defp active_state_from_storage(session_id) do
+    case get_session(session_id) do
+      %Session{status: status} when status in ["running", "awaiting_approval"] ->
+        active_coordinator_state(session_id)
+
+      %Session{} ->
+        {:ok, session_id |> events_after() |> Projection.from_events()}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
+  defp active_coordinator_state(session_id) do
     with {:ok, pid} <- ensure_started(session_id) do
       call_coordinator(pid, fn -> {:ok, Kodo.Sessions.ActiveSession.state(pid)} end)
     end
@@ -480,16 +520,29 @@ defmodule Kodo.Sessions do
   end
 
   def cancel(session_id) do
+    case get_session(session_id) do
+      %Session{status: status} when status in ["running", "awaiting_approval"] ->
+        cancel_active_session(session_id)
+
+      %Session{} ->
+        {:error, :not_running}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
+  defp cancel_active_session(session_id) do
     with {:ok, pid} <- ensure_started(session_id) do
       call_coordinator(pid, fn -> Kodo.Sessions.ActiveSession.cancel(pid) end)
     end
   end
 
-  defp call_coordinator(pid, call) do
+  defp call_coordinator(_pid, call) do
     call.()
   catch
     :exit, reason ->
-      if node(pid) != node() and coordinator_unavailable?(reason) do
+      if coordinator_unavailable?(reason) do
         {:error, :coordinator_unavailable}
       else
         exit(reason)
@@ -498,6 +551,7 @@ defmodule Kodo.Sessions do
 
   defp coordinator_unavailable?({:nodedown, _node}), do: true
   defp coordinator_unavailable?({:noproc, _call}), do: true
+  defp coordinator_unavailable?({:normal, {GenServer, :call, _args}}), do: true
   defp coordinator_unavailable?({{:nodedown, _node}, _call}), do: true
   defp coordinator_unavailable?({{:noproc, _detail}, _call}), do: true
   defp coordinator_unavailable?(_reason), do: false
@@ -518,7 +572,7 @@ defmodule Kodo.Sessions do
   end
 
   defp reconcile_cancel({:error, reason}, scope, session_id)
-       when reason in [:not_running, :already_finished] do
+       when reason in [:not_running, :already_finished, :coordinator_unavailable] do
     if get_session(scope, session_id).status == "cancelled", do: :ok, else: {:error, reason}
   end
 

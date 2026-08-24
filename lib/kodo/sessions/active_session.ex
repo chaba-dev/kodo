@@ -142,7 +142,7 @@ defmodule Kodo.Sessions.ActiveSession do
       nil ->
         case Sessions.cancel_session(state.projection.id, ownership: state.ownership) do
           {:ok, _cancelled} ->
-            {:reply, :ok, %{state | task: nil}}
+            {:stop, :normal, :ok, %{state | task: nil}}
 
           {:error, :stale_ownership} = error ->
             {:stop, :normal, error, stop_task(state)}
@@ -219,11 +219,11 @@ defmodule Kodo.Sessions.ActiveSession do
     case finalize(state.projection.id, result, state.ownership) do
       {:ok, _events} ->
         reply_drain_waiters(state, :ok)
-        {:noreply, state |> Map.put(:task, nil) |> Map.delete(:drain_waiters)}
+        {:stop, :normal, state |> Map.put(:task, nil) |> Map.delete(:drain_waiters)}
 
       {:error, :session_not_active} ->
         reply_drain_waiters(state, :ok)
-        {:noreply, state |> Map.put(:task, nil) |> Map.delete(:drain_waiters)}
+        {:stop, :normal, state |> Map.put(:task, nil) |> Map.delete(:drain_waiters)}
 
       {:error, :stale_ownership} ->
         reply_drain_waiters(state, {:error, :stale_ownership})
@@ -238,10 +238,10 @@ defmodule Kodo.Sessions.ActiveSession do
   defp finish_cancelled_task(state, result) do
     case finalize(state.projection.id, result, state.ownership) do
       {:ok, _events} ->
-        {:reply, {:error, :already_finished}, %{state | task: nil}}
+        {:stop, :normal, {:error, :already_finished}, %{state | task: nil}}
 
       {:error, :session_not_active} ->
-        {:reply, {:error, :already_finished}, %{state | task: nil}}
+        {:stop, :normal, {:error, :already_finished}, %{state | task: nil}}
 
       {:error, :stale_ownership} = error ->
         {:stop, :normal, error, stop_task(state)}
