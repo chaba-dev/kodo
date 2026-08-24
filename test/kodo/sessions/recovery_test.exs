@@ -37,19 +37,7 @@ defmodule Kodo.Sessions.RecoveryTest do
   end
 
   test "relinquishes leadership when the advisory-lock connection is lost" do
-    handler_id = "recovery-database-lease-test-#{System.unique_integer([:positive])}"
-
-    :ok =
-      :telemetry.attach(
-        handler_id,
-        [:kodo, :control_plane, :query],
-        fn _event, _measurements, metadata, test_pid ->
-          send(test_pid, {:recovery_query, metadata.options[:operation], self()})
-        end,
-        self()
-      )
-
-    on_exit(fn -> :telemetry.detach(handler_id) end)
+    attach_recovery_query_telemetry()
 
     first = start_recovery!(:first_database_recovery, lease_backend: :database)
     second = start_recovery!(:second_database_recovery, lease_backend: :database)
@@ -74,6 +62,52 @@ defmodule Kodo.Sessions.RecoveryTest do
 
     stop_recovery!(:first_database_recovery, first)
     stop_recovery!(:second_database_recovery, second)
+  end
+
+  test "cancels an in-progress sweep when its advisory lease is lost" do
+    attach_recovery_query_telemetry()
+    test_pid = self()
+
+    sweep = fn ->
+      send(test_pid, {:recovery_sweep_started, self()})
+
+      receive do
+        :continue -> send(test_pid, {:recovery_sweep_continued, self()})
+      end
+
+      :ok
+    end
+
+    first =
+      start_recovery!(:first_blocked_recovery,
+        lease_backend: :database,
+        sweep: sweep
+      )
+
+    second =
+      start_recovery!(:second_blocked_recovery,
+        lease_backend: :database,
+        sweep: sweep
+      )
+
+    {leader, follower} = await_database_leader(first, second)
+    assert_receive {:recovery_sweep_started, old_sweep}
+    old_sweep_ref = Process.monitor(old_sweep)
+    backend_pid = :sys.get_state(leader).lease_backend_pid
+
+    assert [[true]] = Repo.query!("SELECT pg_terminate_backend($1)", [backend_pid]).rows
+    assert_receive {:DOWN, ^old_sweep_ref, :process, ^old_sweep, :killed}, 1_000
+    assert_receive {:recovery_sweep_started, new_sweep}, 1_000
+    refute new_sweep == old_sweep
+    assert :sys.get_state(follower).leader?
+
+    send(old_sweep, :continue)
+    refute_receive {:recovery_sweep_continued, ^old_sweep}
+    send(new_sweep, :continue)
+    assert_receive {:recovery_sweep_continued, ^new_sweep}
+
+    stop_recovery!(:first_blocked_recovery, first)
+    stop_recovery!(:second_blocked_recovery, second)
   end
 
   defp start_recovery!(id, extra_opts \\ []) do
@@ -109,6 +143,22 @@ defmodule Kodo.Sessions.RecoveryTest do
         assert operation in [:recovery_election, :recovery_lease, :recovery_discovery]
         await_database_leader(first, second)
     end
+  end
+
+  defp attach_recovery_query_telemetry do
+    handler_id = "recovery-database-lease-test-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:kodo, :control_plane, :query],
+        fn _event, _measurements, metadata, test_pid ->
+          send(test_pid, {:recovery_query, metadata.options[:operation], self()})
+        end,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
   end
 
   defp stop_recovery!(id, recovery) do
