@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict dsXhiOw0HhcOBwDXNM6t6zn5ZxikX2eSOIy5YuvLmDUXH81q6sO5HYLDwNEs7P3
+\restrict NY8m7vDraNr28uOJ9Lb0YeTKgiScHqpLY4Ilzf6dshOdUoMeUASLeTBQIhB92jM
 
 -- Dumped from database version 17.10
 -- Dumped by pg_dump version 18.4
@@ -38,6 +38,63 @@ SET default_tablespace = '';
 SET default_table_access_method = heap;
 
 --
+-- Name: cluster_placement_overrides; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cluster_placement_overrides (
+    id bigint NOT NULL,
+    artifact_revision character varying(255) NOT NULL,
+    reason character varying(1000) NOT NULL,
+    expires_at timestamp without time zone NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    inserted_at timestamp without time zone NOT NULL,
+    CONSTRAINT cluster_placement_overrides_values_not_empty CHECK (((char_length((artifact_revision)::text) > 0) AND (char_length((reason)::text) > 0)))
+);
+
+
+--
+-- Name: cluster_placement_overrides_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.cluster_placement_overrides_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: cluster_placement_overrides_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.cluster_placement_overrides_id_seq OWNED BY public.cluster_placement_overrides.id;
+
+
+--
+-- Name: control_plane_instances; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.control_plane_instances (
+    boot_id uuid NOT NULL,
+    node_name character varying(255) NOT NULL,
+    artifact_revision character varying(255) NOT NULL,
+    deployment_generation bigint NOT NULL,
+    ready boolean DEFAULT false NOT NULL,
+    draining boolean DEFAULT false NOT NULL,
+    capacity integer NOT NULL,
+    protocol_capabilities character varying(128)[] DEFAULT ARRAY[]::character varying[] NOT NULL,
+    last_seen_at timestamp without time zone DEFAULT timezone('UTC'::text, clock_timestamp()) NOT NULL,
+    inserted_at timestamp without time zone NOT NULL,
+    CONSTRAINT control_plane_instances_capabilities_valid CHECK (((cardinality(protocol_capabilities) <= 64) AND (array_position(protocol_capabilities, NULL::character varying) IS NULL) AND (array_position(protocol_capabilities, ''::character varying) IS NULL))),
+    CONSTRAINT control_plane_instances_capacity_positive CHECK ((capacity >= 1)),
+    CONSTRAINT control_plane_instances_generation_nonnegative CHECK ((deployment_generation >= 0)),
+    CONSTRAINT control_plane_instances_identity_not_empty CHECK (((char_length((node_name)::text) > 0) AND (char_length((artifact_revision)::text) > 0))),
+    CONSTRAINT control_plane_instances_lifecycle_valid CHECK ((NOT (ready AND draining)))
+);
+
+
+--
 -- Name: runners; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -53,7 +110,8 @@ CREATE TABLE public.runners (
     last_connected_at timestamp without time zone,
     last_seen_at timestamp without time zone NOT NULL,
     inserted_at timestamp without time zone NOT NULL,
-    updated_at timestamp without time zone NOT NULL
+    updated_at timestamp without time zone NOT NULL,
+    user_id bigint
 );
 
 
@@ -98,7 +156,13 @@ CREATE TABLE public.sessions (
     inserted_at timestamp without time zone NOT NULL,
     updated_at timestamp without time zone NOT NULL,
     user_id bigint NOT NULL,
-    CONSTRAINT sessions_next_event_sequence_positive CHECK ((next_event_sequence > 0))
+    approval_policy character varying(16) DEFAULT 'standard'::character varying NOT NULL,
+    client_request_id uuid,
+    owner_boot_id uuid,
+    ownership_epoch bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT sessions_approval_policy_allowed CHECK (((approval_policy)::text = ANY ((ARRAY['read-only'::character varying, 'safe'::character varying, 'standard'::character varying])::text[]))),
+    CONSTRAINT sessions_next_event_sequence_positive CHECK ((next_event_sequence > 0)),
+    CONSTRAINT sessions_ownership_epoch_nonnegative CHECK ((ownership_epoch >= 0))
 );
 
 
@@ -170,6 +234,13 @@ ALTER SEQUENCE public.users_tokens_id_seq OWNED BY public.users_tokens.id;
 
 
 --
+-- Name: cluster_placement_overrides id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cluster_placement_overrides ALTER COLUMN id SET DEFAULT nextval('public.cluster_placement_overrides_id_seq'::regclass);
+
+
+--
 -- Name: users id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -181,6 +252,22 @@ ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_
 --
 
 ALTER TABLE ONLY public.users_tokens ALTER COLUMN id SET DEFAULT nextval('public.users_tokens_id_seq'::regclass);
+
+
+--
+-- Name: cluster_placement_overrides cluster_placement_overrides_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cluster_placement_overrides
+    ADD CONSTRAINT cluster_placement_overrides_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: control_plane_instances control_plane_instances_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.control_plane_instances
+    ADD CONSTRAINT control_plane_instances_pkey PRIMARY KEY (boot_id);
 
 
 --
@@ -232,6 +319,41 @@ ALTER TABLE ONLY public.users_tokens
 
 
 --
+-- Name: cluster_placement_overrides_created_by_user_id_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX cluster_placement_overrides_created_by_user_id_index ON public.cluster_placement_overrides USING btree (created_by_user_id);
+
+
+--
+-- Name: cluster_placement_overrides_expires_at_inserted_at_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX cluster_placement_overrides_expires_at_inserted_at_index ON public.cluster_placement_overrides USING btree (expires_at, inserted_at);
+
+
+--
+-- Name: control_plane_instances_deployment_generation_artifact_revision; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX control_plane_instances_deployment_generation_artifact_revision ON public.control_plane_instances USING btree (deployment_generation, artifact_revision, ready, draining);
+
+
+--
+-- Name: control_plane_instances_last_seen_at_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX control_plane_instances_last_seen_at_index ON public.control_plane_instances USING btree (last_seen_at);
+
+
+--
+-- Name: runners_user_id_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX runners_user_id_index ON public.runners USING btree (user_id);
+
+
+--
 -- Name: runners_workspace_root_index; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -253,6 +375,13 @@ CREATE UNIQUE INDEX session_events_session_id_sequence_index ON public.session_e
 
 
 --
+-- Name: sessions_owner_boot_id_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX sessions_owner_boot_id_index ON public.sessions USING btree (owner_boot_id);
+
+
+--
 -- Name: sessions_runner_id_index; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -260,10 +389,24 @@ CREATE INDEX sessions_runner_id_index ON public.sessions USING btree (runner_id)
 
 
 --
+-- Name: sessions_user_id_client_request_id_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX sessions_user_id_client_request_id_index ON public.sessions USING btree (user_id, client_request_id) WHERE (client_request_id IS NOT NULL);
+
+
+--
 -- Name: sessions_user_id_index; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX sessions_user_id_index ON public.sessions USING btree (user_id);
+
+
+--
+-- Name: sessions_user_navigation_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX sessions_user_navigation_index ON public.sessions USING btree (user_id, updated_at DESC, id DESC);
 
 
 --
@@ -288,11 +431,35 @@ CREATE INDEX users_tokens_user_id_index ON public.users_tokens USING btree (user
 
 
 --
+-- Name: cluster_placement_overrides cluster_placement_overrides_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cluster_placement_overrides
+    ADD CONSTRAINT cluster_placement_overrides_created_by_user_id_fkey FOREIGN KEY (created_by_user_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: runners runners_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.runners
+    ADD CONSTRAINT runners_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
 -- Name: session_events session_events_session_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.session_events
     ADD CONSTRAINT session_events_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.sessions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: sessions sessions_owner_boot_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_owner_boot_id_fkey FOREIGN KEY (owner_boot_id) REFERENCES public.control_plane_instances(boot_id) ON DELETE RESTRICT;
 
 
 --
@@ -323,9 +490,16 @@ ALTER TABLE ONLY public.users_tokens
 -- PostgreSQL database dump complete
 --
 
-\unrestrict dsXhiOw0HhcOBwDXNM6t6zn5ZxikX2eSOIy5YuvLmDUXH81q6sO5HYLDwNEs7P3
+\unrestrict NY8m7vDraNr28uOJ9Lb0YeTKgiScHqpLY4Ilzf6dshOdUoMeUASLeTBQIhB92jM
 
 INSERT INTO public."schema_migrations" (version) VALUES (20260807073017);
 INSERT INTO public."schema_migrations" (version) VALUES (20260808062115);
 INSERT INTO public."schema_migrations" (version) VALUES (20260808083302);
 INSERT INTO public."schema_migrations" (version) VALUES (20260808083917);
+INSERT INTO public."schema_migrations" (version) VALUES (20260809000000);
+INSERT INTO public."schema_migrations" (version) VALUES (20260809065105);
+INSERT INTO public."schema_migrations" (version) VALUES (20260809073102);
+INSERT INTO public."schema_migrations" (version) VALUES (20260810064235);
+INSERT INTO public."schema_migrations" (version) VALUES (20260813214336);
+INSERT INTO public."schema_migrations" (version) VALUES (20260815051344);
+INSERT INTO public."schema_migrations" (version) VALUES (20260822084328);
