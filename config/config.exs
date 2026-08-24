@@ -49,6 +49,10 @@ config :kodo, Kodo.Cluster.InstanceManager,
   drain_timeout: 20_000,
   ownership_stale_after_seconds: 15
 
+config :kodo, Kodo.Sessions.Recovery,
+  sweep_interval: 5_000,
+  election_retry_interval: 1_000
+
 # Phoenix messages are capped at the cross-language protocol limit. Bandit counts the largest
 # possible WebSocket header in its frame size, while fragmented-message size counts payload bytes.
 runner_wire_bytes = 4 * 1024 * 1024

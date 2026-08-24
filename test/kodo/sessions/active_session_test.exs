@@ -548,7 +548,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
 
     {:ok, _status} = Sessions.set_status(session.id, "running")
 
-    recovery = start_supervised!({Recovery, name: nil})
+    recovery = start_supervised!({Recovery, name: nil, coordinated: false})
     assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
 
     _manager = start_instance_manager!()

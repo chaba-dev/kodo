@@ -41,6 +41,16 @@ if config_env() == :prod || artifact_revision || deployment_generation do
     deployment_generation: deployment_generation
 end
 
+if recovery_sweep_interval = System.get_env("KODO_RECOVERY_SWEEP_INTERVAL") do
+  recovery_sweep_interval =
+    case Integer.parse(recovery_sweep_interval) do
+      {interval, ""} when interval > 0 -> interval
+      _invalid -> raise "KODO_RECOVERY_SWEEP_INTERVAL must be a positive integer"
+    end
+
+  config :kodo, Kodo.Sessions.Recovery, sweep_interval: recovery_sweep_interval
+end
+
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :kodo, KodoWeb.Endpoint,
