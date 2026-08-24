@@ -23,7 +23,9 @@ defmodule Kodo.Agent.Tools do
   ]
   @shell_metacharacters ~r/[;&|`$><\n\r]/
 
-  def definitions do
+  def definitions(version \\ "workspace-v1")
+
+  def definitions("workspace-v1") do
     [
       tool("list_files", "List files below a workspace path", %{"path" => @string}, ["path"]),
       tool(
@@ -65,6 +67,13 @@ defmodule Kodo.Agent.Tools do
         ["process_id", "after_sequence"]
       )
     ]
+  end
+
+  def definitions("read-only-v1") do
+    Enum.reject(
+      definitions("workspace-v1"),
+      &(&1.name in ["apply_patch", "start_command", "stop_command"])
+    )
   end
 
   def request(name, arguments) when is_binary(name) and is_map(arguments) do

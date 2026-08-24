@@ -31,7 +31,7 @@ defmodule Kodo.Agent.ModelMapping do
         {Atom.to_string(role),
          Map.merge(resolved, %{
            "role_contract_version" => contract.version,
-           "toolset_version" => toolset_version(contract.tools)
+           "toolset_version" => contract.toolset_version
          })}
       end)
 
@@ -82,7 +82,4 @@ defmodule Kodo.Agent.ModelMapping do
   defp maybe_update_provider(mapping, :reasoning, _reasoning), do: mapping
 
   defp provider(model), do: model |> String.split(~r/[:\/]/, parts: 2) |> hd()
-
-  defp toolset_version(:workspace), do: "workspace-v1"
-  defp toolset_version(:read_only), do: "read-only-v1"
 end

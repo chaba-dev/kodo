@@ -42,6 +42,25 @@ defmodule KodoWeb.SessionControllerTest do
     %{conn: authenticate_agent(conn, user), runner: runner, user: user}
   end
 
+  test "rejects an explicitly invalid model instead of applying the profile default", %{
+    conn: conn,
+    runner: runner
+  } do
+    for model <- [nil, "", 123] do
+      response =
+        conn
+        |> recycle(["accept", "authorization"])
+        |> post_json(~p"/api/sessions", %{
+          runner_id: runner.id,
+          title: "Invalid model",
+          model: model
+        })
+        |> json_response(422)
+
+      assert Map.has_key?(response["errors"], "model")
+    end
+  end
+
   test "an API-driven coding turn dispatches a tool and replays from persisted events", %{
     conn: conn,
     runner: runner

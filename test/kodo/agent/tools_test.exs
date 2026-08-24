@@ -3,6 +3,10 @@ defmodule Kodo.Agent.ToolsTest do
 
   alias Kodo.Agent.Tools
 
+  test "resolves definitions by their persisted toolset version" do
+    assert Tools.definitions("workspace-v1") == Tools.definitions()
+  end
+
   test "translates only exact typed runner arguments" do
     assert {:ok, %{"tool" => "apply_patch", "patch" => "patch"}} =
              Tools.request("apply_patch", %{"patch" => "patch"})

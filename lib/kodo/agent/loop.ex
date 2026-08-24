@@ -128,6 +128,8 @@ defmodule Kodo.Agent.Loop do
   defp infer(session_id, projection, events, adapter, budgets, invocation, ownership) do
     mapping = projection.model_mapping || legacy_mapping(projection.model)
     primary = ModelMapping.role!(mapping, :primary)
+    contract = Roles.fetch!(:primary, primary["role_contract_version"])
+    tools = Tools.definitions(contract.toolset_version)
 
     with :ok <- within_budget(invocation, usage(current_turn(events)), budgets),
          {:ok, invocation_id} <-
@@ -135,7 +137,7 @@ defmodule Kodo.Agent.Loop do
          :ok <- rehoming_boundary(),
          {:ok, response} <-
            Sessions.dispatch_if_owner(ownership, fn ->
-             adapter.generate(primary["model"], transcript(events), Tools.definitions(),
+             adapter.generate(primary["model"], transcript(events, contract), tools,
                timeout: budgets[:model_timeout],
                reasoning: primary["reasoning"]
              )
@@ -153,8 +155,8 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp transcript(events) do
-    system = %{"role" => "system", "content" => Roles.fetch!(:primary).prompt}
+  defp transcript(events, contract) do
+    system = %{"role" => "system", "content" => contract.prompt}
 
     Enum.reduce(events, [system], fn event, messages ->
       case transcript_message(event) do

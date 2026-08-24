@@ -10,8 +10,13 @@ defmodule Kodo.Test.FakeLLM do
   @over_budget_usage_tokens 101
 
   @impl true
-  def generate(_model, messages, _tools, _opts) do
+  def generate(model, messages, tools, opts) do
     last = List.last(messages)
+
+    if last["content"] == "capture contract" do
+      test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
+      send(test_pid, {:llm_request, model, hd(messages), tools, opts})
+    end
 
     if last["role"] == "tool" do
       continue_from(last, messages)
@@ -28,6 +33,8 @@ defmodule Kodo.Test.FakeLLM do
       :release_model_dispatch -> final("Released")
     end
   end
+
+  defp initial(%{"content" => "capture contract"}), do: final("The fix is complete.")
 
   defp initial(message) do
     case message do

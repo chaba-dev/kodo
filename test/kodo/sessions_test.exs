@@ -79,6 +79,22 @@ defmodule Kodo.SessionsTest do
     assert mapping["roles"]["primary"]["sources"]["model"] == "profile"
   end
 
+  test "rejects a present invalid session model instead of using the profile default", %{
+    runner: runner,
+    scope: scope
+  } do
+    for model <- [nil, "", 123] do
+      assert {:error, changeset} =
+               Sessions.create_session(scope, %{
+                 runner_id: runner.id,
+                 title: "Invalid model",
+                 model: model
+               })
+
+      assert errors_on(changeset).model != []
+    end
+  end
+
   test "lists only the current user's sessions with their runners", %{
     runner: runner,
     scope: scope

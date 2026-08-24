@@ -2,6 +2,7 @@ defmodule Kodo.Agent.LoopTest do
   use Kodo.DataCase
 
   alias Kodo.Agent.Loop
+  alias Kodo.Agent.Tools
   alias Kodo.Runners
   alias Kodo.Sessions
 
@@ -87,6 +88,52 @@ defmodule Kodo.Agent.LoopTest do
 
     assert invocation.payload["model_mapping"]["roles"]["review"]["model"] ==
              "openai:gpt-4o-mini"
+  end
+
+  test "replays a pre-mapping session with its legacy model and versioned contract", %{
+    session: session,
+    ownership: ownership
+  } do
+    previous_test_pid = Application.get_env(:kodo, :fake_llm_test_pid)
+    Application.put_env(:kodo, :fake_llm_test_pid, self())
+    on_exit(fn -> restore_env(:fake_llm_test_pid, previous_test_pid) end)
+
+    [created] = Sessions.events_after(session.id)
+
+    created
+    |> Ecto.Changeset.change(payload: Map.delete(created.payload, "model_mapping"))
+    |> Repo.update!()
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "capture contract"},
+        ownership: ownership
+      )
+
+    assert {:ok, "The fix is complete."} =
+             Loop.run(session.id,
+               adapter: Kodo.Test.FakeLLM,
+               budgets: budgets([]),
+               ownership: ownership
+             )
+
+    assert_receive {:llm_request, "test:model", system, tools, opts}
+    assert system["content"] == Kodo.Agent.Roles.fetch!(:primary, 1).prompt
+    assert tools == Tools.definitions("workspace-v1")
+    assert opts[:reasoning] == "none"
+
+    invocation =
+      Enum.find(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
+
+    assert invocation.version == 2
+    assert invocation.payload["model"] == "test:model"
+    assert invocation.payload["role_contract_version"] == 1
+    assert invocation.payload["toolset_version"] == "workspace-v1"
+
+    assert invocation.payload["model_mapping"]["roles"]["primary"]["sources"]["model"] ==
+             "session"
   end
 
   test "does not dispatch a model effect after its ownership epoch is replaced", %{
