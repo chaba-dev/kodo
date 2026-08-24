@@ -45,6 +45,7 @@ defmodule Kodo.Sessions.RecoveryTest do
     {leader, follower} = await_database_leader(first, second)
     leader_state = :sys.get_state(leader)
     lease_ref = Process.monitor(leader_state.lease_pid)
+    assert_receive {:recovery_query, :recovery_discovery, old_sweep}, 1_000
 
     assert is_integer(leader_state.lease_backend_pid)
 
@@ -55,7 +56,8 @@ defmodule Kodo.Sessions.RecoveryTest do
 
     assert_receive {:recovery_query, :recovery_election, _pid}, 1_000
     assert_receive {:recovery_query, :recovery_lease, _pid}, 1_000
-    assert_receive {:recovery_query, :recovery_discovery, ^follower}, 1_000
+    assert_receive {:recovery_query, :recovery_discovery, new_sweep}, 1_000
+    refute new_sweep == old_sweep
 
     refute :sys.get_state(leader).leader?
     assert :sys.get_state(follower).leader?

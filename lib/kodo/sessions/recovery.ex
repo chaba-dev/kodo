@@ -38,7 +38,9 @@ defmodule Kodo.Sessions.Recovery do
         leader?: false,
         lease_pid: nil,
         lease_ref: nil,
+        sweep: Keyword.get(config, :sweep, &recover_active_sessions/0),
         sweep_interval: Keyword.fetch!(config, :sweep_interval),
+        sweep_task: nil,
         validation_ref: nil
       }
 
@@ -78,9 +80,24 @@ defmodule Kodo.Sessions.Recovery do
         {:recovery_lease_valid, pid, validation_ref},
         %{lease_pid: pid, validation_ref: validation_ref} = state
       ) do
-    recover_active_sessions()
+    {:noreply, state |> Map.put(:validation_ref, nil) |> start_sweep()}
+  end
+
+  def handle_info(
+        {task_ref, :ok},
+        %{sweep_task: %Task{ref: task_ref}} = state
+      ) do
+    Process.demonitor(task_ref, [:flush])
     schedule_sweep(state.sweep_interval)
-    {:noreply, %{state | validation_ref: nil}}
+    {:noreply, %{state | sweep_task: nil}}
+  end
+
+  def handle_info(
+        {task_ref, result},
+        %{sweep_task: %Task{ref: task_ref}} = state
+      ) do
+    Process.demonitor(task_ref, [:flush])
+    {:stop, {:recovery_sweep_failed, result}, %{state | sweep_task: nil}}
   end
 
   def handle_info(:sweep, %{leader?: true, validation_ref: nil} = state),
@@ -101,6 +118,7 @@ defmodule Kodo.Sessions.Recovery do
 
   def handle_info({:DOWN, ref, :process, pid, _reason}, %{lease_pid: pid, lease_ref: ref} = state) do
     Process.send_after(self(), :elect, state.election_retry_interval)
+    state = stop_sweep(state)
 
     {:noreply,
      %{
@@ -111,6 +129,19 @@ defmodule Kodo.Sessions.Recovery do
          lease_ref: nil,
          validation_ref: nil
      }}
+  end
+
+  def handle_info(
+        {:DOWN, task_ref, :process, task_pid, reason},
+        %{sweep_task: %Task{pid: task_pid, ref: task_ref}} = state
+      ) do
+    {:stop, {:recovery_sweep_failed, reason}, %{state | sweep_task: nil}}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    _state = stop_sweep(state)
+    :ok
   end
 
   defp recover_sessions(session_ids) do
@@ -220,6 +251,41 @@ defmodule Kodo.Sessions.Recovery do
     validation_ref = make_ref()
     send(state.lease_pid, {:validate_recovery_lease, self(), validation_ref})
     %{state | validation_ref: validation_ref}
+  end
+
+  defp start_sweep(%{sweep_task: nil} = state) do
+    recovery = self()
+    sweep = state.sweep
+
+    task =
+      Task.Supervisor.async_nolink(Kodo.ControlPlaneTaskSupervisor, fn ->
+        run_sweep(recovery, sweep)
+      end)
+
+    %{state | sweep_task: task}
+  end
+
+  defp run_sweep(recovery, sweep) do
+    recovery_ref = Process.monitor(recovery)
+    owner = self()
+    worker = spawn_link(fn -> send(owner, {:recovery_sweep_result, self(), sweep.()}) end)
+
+    receive do
+      {:recovery_sweep_result, ^worker, result} ->
+        Process.demonitor(recovery_ref, [:flush])
+        result
+
+      {:DOWN, ^recovery_ref, :process, ^recovery, _reason} ->
+        Process.exit(worker, :kill)
+        exit(:normal)
+    end
+  end
+
+  defp stop_sweep(%{sweep_task: nil} = state), do: state
+
+  defp stop_sweep(%{sweep_task: task} = state) do
+    _result = Task.shutdown(task, :brutal_kill)
+    %{state | sweep_task: nil}
   end
 
   defp schedule_sweep(:infinity), do: :ok
