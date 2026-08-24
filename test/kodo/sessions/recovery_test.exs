@@ -3,6 +3,16 @@ defmodule Kodo.Sessions.RecoveryTest do
 
   alias Kodo.Sessions.Recovery
 
+  setup do
+    config =
+      Repo.config()
+      |> Keyword.put(:pool, DBConnection.ConnectionPool)
+      |> Keyword.put(:pool_size, 4)
+
+    start_supervised!({Kodo.Test.RecoveryRepo, config})
+    :ok
+  end
+
   test "elects one sweeper and transfers leadership when it stops" do
     handler_id = "recovery-election-test-#{System.unique_integer([:positive])}"
 
@@ -152,6 +162,11 @@ defmodule Kodo.Sessions.RecoveryTest do
   end
 
   defp start_recovery!(id, extra_opts \\ []) do
+    extra_opts =
+      if extra_opts[:lease_backend] == :database,
+        do: Keyword.put_new(extra_opts, :lease_repo, Kodo.Test.RecoveryRepo),
+        else: extra_opts
+
     start_supervised!(%{
       id: id,
       start:
