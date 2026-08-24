@@ -71,6 +71,9 @@ defmodule Kodo.Sessions.RecoveryTest do
 
     refute :sys.get_state(leader).leader?
     assert :sys.get_state(follower).leader?
+
+    stop_recovery!(:first_database_recovery, first)
+    stop_recovery!(:second_database_recovery, second)
   end
 
   defp start_recovery!(id, extra_opts \\ []) do
@@ -105,6 +108,16 @@ defmodule Kodo.Sessions.RecoveryTest do
         assert_receive {:recovery_query, operation, _pid}, 1_000
         assert operation in [:recovery_election, :recovery_lease, :recovery_discovery]
         await_database_leader(first, second)
+    end
+  end
+
+  defp stop_recovery!(id, recovery) do
+    lease_pid = :sys.get_state(recovery).lease_pid
+    lease_ref = if lease_pid, do: Process.monitor(lease_pid)
+    assert :ok = stop_supervised(id)
+
+    if lease_pid do
+      assert_receive {:DOWN, ^lease_ref, :process, ^lease_pid, _reason}
     end
   end
 end

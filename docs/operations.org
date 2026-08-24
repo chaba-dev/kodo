@@ -153,16 +153,19 @@ to configured Telemetry reporters:
 
 | Metric                                  | Tag ~operation~ values                                                    |
 |-----------------------------------------+---------------------------------------------------------------------------|
-| ~kodo.control_plane.query.count~        | ~instance_heartbeat~, ~recovery_discovery~, ~ownership_fencing~, ~session_index_refresh~ |
+| ~kodo.control_plane.query.count~        | ~instance_heartbeat~, ~recovery_election~, ~recovery_lease~, ~recovery_discovery~, ~ownership_fencing~, ~session_index_refresh~ |
 | ~kodo.control_plane.query.total_time~   | The same fixed operation set                                              |
 
 User, session, instance, and replica identifiers are deliberately excluded
 from metric labels. Under the current query contracts, one heartbeat emits two
-instrumented queries, one recovery sweep emits one discovery query plus work
-linear in active candidates, one ownership assertion emits one fencing query,
-and one session-index row refresh emits two queries (the scoped session and its
-runner). Index-invisible durable events and events owned by unrelated users
-emit no session-index refresh query.
+instrumented queries. Each replica emits one recovery-election query per
+election attempt, plus one when a leader releases its lease normally. The
+leader also emits one lease-health query per second and before each sweep. One
+recovery sweep emits one discovery query plus work linear in active candidates,
+one ownership assertion emits one fencing query, and one session-index row
+refresh emits two queries (the scoped session and its runner). Index-invisible
+durable events and events owned by unrelated users emit no session-index
+refresh query.
 
 Alert on sustained changes from these ratios rather than raw cluster totals.
 Investigate recovery work that grows with completed history, heartbeat work

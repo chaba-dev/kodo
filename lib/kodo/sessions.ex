@@ -444,10 +444,7 @@ defmodule Kodo.Sessions do
 
   defp active_state_from_coordinator(pid, session_id) do
     result = call_coordinator(pid, fn -> {:ok, Kodo.Sessions.ActiveSession.state(pid)} end)
-
-    if node(pid) == node(),
-      do: reconcile_unavailable_state(result, session_id),
-      else: result
+    reconcile_unavailable_state(result, session_id)
   end
 
   defp reconcile_unavailable_state({:error, :coordinator_unavailable} = error, session_id) do
@@ -485,8 +482,8 @@ defmodule Kodo.Sessions do
 
   def start_turn(session_id, content, client_request_id) do
     with {:ok, pid} <- ensure_started(session_id) do
-      call_coordinator(pid, fn ->
-        Kodo.Sessions.ActiveSession.start_turn(pid, content, client_request_id)
+      call_coordinator_with_exit_retry(session_id, pid, fn coordinator ->
+        Kodo.Sessions.ActiveSession.start_turn(coordinator, content, client_request_id)
       end)
     end
   end
@@ -547,6 +544,22 @@ defmodule Kodo.Sessions do
       else
         exit(reason)
       end
+  end
+
+  defp call_coordinator_with_exit_retry(session_id, pid, call) do
+    case call_coordinator(pid, fn -> call.(pid) end) do
+      {:error, :coordinator_unavailable} ->
+        retry_coordinator_call(session_id, pid, call)
+
+      result ->
+        result
+    end
+  end
+
+  defp retry_coordinator_call(session_id, pid, call) do
+    with {:ok, replacement} <- await_stale_coordinator(pid, session_id) do
+      call_coordinator(replacement, fn -> call.(replacement) end)
+    end
   end
 
   defp coordinator_unavailable?({:nodedown, _node}), do: true

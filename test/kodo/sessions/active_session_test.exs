@@ -464,13 +464,15 @@ defmodule Kodo.Sessions.ActiveSessionTest do
 
     assert_receive {:exiting_coordinator_ready, ^exiting}
 
-    assert :ok = Sessions.start_turn(session.id, "follow up", Ecto.UUID.generate())
+    assert :ok = Sessions.start_turn(session.id, "ownership barrier", Ecto.UUID.generate())
     assert_receive {:exiting_coordinator_called, ^exiting}
-    assert_receive {:model_dispatch_started, _dispatch_pid}
+    assert_receive {:model_dispatch_started, dispatch_pid}
 
     assert Enum.any?(Sessions.events_after(session.id), fn event ->
-             event.type == "user_message" and event.payload["content"] == "follow up"
+             event.type == "user_message" and event.payload["content"] == "ownership barrier"
            end)
+
+    send(dispatch_pid, :release_model_dispatch)
   end
 
   test "reconstructs terminal state when a remote coordinator disappears", %{session: session} do

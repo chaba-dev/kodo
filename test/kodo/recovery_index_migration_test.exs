@@ -8,6 +8,7 @@ defmodule Kodo.RecoveryIndexMigrationTest do
     Code.require_file(@migration_path)
 
     assert @migration.__migration__()[:disable_ddl_transaction]
+    assert @migration.__migration__()[:disable_migration_lock]
     assert File.read!(@migration_path) =~ "concurrently: true"
   end
 end

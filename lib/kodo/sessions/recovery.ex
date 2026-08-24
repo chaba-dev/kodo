@@ -4,11 +4,12 @@ defmodule Kodo.Sessions.Recovery do
   use GenServer
 
   alias Kodo.Cluster.InstanceManager
+  alias Kodo.ControlPlaneTelemetry
   alias Kodo.Repo
   alias Kodo.Sessions
 
   @lease_key "kodo:active-session-recovery"
-  @try_lock_sql "SELECT pg_try_advisory_lock(hashtextextended($1, 0))"
+  @try_lock_sql "SELECT pg_try_advisory_lock(hashtextextended($1, 0)), pg_backend_pid()"
   @unlock_sql "SELECT pg_advisory_unlock(hashtextextended($1, 0))"
   @default_config [sweep_interval: 5_000, election_retry_interval: 1_000]
 
@@ -32,10 +33,13 @@ defmodule Kodo.Sessions.Recovery do
       state = %{
         coordinated?: Keyword.get(config, :coordinated, Process.whereis(InstanceManager) != nil),
         election_retry_interval: Keyword.fetch!(config, :election_retry_interval),
+        lease_backend: Keyword.get(config, :lease_backend, default_lease_backend()),
+        lease_backend_pid: nil,
         leader?: false,
         lease_pid: nil,
         lease_ref: nil,
-        sweep_interval: Keyword.fetch!(config, :sweep_interval)
+        sweep_interval: Keyword.fetch!(config, :sweep_interval),
+        validation_ref: nil
       }
 
       if state.coordinated? do
@@ -51,26 +55,36 @@ defmodule Kodo.Sessions.Recovery do
   @impl true
   def handle_info(:elect, %{lease_pid: nil} = state) do
     parent = self()
-    {pid, ref} = spawn_monitor(fn -> hold_lease(parent) end)
+    backend = state.lease_backend
+    check_interval = state.election_retry_interval
+    {pid, ref} = spawn_monitor(fn -> hold_lease(parent, backend, check_interval) end)
     {:noreply, %{state | lease_pid: pid, lease_ref: ref}}
   end
 
   def handle_info(:elect, state), do: {:noreply, state}
 
-  def handle_info({:recovery_lease, pid, true}, %{lease_pid: pid} = state) do
-    recover_active_sessions()
-    schedule_sweep(state.sweep_interval)
-    {:noreply, %{state | leader?: true}}
+  def handle_info(
+        {:recovery_lease, pid, true, backend_pid},
+        %{lease_pid: pid} = state
+      ) do
+    state = %{state | leader?: true, lease_backend_pid: backend_pid}
+    {:noreply, validate_lease(state)}
   end
 
-  def handle_info({:recovery_lease, pid, false}, %{lease_pid: pid} = state),
+  def handle_info({:recovery_lease, pid, false, nil}, %{lease_pid: pid} = state),
     do: {:noreply, state}
 
-  def handle_info(:sweep, %{leader?: true} = state) do
+  def handle_info(
+        {:recovery_lease_valid, pid, validation_ref},
+        %{lease_pid: pid, validation_ref: validation_ref} = state
+      ) do
     recover_active_sessions()
     schedule_sweep(state.sweep_interval)
-    {:noreply, state}
+    {:noreply, %{state | validation_ref: nil}}
   end
+
+  def handle_info(:sweep, %{leader?: true, validation_ref: nil} = state),
+    do: {:noreply, validate_lease(state)}
 
   def handle_info(:sweep, state), do: {:noreply, state}
 
@@ -80,16 +94,23 @@ defmodule Kodo.Sessions.Recovery do
     {:noreply, state}
   end
 
-  def handle_info(:retry, %{leader?: true} = state) do
-    recover_active_sessions()
-    {:noreply, state}
-  end
+  def handle_info(:retry, %{leader?: true, validation_ref: nil} = state),
+    do: {:noreply, validate_lease(state)}
 
   def handle_info(:retry, state), do: {:noreply, state}
 
   def handle_info({:DOWN, ref, :process, pid, _reason}, %{lease_pid: pid, lease_ref: ref} = state) do
     Process.send_after(self(), :elect, state.election_retry_interval)
-    {:noreply, %{state | leader?: false, lease_pid: nil, lease_ref: nil}}
+
+    {:noreply,
+     %{
+       state
+       | leader?: false,
+         lease_backend_pid: nil,
+         lease_pid: nil,
+         lease_ref: nil,
+         validation_ref: nil
+     }}
   end
 
   defp recover_sessions(session_ids) do
@@ -117,44 +138,88 @@ defmodule Kodo.Sessions.Recovery do
     end
   end
 
-  defp hold_lease(parent) do
-    if Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox,
-      do: hold_test_lease(parent),
-      else: hold_database_lease(parent)
-  end
+  defp default_lease_backend,
+    do: if(Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox, do: :test, else: :database)
 
-  defp hold_test_lease(parent) do
+  defp hold_lease(parent, :test, check_interval),
+    do: hold_test_lease(parent, check_interval)
+
+  defp hold_lease(parent, :database, check_interval),
+    do: run_on_database_connection(fn -> hold_database_lease(parent, check_interval) end)
+
+  defp hold_test_lease(parent, check_interval) do
     lock_id = {{__MODULE__, @lease_key}, self()}
     acquired? = :global.set_lock(lock_id, [node()], 0)
-    send(parent, {:recovery_lease, self(), acquired?})
+    send(parent, {:recovery_lease, self(), acquired?, nil})
 
     if acquired? do
-      wait_for_parent(parent)
+      test_lease_loop(parent, Process.monitor(parent), check_interval)
       :global.del_lock(lock_id, [node()])
     end
   end
 
-  defp hold_database_lease(parent) do
-    Repo.checkout(
-      fn ->
-        acquired? = Repo.query!(@try_lock_sql, [@lease_key]).rows == [[true]]
-        send(parent, {:recovery_lease, self(), acquired?})
+  defp hold_database_lease(parent, check_interval) do
+    election_opts = ControlPlaneTelemetry.repo_options(:recovery_election)
+    [[acquired?, backend_pid]] = Repo.query!(@try_lock_sql, [@lease_key], election_opts).rows
 
-        if acquired? do
-          wait_for_parent(parent)
-          _ = Repo.query!(@unlock_sql, [@lease_key])
-        end
-      end,
-      timeout: :infinity
-    )
+    if acquired? do
+      send(parent, {:recovery_lease, self(), true, backend_pid})
+      database_lease_loop(parent, Process.monitor(parent), backend_pid, check_interval)
+      _ = Repo.query(@unlock_sql, [@lease_key], election_opts)
+    else
+      send(parent, {:recovery_lease, self(), false, nil})
+    end
   end
 
-  defp wait_for_parent(parent) do
-    parent_ref = Process.monitor(parent)
-
+  defp test_lease_loop(parent, parent_ref, check_interval) do
     receive do
-      {:DOWN, ^parent_ref, :process, ^parent, _reason} -> :ok
+      {:validate_recovery_lease, ^parent, validation_ref} ->
+        send(parent, {:recovery_lease_valid, self(), validation_ref})
+        test_lease_loop(parent, parent_ref, check_interval)
+
+      {:DOWN, ^parent_ref, :process, ^parent, _reason} ->
+        :ok
+    after
+      check_interval -> test_lease_loop(parent, parent_ref, check_interval)
     end
+  end
+
+  defp database_lease_loop(parent, parent_ref, backend_pid, check_interval) do
+    receive do
+      {:validate_recovery_lease, ^parent, validation_ref} ->
+        validate_database_lease!(backend_pid)
+        send(parent, {:recovery_lease_valid, self(), validation_ref})
+        database_lease_loop(parent, parent_ref, backend_pid, check_interval)
+
+      {:DOWN, ^parent_ref, :process, ^parent, _reason} ->
+        :ok
+    after
+      check_interval ->
+        validate_database_lease!(backend_pid)
+        database_lease_loop(parent, parent_ref, backend_pid, check_interval)
+    end
+  end
+
+  defp validate_database_lease!(backend_pid) do
+    opts = ControlPlaneTelemetry.repo_options(:recovery_lease)
+
+    case Repo.query("SELECT pg_backend_pid()", [], opts) do
+      {:ok, %{rows: [[^backend_pid]]}} -> :ok
+      {:ok, %{rows: [[replacement_pid]]}} -> exit({:recovery_connection_changed, replacement_pid})
+      {:error, reason} -> exit({:recovery_connection_lost, reason})
+    end
+  end
+
+  defp run_on_database_connection(fun) do
+    if Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox,
+      do: Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fun),
+      else: Repo.checkout(fun, timeout: :infinity)
+  end
+
+  defp validate_lease(state) do
+    validation_ref = make_ref()
+    send(state.lease_pid, {:validate_recovery_lease, self(), validation_ref})
+    %{state | validation_ref: validation_ref}
   end
 
   defp schedule_sweep(:infinity), do: :ok
