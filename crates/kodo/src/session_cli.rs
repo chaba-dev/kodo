@@ -50,7 +50,7 @@ pub struct StartOptions {
     pub common: Options,
     pub task: String,
     pub title: Option<String>,
-    pub model: String,
+    pub model: Option<String>,
     pub approval_policy: String,
 }
 
@@ -90,18 +90,23 @@ pub async fn start(options: StartOptions) -> Result<(), SessionCliError> {
     let (client, base, runner, mut runner_task) = host_runner(&options.common).await?;
     let title = options.title.as_deref().unwrap_or(&options.task);
     let create_request_id = Uuid::new_v4().to_string();
+    let mut create_payload = json!({
+        "runner_id": runner.runner_id,
+        "title": title,
+        "approval_policy": options.approval_policy,
+        "client_request_id": create_request_id
+    });
+
+    if let Some(model) = &options.model {
+        create_payload["model"] = json!(model);
+    }
+
     let response = retry_api(&mut runner_task, || {
         request_json(
             client
                 .post(endpoint(&base, "api/sessions").expect("validated base URL"))
                 .bearer_auth(&options.common.token)
-                .json(&json!({
-                    "runner_id": runner.runner_id,
-                    "title": title,
-                    "model": options.model,
-                    "approval_policy": options.approval_policy,
-                    "client_request_id": create_request_id
-                })),
+                .json(&create_payload),
             &options.common.token,
         )
     })

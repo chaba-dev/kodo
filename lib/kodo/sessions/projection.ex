@@ -8,6 +8,7 @@ defmodule Kodo.Sessions.Projection do
     :title,
     :runner_id,
     :model,
+    :model_mapping,
     approval_policy: "standard",
     status: "idle",
     pending_approval_id: nil,
@@ -41,6 +42,7 @@ defmodule Kodo.Sessions.Projection do
       title: session.title,
       runner_id: session.runner_id,
       model: session.model,
+      model_mapping: nil,
       approval_policy: session.approval_policy,
       status: session.status,
       last_sequence: last_sequence,
@@ -61,6 +63,7 @@ defmodule Kodo.Sessions.Projection do
       | title: payload["title"],
         runner_id: payload["runner_id"],
         model: payload["model"],
+        model_mapping: payload["model_mapping"],
         approval_policy: payload["approval_policy"] || "standard",
         status: payload["status"]
     }

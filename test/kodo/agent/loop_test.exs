@@ -55,6 +55,40 @@ defmodule Kodo.Agent.LoopTest do
              )
   end
 
+  test "records the resolved role and model mapping for an invocation", %{
+    session: session,
+    ownership: ownership
+  } do
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "token budget"},
+        ownership: ownership
+      )
+
+    assert {:error, :token_budget_exceeded} =
+             Loop.run(session.id,
+               adapter: Kodo.Test.FakeLLM,
+               budgets: budgets(max_tokens: 100),
+               ownership: ownership
+             )
+
+    invocation =
+      Enum.find(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
+
+    assert invocation.payload["role"] == "primary"
+    assert invocation.payload["provider"] == "test"
+    assert invocation.payload["model"] == "test:model"
+    assert invocation.payload["reasoning"] == "none"
+    assert invocation.payload["role_contract_version"] == 1
+    assert invocation.payload["role_prompt_version"] == 1
+    assert invocation.payload["toolset_version"] == "workspace-v1"
+
+    assert invocation.payload["model_mapping"]["roles"]["review"]["model"] ==
+             "openai:gpt-4o-mini"
+  end
+
   test "does not dispatch a model effect after its ownership epoch is replaced", %{
     session: session,
     ownership: ownership

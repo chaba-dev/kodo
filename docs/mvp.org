@@ -775,8 +775,8 @@ delivery checklist.
 
 ** TODO Milestone 7: Roles and recommended mapping
 
-- [ ] Versioned primary, search, and review contracts.
-- [ ] The versioned ~balanced~ profile.
+- [X] Versioned primary, search, and review contracts.
+- [X] The versioned ~balanced~ profile.
 - [ ] Per-role user and repository overrides.
 - [ ] Capability validation and invocation metadata.
 - [ ] Search and final-diff review integration.
