@@ -8,6 +8,7 @@ defmodule Kodo.Sessions do
   alias Kodo.Cluster.InstanceManager
   alias Kodo.Cluster.Instances
   alias Kodo.Cluster.Placement
+  alias Kodo.ControlPlaneTelemetry
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
@@ -81,9 +82,22 @@ defmodule Kodo.Sessions do
   end
 
   def get_session_for_index(%Scope{} = scope, session_id) do
-    case get_session(scope, session_id) do
+    opts = ControlPlaneTelemetry.repo_options(:session_index_refresh)
+
+    session =
+      case Ecto.UUID.cast(session_id) do
+        {:ok, session_id} ->
+          Session
+          |> where([session], session.id == ^session_id and session.user_id == ^scope.user.id)
+          |> Repo.one(opts)
+
+        :error ->
+          nil
+      end
+
+    case session do
       nil -> nil
-      session -> Repo.preload(session, :runner)
+      session -> Repo.preload(session, :runner, opts)
     end
   end
 
@@ -158,7 +172,7 @@ defmodule Kodo.Sessions do
   def list_active_sessions do
     Session
     |> where([session], session.status in ["running", "awaiting_approval"])
-    |> Repo.all()
+    |> Repo.all(ControlPlaneTelemetry.repo_options(:recovery_discovery))
   end
 
   @doc "Claims an unowned session or replaces a coordinator from this node or a stale owner."
@@ -279,7 +293,9 @@ defmodule Kodo.Sessions do
         where(query, [session], is_nil(session.owner_boot_id))
       end
 
-    if Repo.exists?(query), do: :ok, else: {:error, :stale_ownership}
+    if Repo.exists?(query, ControlPlaneTelemetry.repo_options(:ownership_fencing)),
+      do: :ok,
+      else: {:error, :stale_ownership}
   end
 
   @doc "Runs an external dispatch while serializing ownership transfer across the cluster."
@@ -1146,7 +1162,11 @@ defmodule Kodo.Sessions do
   defp owner_alive?(%Ownership{owner_boot_id: nil}), do: true
 
   defp owner_alive?(%Ownership{owner_boot_id: owner_boot_id}) do
-    Instances.alive?(owner_boot_id, @ownership_stale_after_seconds)
+    Instances.alive?(
+      owner_boot_id,
+      @ownership_stale_after_seconds,
+      ControlPlaneTelemetry.repo_options(:ownership_fencing)
+    )
   end
 
   defp ownership_matches?(%Session{ownership_epoch: 0}, nil), do: true
