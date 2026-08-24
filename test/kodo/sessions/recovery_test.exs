@@ -36,20 +36,75 @@ defmodule Kodo.Sessions.RecoveryTest do
     assert :sys.get_state(follower).leader?
   end
 
-  defp start_recovery!(id) do
+  test "relinquishes leadership when the advisory-lock connection is lost" do
+    handler_id = "recovery-database-lease-test-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:kodo, :control_plane, :query],
+        fn _event, _measurements, metadata, test_pid ->
+          send(test_pid, {:recovery_query, metadata.options[:operation], self()})
+        end,
+        self()
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    first = start_recovery!(:first_database_recovery, lease_backend: :database)
+    second = start_recovery!(:second_database_recovery, lease_backend: :database)
+
+    {leader, follower} = await_database_leader(first, second)
+    leader_state = :sys.get_state(leader)
+    lease_ref = Process.monitor(leader_state.lease_pid)
+
+    assert is_integer(leader_state.lease_backend_pid)
+
+    assert [[true]] =
+             Repo.query!("SELECT pg_terminate_backend($1)", [leader_state.lease_backend_pid]).rows
+
+    assert_receive {:DOWN, ^lease_ref, :process, _lease_pid, _reason}, 1_000
+
+    assert_receive {:recovery_query, :recovery_election, _pid}, 1_000
+    assert_receive {:recovery_query, :recovery_lease, _pid}, 1_000
+    assert_receive {:recovery_query, :recovery_discovery, ^follower}, 1_000
+
+    refute :sys.get_state(leader).leader?
+    assert :sys.get_state(follower).leader?
+  end
+
+  defp start_recovery!(id, extra_opts \\ []) do
     start_supervised!(%{
       id: id,
       start:
         {Recovery, :start_link,
          [
-           [
-             name: nil,
-             coordinated: true,
-             election_retry_interval: 10,
-             sweep_interval: :infinity
-           ]
+           Keyword.merge(
+             [
+               name: nil,
+               coordinated: true,
+               election_retry_interval: 10,
+               sweep_interval: :infinity
+             ],
+             extra_opts
+           )
          ]},
       restart: :temporary
     })
+  end
+
+  defp await_database_leader(first, second) do
+    case {:sys.get_state(first), :sys.get_state(second)} do
+      {%{leader?: true}, %{leader?: false}} ->
+        {first, second}
+
+      {%{leader?: false}, %{leader?: true}} ->
+        {second, first}
+
+      _states ->
+        assert_receive {:recovery_query, operation, _pid}, 1_000
+        assert operation in [:recovery_election, :recovery_lease, :recovery_discovery]
+        await_database_leader(first, second)
+    end
   end
 end

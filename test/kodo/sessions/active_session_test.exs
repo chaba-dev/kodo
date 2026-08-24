@@ -455,6 +455,53 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
   end
 
+  test "retries a follow-up that races with a terminal coordinator exit", %{session: session} do
+    {:ok, exiting} =
+      DynamicSupervisor.start_child(
+        Kodo.SessionSupervisor,
+        {Kodo.Test.ExitingCoordinator, {session.id, self()}}
+      )
+
+    assert_receive {:exiting_coordinator_ready, ^exiting}
+
+    assert :ok = Sessions.start_turn(session.id, "follow up", Ecto.UUID.generate())
+    assert_receive {:exiting_coordinator_called, ^exiting}
+    assert_receive {:model_dispatch_started, _dispatch_pid}
+
+    assert Enum.any?(Sessions.events_after(session.id), fn event ->
+             event.type == "user_message" and event.payload["content"] == "follow up"
+           end)
+  end
+
+  test "reconstructs terminal state when a remote coordinator disappears", %{session: session} do
+    assert {:ok, _event} = Sessions.set_status(session.id, "completed")
+    ensure_distributed_node!()
+    {:ok, peer, peer_node} = :peer.start_link(%{name: :kodo_terminal_state_peer})
+
+    on_exit(fn -> stop_peer(peer) end)
+
+    :ok = :erpc.call(peer_node, :code, :add_paths, [:code.get_path()])
+    {:ok, _scope} = :erpc.call(peer_node, :pg, :start, [Discovery.scope()])
+
+    {monitor_ref, _members} =
+      :pg.monitor(Discovery.scope(), Discovery.group(:session, session.id))
+
+    remote_pid =
+      :erpc.call(peer_node, Kodo.Test.RemoteCoordinator, :start, [
+        self(),
+        Discovery.scope(),
+        session.id
+      ])
+
+    assert_receive {^monitor_ref, :join, {:session, session_id}, [^remote_pid]}
+    assert session_id == session.id
+    call = Task.async(fn -> Sessions.active_state(session.id) end)
+    assert_receive {:remote_call_received, ^remote_pid}
+    :ok = :peer.stop(peer)
+
+    assert {:ok, %{status: "completed"}} = Task.await(call)
+  end
+
   test "redispatches a durable request when an offline runner reconnects", %{
     runner: runner,
     session: session
