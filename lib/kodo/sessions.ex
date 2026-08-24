@@ -8,6 +8,7 @@ defmodule Kodo.Sessions do
   alias Kodo.Cluster.InstanceManager
   alias Kodo.Cluster.Instances
   alias Kodo.Cluster.Placement
+  alias Kodo.ControlPlaneTelemetry
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
@@ -81,9 +82,22 @@ defmodule Kodo.Sessions do
   end
 
   def get_session_for_index(%Scope{} = scope, session_id) do
-    case get_session(scope, session_id) do
+    opts = ControlPlaneTelemetry.repo_options(:session_index_refresh)
+
+    session =
+      case Ecto.UUID.cast(session_id) do
+        {:ok, session_id} ->
+          Session
+          |> where([session], session.id == ^session_id and session.user_id == ^scope.user.id)
+          |> Repo.one(opts)
+
+        :error ->
+          nil
+      end
+
+    case session do
       nil -> nil
-      session -> Repo.preload(session, :runner)
+      session -> Repo.preload(session, :runner, opts)
     end
   end
 
@@ -158,7 +172,7 @@ defmodule Kodo.Sessions do
   def list_active_sessions do
     Session
     |> where([session], session.status in ["running", "awaiting_approval"])
-    |> Repo.all()
+    |> Repo.all(ControlPlaneTelemetry.repo_options(:recovery_discovery))
   end
 
   @doc "Claims an unowned session or replaces a coordinator from this node or a stale owner."
@@ -279,7 +293,9 @@ defmodule Kodo.Sessions do
         where(query, [session], is_nil(session.owner_boot_id))
       end
 
-    if Repo.exists?(query), do: :ok, else: {:error, :stale_ownership}
+    if Repo.exists?(query, ControlPlaneTelemetry.repo_options(:ownership_fencing)),
+      do: :ok,
+      else: {:error, :stale_ownership}
   end
 
   @doc "Runs an external dispatch while serializing ownership transfer across the cluster."
@@ -417,6 +433,43 @@ defmodule Kodo.Sessions do
   end
 
   def active_state(session_id) do
+    case Discovery.session(session_id) do
+      {:ok, pid} ->
+        active_state_from_coordinator(pid, session_id)
+
+      :error ->
+        active_state_from_storage(session_id)
+    end
+  end
+
+  defp active_state_from_coordinator(pid, session_id) do
+    result = call_coordinator(pid, fn -> {:ok, Kodo.Sessions.ActiveSession.state(pid)} end)
+    reconcile_unavailable_state(result, session_id)
+  end
+
+  defp reconcile_unavailable_state({:error, :coordinator_unavailable} = error, session_id) do
+    case active_state_from_storage(session_id) do
+      {:error, :not_found} -> error
+      result -> result
+    end
+  end
+
+  defp reconcile_unavailable_state(result, _session_id), do: result
+
+  defp active_state_from_storage(session_id) do
+    case get_session(session_id) do
+      %Session{status: status} when status in ["running", "awaiting_approval"] ->
+        active_coordinator_state(session_id)
+
+      %Session{} ->
+        {:ok, session_id |> events_after() |> Projection.from_events()}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
+  defp active_coordinator_state(session_id) do
     with {:ok, pid} <- ensure_started(session_id) do
       call_coordinator(pid, fn -> {:ok, Kodo.Sessions.ActiveSession.state(pid)} end)
     end
@@ -429,8 +482,8 @@ defmodule Kodo.Sessions do
 
   def start_turn(session_id, content, client_request_id) do
     with {:ok, pid} <- ensure_started(session_id) do
-      call_coordinator(pid, fn ->
-        Kodo.Sessions.ActiveSession.start_turn(pid, content, client_request_id)
+      call_coordinator_with_exit_retry(session_id, pid, fn coordinator ->
+        Kodo.Sessions.ActiveSession.start_turn(coordinator, content, client_request_id)
       end)
     end
   end
@@ -464,24 +517,54 @@ defmodule Kodo.Sessions do
   end
 
   def cancel(session_id) do
+    case get_session(session_id) do
+      %Session{status: status} when status in ["running", "awaiting_approval"] ->
+        cancel_active_session(session_id)
+
+      %Session{} ->
+        {:error, :not_running}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
+  defp cancel_active_session(session_id) do
     with {:ok, pid} <- ensure_started(session_id) do
       call_coordinator(pid, fn -> Kodo.Sessions.ActiveSession.cancel(pid) end)
     end
   end
 
-  defp call_coordinator(pid, call) do
+  defp call_coordinator(_pid, call) do
     call.()
   catch
     :exit, reason ->
-      if node(pid) != node() and coordinator_unavailable?(reason) do
+      if coordinator_unavailable?(reason) do
         {:error, :coordinator_unavailable}
       else
         exit(reason)
       end
   end
 
+  defp call_coordinator_with_exit_retry(session_id, pid, call) do
+    case call_coordinator(pid, fn -> call.(pid) end) do
+      {:error, :coordinator_unavailable} ->
+        retry_coordinator_call(session_id, pid, call)
+
+      result ->
+        result
+    end
+  end
+
+  defp retry_coordinator_call(session_id, pid, call) do
+    with {:ok, replacement} <- await_stale_coordinator(pid, session_id) do
+      call_coordinator(replacement, fn -> call.(replacement) end)
+    end
+  end
+
   defp coordinator_unavailable?({:nodedown, _node}), do: true
   defp coordinator_unavailable?({:noproc, _call}), do: true
+  defp coordinator_unavailable?({:normal, {GenServer, :call, _args}}), do: true
   defp coordinator_unavailable?({{:nodedown, _node}, _call}), do: true
   defp coordinator_unavailable?({{:noproc, _detail}, _call}), do: true
   defp coordinator_unavailable?(_reason), do: false
@@ -502,7 +585,7 @@ defmodule Kodo.Sessions do
   end
 
   defp reconcile_cancel({:error, reason}, scope, session_id)
-       when reason in [:not_running, :already_finished] do
+       when reason in [:not_running, :already_finished, :coordinator_unavailable] do
     if get_session(scope, session_id).status == "cancelled", do: :ok, else: {:error, reason}
   end
 
@@ -1146,7 +1229,11 @@ defmodule Kodo.Sessions do
   defp owner_alive?(%Ownership{owner_boot_id: nil}), do: true
 
   defp owner_alive?(%Ownership{owner_boot_id: owner_boot_id}) do
-    Instances.alive?(owner_boot_id, @ownership_stale_after_seconds)
+    Instances.alive?(
+      owner_boot_id,
+      @ownership_stale_after_seconds,
+      ControlPlaneTelemetry.repo_options(:ownership_fencing)
+    )
   end
 
   defp ownership_matches?(%Session{ownership_epoch: 0}, nil), do: true

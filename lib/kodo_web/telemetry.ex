@@ -75,6 +75,19 @@ defmodule KodoWeb.Telemetry do
           "The time the connection spent waiting before being checked out for the query"
       ),
 
+      # Bounded-cardinality control-plane query metrics
+      counter("kodo.control_plane.query.count",
+        tags: [:operation],
+        tag_values: &control_plane_query_tags/1,
+        description: "Control-plane database queries by operation"
+      ),
+      summary("kodo.control_plane.query.total_time",
+        tags: [:operation],
+        tag_values: &control_plane_query_tags/1,
+        unit: {:native, :millisecond},
+        description: "Control-plane database query time by operation"
+      ),
+
       # VM Metrics
       summary("vm.memory.total", unit: {:byte, :kilobyte}),
       summary("vm.total_run_queue_lengths.total"),
@@ -89,5 +102,9 @@ defmodule KodoWeb.Telemetry do
       # This function must call :telemetry.execute/3 and a metric must be added above.
       # {KodoWeb, :count_users, []}
     ]
+  end
+
+  defp control_plane_query_tags(metadata) do
+    %{operation: Keyword.fetch!(metadata.options, :operation)}
   end
 end

@@ -1,5 +1,5 @@
 defmodule Kodo.Cluster.DiscoveryTest do
-  use ExUnit.Case, async: false
+  use Kodo.DataCase, async: false
 
   alias Kodo.Cluster.Discovery
   alias Kodo.Runners

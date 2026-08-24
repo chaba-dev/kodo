@@ -1,16 +1,23 @@
 defmodule Kodo.Sessions.Recovery do
-  @moduledoc "Restores active coordinators and reconciles durable legacy drain intent."
+  @moduledoc "Elects one database-backed recovery sweeper for active durable sessions."
 
   use GenServer
 
   alias Kodo.Cluster.InstanceManager
+  alias Kodo.ControlPlaneTelemetry
+  alias Kodo.Repo
   alias Kodo.Sessions
+  alias Kodo.Sessions.ActiveSession
 
-  @retry_interval 1_000
+  @lease_key "kodo:active-session-recovery"
+  @try_lock_sql "SELECT pg_try_advisory_lock(hashtextextended($1, 0)), pg_backend_pid()"
+  @unlock_sql "SELECT pg_advisory_unlock(hashtextextended($1, 0))"
+  @default_config [sweep_interval: 5_000, election_retry_interval: 1_000]
 
   def start_link(opts) do
-    {name, opts} = Keyword.pop(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, opts, if(name, do: [name: name], else: []))
+    config = Keyword.merge(Application.get_env(:kodo, __MODULE__, @default_config), opts)
+    {name, config} = Keyword.pop(config, :name, __MODULE__)
+    GenServer.start_link(__MODULE__, config, if(name, do: [name: name], else: []))
   end
 
   def recover_active_sessions do
@@ -22,31 +29,159 @@ defmodule Kodo.Sessions.Recovery do
   end
 
   @impl true
-  def init(_opts) do
+  def init(config) do
     with :ok <- mark_placement_ready() do
-      recover_active_sessions()
-      schedule_retry()
-      {:ok, %{}}
+      state = %{
+        coordinated?: Keyword.get(config, :coordinated, Process.whereis(InstanceManager) != nil),
+        election_retry_interval: Keyword.fetch!(config, :election_retry_interval),
+        lease_backend: Keyword.get(config, :lease_backend, default_lease_backend()),
+        lease_backend_pid: nil,
+        lease_repo: Keyword.get(config, :lease_repo, Repo),
+        leader?: false,
+        lease_pid: nil,
+        lease_ref: nil,
+        retry_pending?: false,
+        sweep: Keyword.get(config, :sweep, &recover_active_sessions/0),
+        sweep_interval: Keyword.fetch!(config, :sweep_interval),
+        sweep_task: nil,
+        validation_ref: nil
+      }
+
+      if state.coordinated? do
+        send(self(), :elect)
+      else
+        recover_active_sessions()
+      end
+
+      {:ok, state}
     end
   end
 
   @impl true
-  def handle_info(:retry, state) do
+  def handle_info(:elect, %{lease_pid: nil} = state) do
+    parent = self()
+    backend = state.lease_backend
+    check_interval = state.election_retry_interval
+    repo = state.lease_repo
+    {pid, ref} = spawn_monitor(fn -> hold_lease(parent, backend, repo, check_interval) end)
+    {:noreply, %{state | lease_pid: pid, lease_ref: ref}}
+  end
+
+  def handle_info(:elect, state), do: {:noreply, state}
+
+  def handle_info(
+        {:recovery_lease, pid, true, backend_pid},
+        %{lease_pid: pid} = state
+      ) do
+    state = %{state | leader?: true, lease_backend_pid: backend_pid}
+    {:noreply, validate_lease(state)}
+  end
+
+  def handle_info({:recovery_lease, pid, false, nil}, %{lease_pid: pid} = state),
+    do: {:noreply, state}
+
+  def handle_info(
+        {:recovery_lease_valid, pid, validation_ref},
+        %{lease_pid: pid, validation_ref: validation_ref} = state
+      ) do
+    {:noreply, state |> Map.put(:validation_ref, nil) |> start_sweep()}
+  end
+
+  def handle_info(
+        {task_ref, :ok},
+        %{sweep_task: %Task{ref: task_ref}} = state
+      ) do
+    Process.demonitor(task_ref, [:flush])
+    state = %{state | sweep_task: nil}
+
+    if state.retry_pending? do
+      {:noreply, state |> Map.put(:retry_pending?, false) |> validate_lease()}
+    else
+      schedule_sweep(state.sweep_interval, state.lease_ref)
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(
+        {task_ref, result},
+        %{sweep_task: %Task{ref: task_ref}} = state
+      ) do
+    Process.demonitor(task_ref, [:flush])
+    {:stop, {:recovery_sweep_failed, result}, %{state | sweep_task: nil}}
+  end
+
+  def handle_info(
+        {:sweep, lease_ref},
+        %{leader?: true, lease_ref: lease_ref, sweep_task: nil, validation_ref: nil} = state
+      ),
+      do: {:noreply, validate_lease(state)}
+
+  def handle_info({:sweep, _lease_ref}, state), do: {:noreply, state}
+
+  # Retain explicit retries for uncoordinated tests and single-process recovery tools.
+  def handle_info(:retry, %{coordinated?: false} = state) do
     recover_active_sessions()
-    schedule_retry()
     {:noreply, state}
+  end
+
+  def handle_info(:retry, %{leader?: true, sweep_task: nil, validation_ref: nil} = state),
+    do: {:noreply, validate_lease(state)}
+
+  def handle_info(:retry, %{leader?: true} = state),
+    do: {:noreply, %{state | retry_pending?: true}}
+
+  def handle_info(:retry, state), do: {:noreply, state}
+
+  def handle_info({:DOWN, ref, :process, pid, _reason}, %{lease_pid: pid, lease_ref: ref} = state) do
+    Process.send_after(self(), :elect, state.election_retry_interval)
+    state = stop_sweep(state)
+
+    {:noreply,
+     %{
+       state
+       | leader?: false,
+         lease_backend_pid: nil,
+         lease_pid: nil,
+         lease_ref: nil,
+         retry_pending?: false,
+         validation_ref: nil
+     }}
+  end
+
+  def handle_info(
+        {:DOWN, task_ref, :process, task_pid, reason},
+        %{sweep_task: %Task{pid: task_pid, ref: task_ref}} = state
+      ) do
+    {:stop, {:recovery_sweep_failed, reason}, %{state | sweep_task: nil}}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    _state = stop_sweep(state)
+    :ok
   end
 
   defp recover_sessions(session_ids) do
     Enum.filter(session_ids, fn session_id ->
       case Sessions.get_session(session_id) do
         %{status: status} when status in ["running", "awaiting_approval"] ->
-          not match?({:ok, _pid}, Sessions.reconcile_started(session_id))
+          recover_session(session_id)
 
         _inactive_or_missing ->
           false
       end
     end)
+  end
+
+  defp recover_session(session_id) do
+    case Sessions.reconcile_started(session_id) do
+      {:ok, pid} ->
+        stop_if_terminal(pid)
+        false
+
+      _error ->
+        true
+    end
   end
 
   defp mark_placement_ready do
@@ -62,8 +197,130 @@ defmodule Kodo.Sessions.Recovery do
     end
   end
 
-  defp schedule_retry do
-    if Process.whereis(InstanceManager), do: Process.send_after(self(), :retry, @retry_interval)
-    :ok
+  defp default_lease_backend,
+    do: if(Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox, do: :test, else: :database)
+
+  defp hold_lease(parent, :test, _repo, check_interval),
+    do: hold_test_lease(parent, check_interval)
+
+  defp hold_lease(parent, :database, repo, check_interval),
+    do:
+      repo.checkout(fn -> hold_database_lease(parent, repo, check_interval) end,
+        timeout: :infinity
+      )
+
+  defp hold_test_lease(parent, check_interval) do
+    lock_id = {{__MODULE__, @lease_key}, self()}
+    acquired? = :global.set_lock(lock_id, [node()], 0)
+    send(parent, {:recovery_lease, self(), acquired?, nil})
+
+    if acquired? do
+      test_lease_loop(parent, Process.monitor(parent), check_interval)
+      :global.del_lock(lock_id, [node()])
+    end
   end
+
+  defp hold_database_lease(parent, repo, check_interval) do
+    election_opts = ControlPlaneTelemetry.repo_options(:recovery_election)
+    [[acquired?, backend_pid]] = repo.query!(@try_lock_sql, [@lease_key], election_opts).rows
+
+    if acquired? do
+      send(parent, {:recovery_lease, self(), true, backend_pid})
+      database_lease_loop(parent, Process.monitor(parent), repo, backend_pid, check_interval)
+      _ = repo.query(@unlock_sql, [@lease_key], election_opts)
+    else
+      send(parent, {:recovery_lease, self(), false, nil})
+    end
+  end
+
+  defp test_lease_loop(parent, parent_ref, check_interval) do
+    receive do
+      {:validate_recovery_lease, ^parent, validation_ref} ->
+        send(parent, {:recovery_lease_valid, self(), validation_ref})
+        test_lease_loop(parent, parent_ref, check_interval)
+
+      {:DOWN, ^parent_ref, :process, ^parent, _reason} ->
+        :ok
+    after
+      check_interval -> test_lease_loop(parent, parent_ref, check_interval)
+    end
+  end
+
+  defp database_lease_loop(parent, parent_ref, repo, backend_pid, check_interval) do
+    receive do
+      {:validate_recovery_lease, ^parent, validation_ref} ->
+        validate_database_lease!(repo, backend_pid)
+        send(parent, {:recovery_lease_valid, self(), validation_ref})
+        database_lease_loop(parent, parent_ref, repo, backend_pid, check_interval)
+
+      {:DOWN, ^parent_ref, :process, ^parent, _reason} ->
+        :ok
+    after
+      check_interval ->
+        validate_database_lease!(repo, backend_pid)
+        database_lease_loop(parent, parent_ref, repo, backend_pid, check_interval)
+    end
+  end
+
+  defp validate_database_lease!(repo, backend_pid) do
+    opts = ControlPlaneTelemetry.repo_options(:recovery_lease)
+
+    case repo.query("SELECT pg_backend_pid()", [], opts) do
+      {:ok, %{rows: [[^backend_pid]]}} -> :ok
+      {:ok, %{rows: [[replacement_pid]]}} -> exit({:recovery_connection_changed, replacement_pid})
+      {:error, reason} -> exit({:recovery_connection_lost, reason})
+    end
+  end
+
+  defp validate_lease(state) do
+    validation_ref = make_ref()
+    send(state.lease_pid, {:validate_recovery_lease, self(), validation_ref})
+    %{state | validation_ref: validation_ref}
+  end
+
+  defp start_sweep(%{sweep_task: nil} = state) do
+    recovery = self()
+    sweep = state.sweep
+
+    task =
+      Task.Supervisor.async_nolink(Kodo.ControlPlaneTaskSupervisor, fn ->
+        run_sweep(recovery, sweep)
+      end)
+
+    %{state | sweep_task: task}
+  end
+
+  defp run_sweep(recovery, sweep) do
+    recovery_ref = Process.monitor(recovery)
+    owner = self()
+    worker = spawn_link(fn -> send(owner, {:recovery_sweep_result, self(), sweep.()}) end)
+
+    receive do
+      {:recovery_sweep_result, ^worker, result} ->
+        Process.demonitor(recovery_ref, [:flush])
+        result
+
+      {:DOWN, ^recovery_ref, :process, ^recovery, _reason} ->
+        Process.exit(worker, :kill)
+        exit(:normal)
+    end
+  end
+
+  defp stop_sweep(%{sweep_task: nil} = state), do: state
+
+  defp stop_sweep(%{sweep_task: task} = state) do
+    _result = Task.shutdown(task, :brutal_kill)
+    %{state | sweep_task: nil}
+  end
+
+  defp stop_if_terminal(pid) do
+    ActiveSession.stop_if_terminal(pid)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp schedule_sweep(:infinity, _lease_ref), do: :ok
+
+  defp schedule_sweep(interval, lease_ref),
+    do: Process.send_after(self(), {:sweep, lease_ref}, interval)
 end

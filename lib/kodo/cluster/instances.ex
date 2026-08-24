@@ -9,6 +9,7 @@ defmodule Kodo.Cluster.Instances do
   import Ecto.Query
 
   alias Kodo.Cluster.Instance
+  alias Kodo.ControlPlaneTelemetry
   alias Kodo.Repo
 
   @ownership_capability "session-ownership-v1"
@@ -62,7 +63,9 @@ defmodule Kodo.Cluster.Instances do
   def get(boot_id), do: Repo.get(Instance, boot_id)
 
   def heartbeat(%Instance{} = instance) do
-    Repo.transaction(fn -> heartbeat_locked(instance) end)
+    Repo.transaction(fn ->
+      heartbeat_locked(instance, ControlPlaneTelemetry.repo_options(:instance_heartbeat))
+    end)
   end
 
   def mark_ready(%Instance{} = instance) do
@@ -117,7 +120,7 @@ defmodule Kodo.Cluster.Instances do
   end
 
   @doc "Checks authoritative heartbeat liveness without conflating it with placement readiness."
-  def alive?(boot_id, stale_after_seconds)
+  def alive?(boot_id, stale_after_seconds, opts \\ [])
       when is_integer(stale_after_seconds) and stale_after_seconds >= 0 do
     Repo.exists?(
       from(instance in Instance,
@@ -128,7 +131,8 @@ defmodule Kodo.Cluster.Instances do
               instance.last_seen_at,
               ^stale_after_seconds
             )
-      )
+      ),
+      opts
     )
   end
 
@@ -185,18 +189,18 @@ defmodule Kodo.Cluster.Instances do
     |> Repo.update_all(set: [ready: false])
   end
 
-  defp heartbeat_locked(instance) do
+  defp heartbeat_locked(instance, opts \\ []) do
     Instance
     |> where([record], record.boot_id == ^instance.boot_id)
     |> update([record],
       set: [last_seen_at: fragment("timezone('UTC', clock_timestamp())")]
     )
-    |> update_and_reload!(instance.boot_id)
+    |> update_and_reload!(instance.boot_id, opts)
   end
 
-  defp update_and_reload!(query, boot_id) do
-    case Repo.update_all(query, []) do
-      {1, nil} -> Repo.get!(Instance, boot_id)
+  defp update_and_reload!(query, boot_id, opts \\ []) do
+    case Repo.update_all(query, [], opts) do
+      {1, nil} -> Repo.get!(Instance, boot_id, opts)
       {0, nil} -> Repo.rollback(:instance_not_found)
     end
   end

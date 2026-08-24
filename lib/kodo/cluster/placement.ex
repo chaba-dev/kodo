@@ -137,12 +137,13 @@ defmodule Kodo.Cluster.Placement do
       candidates |> current_generation() |> choose_available(session_id)
   end
 
-  defp choose(candidates, _owner_boot_id, session_id, artifact_revision) do
-    candidates
-    |> Enum.filter(fn {instance, _load} ->
-      instance.artifact_revision == artifact_revision
-    end)
-    |> choose_available(session_id)
+  defp choose(candidates, owner_boot_id, session_id, artifact_revision) do
+    Enum.find(candidates, fn {instance, _load} -> instance.boot_id == owner_boot_id end) ||
+      candidates
+      |> Enum.filter(fn {instance, _load} ->
+        instance.artifact_revision == artifact_revision
+      end)
+      |> choose_available(session_id)
   end
 
   defp current_generation([]), do: []

@@ -330,7 +330,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert :ok = Sessions.cancel(session.id)
   end
 
-  test "reconstructs an approval wait and dispatches its durable request after restart", %{
+  test "reconstructs a durable approval wait and dispatches its request", %{
     runner: runner,
     scope: scope,
     session: session
@@ -350,22 +350,44 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert_receive {:session_event,
                     %{type: "approval_requested", payload: %{"approval_id" => approval_id}}}
 
-    [{first, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
-    assert :ok = DynamicSupervisor.terminate_child(Kodo.SessionSupervisor, first)
+    {:ok, replay} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Replayed approval",
+        model: session.model,
+        approval_policy: "safe"
+      })
+
+    session.id
+    |> Sessions.events_after()
+    |> Enum.drop(1)
+    |> Enum.each(fn event ->
+      assert {:ok, _event} =
+               Sessions.append_event(replay.id, event.type, event.payload,
+                 source: event.source,
+                 version: event.version,
+                 parent_id: event.parent_id
+               )
+    end)
+
+    replay
+    |> Ecto.Changeset.change(status: "awaiting_approval")
+    |> Kodo.Repo.update!()
+
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{replay.id}")
 
     assert {:ok, {_resolved, _status}} =
-             Sessions.resolve_approval(scope, session.id, approval_id, "approved")
+             Sessions.resolve_approval(scope, replay.id, approval_id, "approved")
 
-    assert {:ok, second} = Sessions.ensure_started(session.id)
-    refute first == second
+    assert {:ok, _coordinator} = Sessions.ensure_started(replay.id)
     assert_receive {:tool_request, %{"request_id" => ^request_id} = request}
     respond_to_tool(runner.id, request)
 
     assert_receive {:session_event,
                     %{type: "session_status_changed", payload: %{"status" => "completed"}}}
 
-    assert Enum.count(Sessions.events_after(session.id), &(&1.type == "approval_requested")) == 1
-    assert Enum.count(Sessions.events_after(session.id), &(&1.type == "tool_requested")) == 1
+    assert Enum.count(Sessions.events_after(replay.id), &(&1.type == "approval_requested")) == 1
+    assert Enum.count(Sessions.events_after(replay.id), &(&1.type == "tool_requested")) == 1
   end
 
   test "redispatches the same request id after a crash during tool execution", %{
@@ -400,18 +422,146 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     for message <- ["First fix", "Second fix"] do
       assert :ok = Sessions.start_turn(session.id, message)
       assert_receive {:tool_request, request}
+      [{pid, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
+      ref = Process.monitor(pid)
       respond_to_tool(runner.id, request)
 
       assert_receive {:session_event,
                       %{type: "session_status_changed", payload: %{"status" => "completed"}}}
 
-      [{pid, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
-      _ = :sys.get_state(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+      _ = :sys.get_state(Kodo.SessionRegistry)
+      assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
     end
 
     events = Sessions.events_after(session.id)
     assert Enum.count(events, &(&1.type == "user_message")) == 2
     assert Enum.count(events, &(&1.type == "model_response")) == 4
+  end
+
+  test "reads terminal state without restarting its coordinator", %{session: session} do
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
+    assert :ok = Sessions.start_turn(session.id, "token budget")
+    [{pid, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
+    ref = Process.monitor(pid)
+
+    assert_receive {:session_event,
+                    %{type: "session_status_changed", payload: %{"status" => "completed"}}}
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    _ = :sys.get_state(Kodo.SessionRegistry)
+
+    assert {:ok, %{status: "completed"}} = Sessions.active_state(session.id)
+    assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
+  end
+
+  test "a state read stops a terminal coordinator created during a storage race", %{
+    session: session
+  } do
+    assert {:ok, _event} = Sessions.set_status(session.id, "completed")
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    coordinator_ref = Process.monitor(coordinator)
+
+    assert {:ok, %{status: "completed"}} = Sessions.active_state(session.id)
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
+  end
+
+  test "recovery stops a coordinator when an active discovery row became terminal", %{
+    session: session
+  } do
+    assert {:ok, _event} = Sessions.set_status(session.id, "running")
+    assert Enum.any?(Sessions.list_active_sessions(), &(&1.id == session.id))
+    assert {:ok, _event} = Sessions.set_status(session.id, "completed")
+    assert {:ok, coordinator} = Sessions.reconcile_started(session.id)
+    coordinator_ref = Process.monitor(coordinator)
+
+    assert :ok = ActiveSession.stop_if_terminal(coordinator)
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
+  end
+
+  test "a follow-up updates terminal projection before a queued recovery stop", %{
+    session: session
+  } do
+    assert {:ok, _event} = Sessions.set_status(session.id, "completed")
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    coordinator_ref = Process.monitor(coordinator)
+    :ok = :sys.suspend(coordinator)
+
+    on_exit(fn ->
+      try do
+        :sys.resume(coordinator)
+      catch
+        :exit, _reason -> :ok
+      end
+    end)
+
+    follow_up =
+      Task.async(fn -> ActiveSession.start_turn(coordinator, "ownership barrier") end)
+
+    await_queued_call(coordinator, fn
+      {:start_turn, "ownership barrier", nil} -> true
+      _message -> false
+    end)
+
+    recovery_stop = Task.async(fn -> ActiveSession.stop_if_terminal(coordinator) end)
+    await_queued_call(coordinator, &(&1 == :stop_if_terminal))
+    :ok = :sys.resume(coordinator)
+
+    assert :ok = Task.await(follow_up)
+    assert :ok = Task.await(recovery_stop)
+    assert_receive {:model_dispatch_started, dispatch_pid}
+    refute_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, _reason}
+
+    send(dispatch_pid, :release_model_dispatch)
+  end
+
+  test "retries a follow-up that races with a terminal coordinator exit", %{session: session} do
+    {:ok, exiting} =
+      DynamicSupervisor.start_child(
+        Kodo.SessionSupervisor,
+        {Kodo.Test.ExitingCoordinator, {session.id, self()}}
+      )
+
+    assert_receive {:exiting_coordinator_ready, ^exiting}
+
+    assert :ok = Sessions.start_turn(session.id, "ownership barrier", Ecto.UUID.generate())
+    assert_receive {:exiting_coordinator_called, ^exiting}
+    assert_receive {:model_dispatch_started, dispatch_pid}
+
+    assert Enum.any?(Sessions.events_after(session.id), fn event ->
+             event.type == "user_message" and event.payload["content"] == "ownership barrier"
+           end)
+
+    send(dispatch_pid, :release_model_dispatch)
+  end
+
+  test "reconstructs terminal state when a remote coordinator disappears", %{session: session} do
+    assert {:ok, _event} = Sessions.set_status(session.id, "completed")
+    ensure_distributed_node!()
+    {:ok, peer, peer_node} = :peer.start_link(%{name: :kodo_terminal_state_peer})
+
+    on_exit(fn -> stop_peer(peer) end)
+
+    :ok = :erpc.call(peer_node, :code, :add_paths, [:code.get_path()])
+    {:ok, _scope} = :erpc.call(peer_node, :pg, :start, [Discovery.scope()])
+
+    {monitor_ref, _members} =
+      :pg.monitor(Discovery.scope(), Discovery.group(:session, session.id))
+
+    remote_pid =
+      :erpc.call(peer_node, Kodo.Test.RemoteCoordinator, :start, [
+        self(),
+        Discovery.scope(),
+        session.id
+      ])
+
+    assert_receive {^monitor_ref, :join, {:session, session_id}, [^remote_pid]}
+    assert session_id == session.id
+    call = Task.async(fn -> Sessions.active_state(session.id) end)
+    assert_receive {:remote_call_received, ^remote_pid}
+    :ok = :peer.stop(peer)
+
+    assert {:ok, %{status: "completed"}} = Task.await(call)
   end
 
   test "redispatches a durable request when an offline runner reconnects", %{
@@ -507,7 +657,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
 
     {:ok, _status} = Sessions.set_status(session.id, "running")
 
-    recovery = start_supervised!({Recovery, name: nil})
+    recovery = start_supervised!({Recovery, name: nil, coordinated: false})
     assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
 
     _manager = start_instance_manager!()
@@ -642,6 +792,19 @@ defmodule Kodo.Sessions.ActiveSessionTest do
       :peer.stop(peer)
     catch
       :exit, _reason -> :ok
+    end
+  end
+
+  defp await_queued_call(coordinator, matches?) do
+    {:messages, messages} = Process.info(coordinator, :messages)
+
+    if Enum.any?(messages, fn
+         {:"$gen_call", _from, request} -> matches?.(request)
+         _message -> false
+       end) do
+      :ok
+    else
+      await_queued_call(coordinator, matches?)
     end
   end
 
