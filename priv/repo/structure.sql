@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict NY8m7vDraNr28uOJ9Lb0YeTKgiScHqpLY4Ilzf6dshOdUoMeUASLeTBQIhB92jM
+\restrict dqVU4eDdPsesegv9HH5aaHRYSjaUgBN0KzALteCWQ9mT3ZHd3AwrfoLIMWaWkC2
 
 -- Dumped from database version 17.10
 -- Dumped by pg_dump version 18.4
@@ -375,6 +375,13 @@ CREATE UNIQUE INDEX session_events_session_id_sequence_index ON public.session_e
 
 
 --
+-- Name: sessions_active_recovery_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX sessions_active_recovery_index ON public.sessions USING btree (status) WHERE ((status)::text = ANY ((ARRAY['running'::character varying, 'awaiting_approval'::character varying])::text[]));
+
+
+--
 -- Name: sessions_owner_boot_id_index; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -490,7 +497,7 @@ ALTER TABLE ONLY public.users_tokens
 -- PostgreSQL database dump complete
 --
 
-\unrestrict NY8m7vDraNr28uOJ9Lb0YeTKgiScHqpLY4Ilzf6dshOdUoMeUASLeTBQIhB92jM
+\unrestrict dqVU4eDdPsesegv9HH5aaHRYSjaUgBN0KzALteCWQ9mT3ZHd3AwrfoLIMWaWkC2
 
 INSERT INTO public."schema_migrations" (version) VALUES (20260807073017);
 INSERT INTO public."schema_migrations" (version) VALUES (20260808062115);
@@ -503,3 +510,4 @@ INSERT INTO public."schema_migrations" (version) VALUES (20260810064235);
 INSERT INTO public."schema_migrations" (version) VALUES (20260813214336);
 INSERT INTO public."schema_migrations" (version) VALUES (20260815051344);
 INSERT INTO public."schema_migrations" (version) VALUES (20260822084328);
+INSERT INTO public."schema_migrations" (version) VALUES (20260824012010);
