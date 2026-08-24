@@ -479,6 +479,42 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
   end
 
+  test "a follow-up updates terminal projection before a queued recovery stop", %{
+    session: session
+  } do
+    assert {:ok, _event} = Sessions.set_status(session.id, "completed")
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    coordinator_ref = Process.monitor(coordinator)
+    :ok = :sys.suspend(coordinator)
+
+    on_exit(fn ->
+      try do
+        :sys.resume(coordinator)
+      catch
+        :exit, _reason -> :ok
+      end
+    end)
+
+    follow_up =
+      Task.async(fn -> ActiveSession.start_turn(coordinator, "ownership barrier") end)
+
+    await_queued_call(coordinator, fn
+      {:start_turn, "ownership barrier", nil} -> true
+      _message -> false
+    end)
+
+    recovery_stop = Task.async(fn -> ActiveSession.stop_if_terminal(coordinator) end)
+    await_queued_call(coordinator, &(&1 == :stop_if_terminal))
+    :ok = :sys.resume(coordinator)
+
+    assert :ok = Task.await(follow_up)
+    assert :ok = Task.await(recovery_stop)
+    assert_receive {:model_dispatch_started, dispatch_pid}
+    refute_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, _reason}
+
+    send(dispatch_pid, :release_model_dispatch)
+  end
+
   test "retries a follow-up that races with a terminal coordinator exit", %{session: session} do
     {:ok, exiting} =
       DynamicSupervisor.start_child(
@@ -756,6 +792,19 @@ defmodule Kodo.Sessions.ActiveSessionTest do
       :peer.stop(peer)
     catch
       :exit, _reason -> :ok
+    end
+  end
+
+  defp await_queued_call(coordinator, matches?) do
+    {:messages, messages} = Process.info(coordinator, :messages)
+
+    if Enum.any?(messages, fn
+         {:"$gen_call", _from, request} -> matches?.(request)
+         _message -> false
+       end) do
+      :ok
+    else
+      await_queued_call(coordinator, matches?)
     end
   end
 

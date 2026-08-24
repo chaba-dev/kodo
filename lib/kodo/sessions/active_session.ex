@@ -113,9 +113,10 @@ defmodule Kodo.Sessions.ActiveSession do
     case Sessions.begin_turn(state.projection.id, content, client_request_id,
            ownership: state.ownership
          ) do
-      {:ok, _events} ->
+      {:ok, events} ->
+        projection = Enum.reduce(events, state.projection, &Projection.apply_event/2)
         task = start_loop(state.projection.id, state.ownership)
-        {:reply, :ok, %{state | task: task}}
+        {:reply, :ok, %{state | projection: projection, task: task}}
 
       {:error, :stale_ownership} = error ->
         {:stop, :normal, error, stop_task(state)}
