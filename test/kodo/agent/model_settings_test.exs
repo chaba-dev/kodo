@@ -64,6 +64,44 @@ defmodule Kodo.Agent.ModelSettingsTest do
     assert mapping["roles"]["search"]["sources"]["model"] == "profile"
   end
 
+  test "resolves user and repository layers from one database snapshot", %{
+    runner: runner,
+    scope: scope
+  } do
+    handler_id = "model-settings-query-count-#{System.unique_integer()}"
+    parent = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:kodo, :repo, :query],
+        fn _event, _measurements, metadata, _config ->
+          if String.contains?(metadata.query, ~s(FROM "agent_role_overrides")) do
+            send(parent, :override_query)
+          end
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert {:ok, _mapping} = ModelSettings.resolved(scope, runner.id)
+    assert_receive :override_query
+    refute_receive :override_query
+  end
+
+  test "partial updates preserve fields written by another request", %{scope: scope} do
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :search, %{model: "user:search"})
+
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :search, %{reasoning: "high"})
+
+    assert {:ok, mapping} = ModelSettings.resolved(scope)
+    assert mapping["roles"]["search"]["model"] == "user:search"
+    assert mapping["roles"]["search"]["reasoning"] == "high"
+  end
+
   test "rejects invalid roles, empty settings, and another user's repository", %{
     runner: runner,
     scope: scope
