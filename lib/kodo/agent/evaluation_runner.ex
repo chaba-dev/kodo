@@ -128,7 +128,7 @@ defmodule Kodo.Agent.EvaluationRunner do
   defp execute(%{"type" => "search"} = task, adapter, mapping) do
     with_workspace(task["fixture"]["files"], fn root ->
       role = ModelMapping.role!(mapping, :search)
-      contract = Roles.fetch!(:search, role["role_contract_version"])
+      contract = Roles.fetch!(:search, role["role_contract"])
       prompt = task["prompt"] <> " Cite each finding as path:line and quote evidence."
       {answer, trace, usage} = tool_loop(adapter, role, contract, prompt, root, [], [], mapping)
 
@@ -143,7 +143,7 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   defp execute(%{"type" => "review"} = task, adapter, mapping) do
     role = ModelMapping.role!(mapping, :review)
-    contract = Roles.fetch!(:review, role["role_contract_version"])
+    contract = Roles.fetch!(:review, role["role_contract"])
     messages = messages(contract.prompt, task["prompt"] <> "\n\n" <> task["fixture"]["diff"])
     started = System.monotonic_time(:millisecond)
 
@@ -167,7 +167,7 @@ defmodule Kodo.Agent.EvaluationRunner do
       System.cmd("git", ["add", "."], cd: root, stderr_to_stdout: true)
 
       role = ModelMapping.role!(mapping, :primary)
-      contract = Roles.fetch!(:primary, role["role_contract_version"])
+      contract = Roles.fetch!(:primary, role["role_contract"])
       checks = task["expected"]["public_checks"]
       prompt = implementation_prompt(task, checks)
 
@@ -465,7 +465,7 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   defp delegated_search(adapter, mapping, root, question) do
     role = ModelMapping.role!(mapping, :search)
-    contract = Roles.fetch!(:search, role["role_contract_version"])
+    contract = Roles.fetch!(:search, role["role_contract"])
 
     {answer, trace, usage} =
       tool_loop(adapter, role, contract, question, root, [], [], mapping)
@@ -475,7 +475,7 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   defp structured_review(adapter, mapping, task, diff) do
     role = ModelMapping.role!(mapping, :review)
-    contract = Roles.fetch!(:review, role["role_contract_version"])
+    contract = Roles.fetch!(:review, role["role_contract"])
 
     {:ok, response} =
       adapter.generate_object(

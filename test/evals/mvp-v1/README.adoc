@@ -26,9 +26,9 @@ link:../criteria.json[top-level benchmark catalog].
 The accepted result is
 link:results/balanced-profile-v8-2026-08-25.json[`balanced-profile-v8-2026-08-25.json`].
 It evaluates `openai:gpt-4o-mini` with no reasoning for the primary, search, and
-review roles using primary contract v6 and toolset `workspace-v5`, search
-contract v3 and toolset `read-only-v1`, and review contract v4 and toolset
-`read-only-v1`.
+review roles. The artifact preserves the exact historical contract iterations
+and toolsets used by that benchmark; those numeric iterations are benchmark
+provenance, not released product versions.
 
 The suite-specific regression floors preserve this accepted result's quality
 while the shared targets identify remaining work. In particular, search
@@ -52,7 +52,7 @@ a replacement for the accepted balanced baseline. The detailed comparison and
 reasoning-configuration caveat are recorded in
 link:../../../docs/evaluations.md[the evaluation analysis].
 
-Review contract v5 allows both models to use ReqLLM's schema-validated strict-tool
+The `alpha-v1` review contract allows both models to use ReqLLM's schema-validated strict-tool
 fallback when native JSON Schema metadata is absent. Both completed review
 candidate runs with 100% defect and location recall and no false positives.
 Terra matched Sol's review quality with lower cost and latency, so it is the

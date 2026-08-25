@@ -151,26 +151,22 @@ defmodule Kodo.Agent.Loop do
     mapping =
       context.projection.model_mapping || legacy_mapping(context.projection.model)
 
-    if mapping["profile_revision"] >= 3 do
-      primary_invocation_id = response.payload["invocation_id"]
+    primary_invocation_id = response.payload["invocation_id"]
 
-      case review_result(context.events, primary_invocation_id) do
-        nil ->
-          run_final_review(text, primary_invocation_id, Map.put(context, :mapping, mapping))
+    case review_result(context.events, primary_invocation_id) do
+      nil ->
+        run_final_review(text, primary_invocation_id, Map.put(context, :mapping, mapping))
 
-        result ->
-          handle_review_result(
-            text,
-            result,
-            context.session_id,
-            context.adapter,
-            context.budgets,
-            context.invocations,
-            context.ownership
-          )
-      end
-    else
-      {:ok, text}
+      result ->
+        handle_review_result(
+          text,
+          result,
+          context.session_id,
+          context.adapter,
+          context.budgets,
+          context.invocations,
+          context.ownership
+        )
     end
   end
 
@@ -192,7 +188,7 @@ defmodule Kodo.Agent.Loop do
 
   defp run_final_review(text, primary_invocation_id, context) do
     review = ModelMapping.role!(context.mapping, :review)
-    contract = Roles.fetch!(:review, review["role_contract_version"])
+    contract = Roles.fetch!(:review, review["role_contract"])
 
     with {:ok, capability_validation} <-
            context.adapter.validate_model(review["model"], review, contract),
@@ -288,8 +284,7 @@ defmodule Kodo.Agent.Loop do
              "provider" => review["provider"],
              "model" => review["model"],
              "reasoning" => review["reasoning"],
-             "role_contract_version" => contract.version,
-             "role_prompt_version" => contract.version,
+             "role_contract" => contract.id,
              "toolset_version" => contract.toolset_version,
              "capability_validation" => capability_validation,
              "model_mapping" => mapping
@@ -482,7 +477,7 @@ defmodule Kodo.Agent.Loop do
   defp infer(session_id, projection, events, adapter, budgets, invocation, ownership) do
     mapping = projection.model_mapping || legacy_mapping(projection.model)
     primary = ModelMapping.role!(mapping, :primary)
-    contract = Roles.fetch!(:primary, primary["role_contract_version"])
+    contract = Roles.fetch!(:primary, primary["role_contract"])
 
     tools =
       Tools.definitions_for_turn(
@@ -598,8 +593,7 @@ defmodule Kodo.Agent.Loop do
              "provider" => primary["provider"],
              "model" => primary["model"],
              "reasoning" => primary["reasoning"],
-             "role_contract_version" => primary["role_contract_version"],
-             "role_prompt_version" => primary["role_contract_version"],
+             "role_contract" => primary["role_contract"],
              "toolset_version" => primary["toolset_version"],
              "capability_validation" => capability_validation,
              "model_mapping" => mapping
@@ -653,9 +647,7 @@ defmodule Kodo.Agent.Loop do
     Sessions.append_events(session_id, events)
   end
 
-  defp defer_final_answer?(response, mapping) do
-    response.tool_calls == [] and mapping["profile_revision"] >= 3
-  end
+  defp defer_final_answer?(response, _mapping), do: response.tool_calls == []
 
   defp normalize_tool_calls(calls) do
     Enum.map(calls, &%{"id" => &1.id, "name" => &1.name, "arguments" => &1.arguments})
@@ -814,7 +806,7 @@ defmodule Kodo.Agent.Loop do
 
   defp run_search(question, parent_call, context) do
     search = ModelMapping.role!(context.mapping, :search)
-    contract = Roles.fetch!(:search, search["role_contract_version"])
+    contract = Roles.fetch!(:search, search["role_contract"])
 
     with {:ok, capability_validation} <-
            context.adapter.validate_model(search["model"], search, contract) do
@@ -1086,8 +1078,7 @@ defmodule Kodo.Agent.Loop do
              "provider" => search["provider"],
              "model" => search["model"],
              "reasoning" => search["reasoning"],
-             "role_contract_version" => contract.version,
-             "role_prompt_version" => contract.version,
+             "role_contract" => contract.id,
              "toolset_version" => contract.toolset_version,
              "capability_validation" => capability_validation,
              "model_mapping" => context.mapping
@@ -1640,11 +1631,6 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp legacy_mapping(model) do
-    mapping = ModelMapping.balanced([{"session", %{primary: %{model: model}}}])
-
-    mapping
-    |> put_in(["profile_revision"], 2)
-    |> put_in(["roles", "primary", "role_contract_version"], 2)
-    |> put_in(["roles", "primary", "toolset_version"], "workspace-v1")
+    ModelMapping.balanced([{"session", %{primary: %{model: model}}}])
   end
 end

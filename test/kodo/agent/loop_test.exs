@@ -83,8 +83,8 @@ defmodule Kodo.Agent.LoopTest do
     assert invocation.payload["model"] == "test:model"
     assert invocation.payload["reasoning"] == "none"
     assert invocation.version == 3
-    assert invocation.payload["role_contract_version"] == 6
-    assert invocation.payload["role_prompt_version"] == 6
+    assert invocation.payload["role_contract"] == "alpha-v1"
+    refute Map.has_key?(invocation.payload, "role_prompt_version")
     assert invocation.payload["toolset_version"] == "workspace-v5"
     assert invocation.payload["capability_validation"]["tools"]
     assert invocation.payload["capability_validation"]["required_context_window"] == 100_000
@@ -93,13 +93,15 @@ defmodule Kodo.Agent.LoopTest do
              "openai:gpt-4o-mini"
   end
 
-  test "replays a pre-mapping session with its legacy model and versioned contract", %{
+  test "replays a pre-mapping session with its legacy model and alpha contract", %{
+    runner: runner,
     session: session,
     ownership: ownership
   } do
     previous_test_pid = Application.get_env(:kodo, :fake_llm_test_pid)
     Application.put_env(:kodo, :fake_llm_test_pid, self())
     on_exit(fn -> restore_env(:fake_llm_test_pid, previous_test_pid) end)
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
 
     [created] = Sessions.events_after(session.id)
 
@@ -115,25 +117,38 @@ defmodule Kodo.Agent.LoopTest do
         ownership: ownership
       )
 
-    assert {:ok, "The fix is complete."} =
-             Loop.run(session.id,
-               adapter: Kodo.Test.FakeLLM,
-               budgets: budgets([]),
-               ownership: ownership
-             )
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
 
     assert_receive {:llm_request, "test:model", system, tools, opts}
-    assert system["content"] == Kodo.Agent.Roles.fetch!(:primary, 2).prompt
-    assert tools == Tools.definitions("workspace-v1")
+    assert system["content"] == Kodo.Agent.Roles.fetch!(:primary).prompt
+    assert tools == Tools.definitions("workspace-v5")
     assert opts[:reasoning] == "none"
+
+    assert_receive {:tool_request, review_request}
+    assert review_request["request"]["tool"] == "git_diff"
+
+    broadcast_success(runner, review_request, %{
+      "result" => "output",
+      "content" => "clean diff",
+      "truncated" => false
+    })
+
+    assert {:ok, "The fix is complete."} = Task.await(loop)
 
     invocation =
       Enum.find(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
 
     assert invocation.version == 3
     assert invocation.payload["model"] == "test:model"
-    assert invocation.payload["role_contract_version"] == 2
-    assert invocation.payload["toolset_version"] == "workspace-v1"
+    assert invocation.payload["role_contract"] == "alpha-v1"
+    assert invocation.payload["toolset_version"] == "workspace-v5"
 
     assert invocation.payload["model_mapping"]["roles"]["primary"]["sources"]["model"] ==
              "session"
@@ -386,7 +401,7 @@ defmodule Kodo.Agent.LoopTest do
              event.type == "review_invocation_started" and
                event.payload["role"] == "review" and
                event.payload["model"] == "openai:gpt-4o-mini" and
-               event.payload["role_contract_version"] == 5
+               event.payload["role_contract"] == "alpha-v1"
            end)
 
     assert Enum.any?(events, fn event ->

@@ -811,11 +811,11 @@ delivery checklist.
   recall, 90% public implementation success, 80% hidden implementation success,
   100% scope compliance, and no harness errors. Accept revision 8 as the default
   recommendation; review-precision improvements are non-blocking follow-up work.
-  Revision 9 preserves that model selection and advances the review contract to
-  accept any schema-validated object path, including ReqLLM's strict-tool
-  fallback. Terra and Sol can now run review, but initial candidates did not
-  preserve the accepted implementation thresholds; Terra is the cheaper and
-  faster follow-up candidate.
+  The balanced =alpha-v1= profile preserves that model selection and advances
+  the review contract to accept any schema-validated object path, including
+  ReqLLM's strict-tool fallback. Terra and Sol can now run review, but initial
+  candidates did not preserve the accepted implementation thresholds; Terra is
+  the cheaper and faster follow-up candidate.
 
 ** TODO Milestone 8: Reliability and release candidate
 

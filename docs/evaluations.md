@@ -169,7 +169,7 @@ Restoring correction context produced the decisive improvement: nine of ten impl
 
 ## GPT-5.6 API candidates — 2026-08-25
 
-Three candidates compare GPT-5.6 Terra and Sol for primary and search while retaining `openai:gpt-4o-mini` for review. At the time of these runs, review contract v4 required native JSON Schema metadata, which the current ReqLLM catalog does not declare for either GPT-5.6 model. Review contract v5, evaluated below, replaces that provider-mechanism requirement with schema-validated object output. ChatGPT-subscription routing was not used: the current adapter dispatches through the OpenAI API and does not yet implement the OAuth device authorization and account flow required by the Codex backend.
+Three candidates compare GPT-5.6 Terra and Sol for primary and search while retaining `openai:gpt-4o-mini` for review. At the time of these runs, the pre-alpha review contract required native JSON Schema metadata, which the current ReqLLM catalog does not declare for either GPT-5.6 model. The `alpha-v1` contract evaluated below instead requires schema-validated object output. ChatGPT-subscription routing was not used: the current adapter dispatches through the OpenAI API and does not yet implement the OAuth device authorization and account flow required by the Codex backend.
 
 | Metric | 4o-mini baseline | Terra primary/search | Sol primary, Terra search | Sol primary/search |
 | --- | ---: | ---: | ---: | ---: |
@@ -195,7 +195,7 @@ The reports record `reasoning: none`, which currently means that Kodo omitted an
 
 ## GPT-5.6 review candidates — 2026-08-25
 
-Review contract v5 requires schema-validated object generation rather than one provider-specific encoding. ReqLLM uses native JSON Schema where model metadata supports it and a forced strict tool call otherwise; its strict output validator applies to both paths. Direct live probes returned valid objects for Terra and Sol, and both models completed the full suite when assigned only to review.
+The `alpha-v1` review contract requires schema-validated object generation rather than one provider-specific encoding. ReqLLM uses native JSON Schema where model metadata supports it and a forced strict tool call otherwise; its strict output validator applies to both paths. Direct live probes returned valid objects for Terra and Sol, and both models completed the full suite when assigned only to review.
 
 | Metric | 4o-mini baseline | Terra review | Sol review |
 | --- | ---: | ---: | ---: |
@@ -213,4 +213,4 @@ Review contract v5 requires schema-validated object generation rather than one p
 
 The artifacts are [`terra-review-2026-08-25.json`](../test/evals/mvp-v1/results/terra-review-2026-08-25.json) and [`sol-review-2026-08-25.json`](../test/evals/mvp-v1/results/sol-review-2026-08-25.json). Both GPT-5.6 reviewers were perfectly precise on the standalone review tasks, but they marked eight of ten implementation diffs clean and did not recover all failing implementations. Because those implementation tasks also rerun the stochastic `gpt-4o-mini` primary, the lower implementation rates cannot be attributed solely to review; they do show that neither review candidate has evidence to replace the balanced reviewer. Terra matched Sol's standalone review quality at 39% of its cost and lower latency, making Terra the preferred GPT-5.6 review candidate for further repetitions.
 
-Profile revision 9 adopts review contract v5 while preserving the balanced `gpt-4o-mini` model selection. Since `gpt-4o-mini` advertises native JSON Schema, its request path is unchanged; the revision broadens valid user overrides without changing the accepted revision 8 benchmark baseline.
+The balanced `alpha-v1` profile adopts the provider-independent review contract while preserving the `gpt-4o-mini` model selection. Since `gpt-4o-mini` advertises native JSON Schema, its request path is unchanged; the contract broadens valid user overrides without changing the accepted historical benchmark baseline.

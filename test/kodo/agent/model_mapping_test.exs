@@ -3,18 +3,18 @@ defmodule Kodo.Agent.ModelMappingTest do
 
   alias Kodo.Agent.ModelMapping
 
-  test "balanced resolves every initial role with versioned contracts" do
+  test "balanced resolves every initial role with alpha contracts" do
     mapping = ModelMapping.balanced()
 
     assert mapping["profile"] == "balanced"
-    assert mapping["profile_revision"] == 9
+    assert mapping["profile_version"] == "alpha-v1"
     assert Map.keys(mapping["roles"]) |> Enum.sort() == ~w(primary review search)
 
     assert %{
              "provider" => "openai",
              "model" => "openai:gpt-4o-mini",
              "reasoning" => "none",
-             "role_contract_version" => 6,
+             "role_contract" => "alpha-v1",
              "sources" => %{"model" => "profile", "reasoning" => "profile"}
            } = mapping["roles"]["primary"]
   end

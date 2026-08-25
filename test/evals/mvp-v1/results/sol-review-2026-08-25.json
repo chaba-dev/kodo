@@ -2,7 +2,7 @@
   "contracts": {
     "primary": {
       "output": "final_answer",
-      "version": 6,
+      "id": "alpha-v1",
       "prompt": "You are Kodo's primary coding agent. Inspect the complete target file, make the smallest correct change with replace_text, and verify it. Use the exact public verification command from the task with cwd '.'. After every edit, reread the changed file and run that exact command; if either exposes an error, fix it before doing anything else. Do not substitute mix commands or invent working directories. Treat review feedback as a claim: inspect the current file and preserve behavior required by the original task before changing code. Leave enough budget to verify and summarize.",
       "tools": "workspace",
       "toolset_version": "workspace-v5",
@@ -22,7 +22,7 @@
     },
     "review": {
       "output": "review_findings",
-      "version": 5,
+      "id": "alpha-v1",
       "prompt": "Review the supplied original task and final diff for actionable defects introduced by the diff. The original task is authoritative: a diff that implements its requested behavior is not a defect. Never recommend reverting required behavior. Report only a concrete correctness failure or regression visible in the diff, with severity, location, explanation, and a fix that changes code. Do not report speculation, optional improvements, performance concerns without evidence, correct code, or a finding whose suggested fix says no change is needed. Set clean=true if and only if findings is empty.",
       "tools": "read_only",
       "toolset_version": "read-only-v1",
@@ -42,7 +42,7 @@
     },
     "search": {
       "output": "evidence",
-      "version": 3,
+      "id": "alpha-v1",
       "prompt": "Investigate the requested codebase question using read-only tools. You have at most six model turns: batch independent tool calls and reserve the final turn for a concise answer supported by file and line evidence.",
       "tools": "read_only",
       "toolset_version": "read-only-v1",
@@ -63,13 +63,13 @@
   },
   "mapping": {
     "profile": "balanced",
-    "profile_revision": 9,
+    "profile_version": "alpha-v1",
     "roles": {
       "primary": {
         "model": "openai:gpt-4o-mini",
         "provider": "openai",
         "reasoning": "none",
-        "role_contract_version": 6,
+        "role_contract": "alpha-v1",
         "sources": {
           "model": "profile",
           "reasoning": "profile"
@@ -80,7 +80,7 @@
         "model": "openai:gpt-5.6-sol",
         "provider": "openai",
         "reasoning": "none",
-        "role_contract_version": 5,
+        "role_contract": "alpha-v1",
         "sources": {
           "model": "evaluation",
           "reasoning": "profile"
@@ -91,7 +91,7 @@
         "model": "openai:gpt-4o-mini",
         "provider": "openai",
         "reasoning": "none",
-        "role_contract_version": 3,
+        "role_contract": "alpha-v1",
         "sources": {
           "model": "profile",
           "reasoning": "profile"

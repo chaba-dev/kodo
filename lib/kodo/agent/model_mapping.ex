@@ -4,7 +4,7 @@ defmodule Kodo.Agent.ModelMapping do
   alias Kodo.Agent.Roles
 
   @profile "balanced"
-  @profile_revision 9
+  @profile_version "alpha-v1"
   @balanced %{
     primary: %{model: "openai:gpt-4o-mini", reasoning: "none"},
     search: %{model: "openai:gpt-4o-mini", reasoning: "none"},
@@ -30,14 +30,14 @@ defmodule Kodo.Agent.ModelMapping do
 
         {Atom.to_string(role),
          Map.merge(resolved, %{
-           "role_contract_version" => contract.version,
+           "role_contract" => contract.id,
            "toolset_version" => contract.toolset_version
          })}
       end)
 
     %{
       "profile" => @profile,
-      "profile_revision" => @profile_revision,
+      "profile_version" => @profile_version,
       "roles" => roles
     }
   end

@@ -32,12 +32,16 @@ defmodule Kodo.Agent.ModelCapabilitiesTest do
     end
   end
 
-  test "preserves the native JSON Schema requirement for persisted review contracts" do
+  test "can require native JSON Schema explicitly" do
+    contract =
+      Roles.fetch!(:review)
+      |> put_in([:capabilities, :structured_output], :json_schema)
+
     assert {:error, {:model_capabilities_missing, ["json_schema"]}} =
              ModelCapabilities.validate(
                "openai:gpt-5.6-terra",
                %{"reasoning" => "none"},
-               Roles.fetch!(:review, 4)
+               contract
              )
   end
 
