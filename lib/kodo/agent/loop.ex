@@ -361,14 +361,17 @@ defmodule Kodo.Agent.Loop do
 
   defp handle_review_result(
          text,
-         %{payload: %{"clean" => true}},
-         _session_id,
+         %{payload: %{"clean" => true}} = result,
+         session_id,
          _adapter,
          _budgets,
          _invocations,
-         _ownership
-       ),
-       do: {:ok, text}
+         ownership
+       ) do
+    with :ok <- persist_reviewed_answer(session_id, result, text, ownership) do
+      {:ok, text}
+    end
+  end
 
   defp handle_review_result(
          _text,
@@ -409,6 +412,31 @@ defmodule Kodo.Agent.Loop do
              },
              version: 1,
              parent_id: result.payload["invocation_id"],
+             ownership: ownership
+           ) do
+        {:ok, _event} -> :ok
+        error -> error
+      end
+    end
+  end
+
+  defp persist_reviewed_answer(session_id, result, text, ownership) do
+    invocation_id = result.payload["primary_invocation_id"]
+
+    if Enum.any?(Sessions.events_after(session_id), fn event ->
+         event.type == "assistant_message_completed" and
+           event.payload["invocation_id"] == invocation_id
+       end) do
+      :ok
+    else
+      case Sessions.append_event(
+             session_id,
+             "assistant_message_completed",
+             %{
+               "role" => "assistant",
+               "content" => text,
+               "invocation_id" => invocation_id
+             },
              ownership: ownership
            ) do
         {:ok, _event} -> :ok
@@ -473,7 +501,8 @@ defmodule Kodo.Agent.Loop do
              session_id |> Sessions.events_after() |> current_turn() |> usage(),
              budgets
            ),
-         {:ok, _event} <- persist_model_response(session_id, invocation_id, response, ownership) do
+         {:ok, _event} <-
+           persist_model_response(session_id, invocation_id, response, mapping, ownership) do
       resume(session_id, adapter, budgets, ownership)
     end
   end
@@ -575,7 +604,7 @@ defmodule Kodo.Agent.Loop do
     )
   end
 
-  defp persist_model_response(session_id, invocation_id, response, ownership) do
+  defp persist_model_response(session_id, invocation_id, response, mapping, ownership) do
     events = [
       {"assistant_message_started", %{"invocation_id" => invocation_id}, [ownership: ownership]},
       {"model_response",
@@ -589,7 +618,7 @@ defmodule Kodo.Agent.Loop do
     ]
 
     events =
-      if response.text == "" do
+      if response.text == "" or defer_final_answer?(response, mapping) do
         events
       else
         events ++
@@ -604,6 +633,10 @@ defmodule Kodo.Agent.Loop do
       end
 
     Sessions.append_events(session_id, events)
+  end
+
+  defp defer_final_answer?(response, mapping) do
+    response.tool_calls == [] and mapping["profile_revision"] >= 3
   end
 
   defp normalize_tool_calls(calls) do

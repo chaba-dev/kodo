@@ -434,6 +434,11 @@ defmodule Kodo.Agent.LoopTest do
 
     assert Enum.map(results, & &1.payload["clean"]) == [false, true]
 
+    assert Enum.map(
+             Enum.filter(events, &(&1.type == "assistant_message_completed")),
+             & &1.payload["content"]
+           ) == ["Addressed review findings."]
+
     assert Enum.any?(events, fn event ->
              event.type == "review_feedback" and
                hd(event.payload["findings"])["path"] == "lib/example.ex"
