@@ -3,6 +3,7 @@ defmodule Kodo.LLM.ReqLLM do
 
   @behaviour Kodo.LLM
 
+  alias Kodo.Agent.ModelCapabilities
   alias ReqLLM.Context
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
@@ -10,6 +11,11 @@ defmodule Kodo.LLM.ReqLLM do
   alias ReqLLM.Response
   alias ReqLLM.Tool
   alias ReqLLM.ToolCall
+
+  @impl true
+  def validate_model(model, role_mapping, contract) do
+    ModelCapabilities.validate(model, role_mapping, contract)
+  end
 
   @impl true
   def generate(model, messages, tools, opts) do

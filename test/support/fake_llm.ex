@@ -10,6 +10,27 @@ defmodule Kodo.Test.FakeLLM do
   @over_budget_usage_tokens 101
 
   @impl true
+  def validate_model(model, _role_mapping, contract) do
+    capabilities =
+      Map.get(contract, :capabilities, %{
+        tools: true,
+        structured_output: false,
+        min_context: 1,
+        input_modalities: [:text]
+      })
+
+    {:ok,
+     %{
+       "catalog_model" => model,
+       "context_window" => capabilities.min_context,
+       "input_modalities" => Enum.map(capabilities.input_modalities, &to_string/1),
+       "json_schema" => capabilities.structured_output == :json_schema,
+       "required_context_window" => capabilities.min_context,
+       "tools" => capabilities.tools
+     }}
+  end
+
+  @impl true
   def generate(model, messages, tools, opts) do
     last = List.last(messages)
 

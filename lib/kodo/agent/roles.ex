@@ -32,12 +32,34 @@ defmodule Kodo.Agent.Roles do
     output: :review_findings
   }
 
+  @primary_v2 Map.put(@primary_v1, :version, 2)
+              |> Map.put(:capabilities, %{
+                tools: true,
+                structured_output: false,
+                min_context: 100_000,
+                input_modalities: [:text]
+              })
+  @search_v2 Map.put(@search_v1, :version, 2)
+             |> Map.put(:capabilities, %{
+               tools: true,
+               structured_output: false,
+               min_context: 30_000,
+               input_modalities: [:text]
+             })
+  @review_v2 Map.put(@review_v1, :version, 2)
+             |> Map.put(:capabilities, %{
+               tools: true,
+               structured_output: :json_schema,
+               min_context: 30_000,
+               input_modalities: [:text]
+             })
+
   @contracts %{
-    primary: %{1 => @primary_v1},
-    search: %{1 => @search_v1},
-    review: %{1 => @review_v1}
+    primary: %{1 => @primary_v1, 2 => @primary_v2},
+    search: %{1 => @search_v1, 2 => @search_v2},
+    review: %{1 => @review_v1, 2 => @review_v2}
   }
-  @current_versions %{primary: 1, search: 1, review: 1}
+  @current_versions %{primary: 2, search: 2, review: 2}
 
   @type role :: :primary | :search | :review
 
