@@ -12,6 +12,12 @@ Every recorded run must include the printed SHA-256 fingerprint, the fully resol
 
 Results belong in `test/evals/mvp-v1/results/<mapping>-<date>.json`. Do not record a recommendation from structural validation alone: all 30 tasks must have actual outcomes, and failures or skipped tasks must remain visible.
 
+## Benchmark criteria
+
+[`criteria.json`](../test/evals/mvp-v1/criteria.json) is the machine-readable quality contract for this suite. Each criterion defines its metric path, meaning, comparison direction, regression threshold, and improvement target. Regression thresholds are anchored to the accepted revision 8 result and are gates for future recommendations. Targets are deliberately stricter and guide subsequent quality work without making known MVP gaps—especially search evidence and final-review precision—look complete.
+
+`test/evals/benchmark_test.exs` validates the criteria contract and verifies that the accepted baseline meets every regression threshold. When a better result is accepted, update `baseline_result` and raise thresholds where the new evidence supports doing so; thresholds must not be lowered merely to admit a regressing candidate. Cost and latency thresholds allow approximately 20% run-to-run variance over revision 8, while correctness, scope, and harness thresholds remain direct quality gates.
+
 ## Balanced baseline — 2026-08-25
 
 The first live baseline is recorded in [`balanced-2026-08-25.json`](../test/evals/mvp-v1/results/balanced-2026-08-25.json) for suite fingerprint `9fe83a629c90af1c663f700ec291140d1a04d4cceef37727917a14a3fea36599`. It ran all roles on `openai:gpt-4o-mini` with no reasoning and completed all 30 tasks without reported harness errors.
