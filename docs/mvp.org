@@ -780,7 +780,7 @@ delivery checklist.
 - [X] Per-role user and repository overrides.
 - [X] Capability validation and invocation metadata.
 - [X] Search and final-diff review integration.
-- [ ] Initial 30-task evaluation suite.
+- [X] Initial 30-task evaluation suite.
 - [ ] Exit criterion: a user can override one role while inheriting all other
   recommendations, and the default mapping has recorded evaluation results.
 
