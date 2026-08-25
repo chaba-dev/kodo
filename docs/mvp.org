@@ -781,6 +781,9 @@ delivery checklist.
 - [X] Capability validation and invocation metadata.
 - [X] Search and final-diff review integration.
 - [X] Initial 30-task evaluation suite.
+- [X] Recorded a complete live baseline for the default mapping. The baseline
+  completed all 30 tasks, but its 30% search recall and 50% implementation pass
+  rate do not yet support the default recommendation.
 - [ ] Exit criterion: a user can override one role while inheriting all other
   recommendations, and the default mapping has recorded evaluation results.
 
