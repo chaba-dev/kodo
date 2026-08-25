@@ -154,6 +154,75 @@ defmodule Kodo.Agent.LoopTest do
              "session"
   end
 
+  test "replays a session whose persisted mapping uses numeric contract versions", %{
+    runner: runner,
+    session: session,
+    ownership: ownership
+  } do
+    previous_test_pid = Application.get_env(:kodo, :fake_llm_test_pid)
+    Application.put_env(:kodo, :fake_llm_test_pid, self())
+    on_exit(fn -> restore_env(:fake_llm_test_pid, previous_test_pid) end)
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+
+    [created] = Sessions.events_after(session.id)
+
+    legacy_mapping =
+      created.payload["model_mapping"]
+      |> Map.delete("profile_version")
+      |> Map.put("profile_revision", 4)
+      |> update_in(["roles"], fn roles ->
+        Map.new(roles, fn {role, mapping} ->
+          {role,
+           mapping
+           |> Map.delete("role_contract")
+           |> Map.put("role_contract_version", 4)}
+        end)
+      end)
+
+    created
+    |> Ecto.Changeset.change(payload: Map.put(created.payload, "model_mapping", legacy_mapping))
+    |> Repo.update!()
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "capture contract"},
+        ownership: ownership
+      )
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:llm_request, "test:model", system, tools, opts}
+    assert system["content"] == Kodo.Agent.Roles.fetch!(:primary).prompt
+    assert tools == Tools.definitions("workspace-v5")
+    assert opts[:reasoning] == "none"
+
+    assert_receive {:tool_request, review_request}
+
+    broadcast_success(runner, review_request, %{
+      "result" => "output",
+      "content" => "clean diff",
+      "truncated" => false
+    })
+
+    assert {:ok, "The fix is complete."} = Task.await(loop)
+
+    invocation =
+      Enum.find(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
+
+    assert invocation.payload["model"] == "test:model"
+    assert invocation.payload["role_contract"] == "alpha-v1"
+    assert invocation.payload["toolset_version"] == "workspace-v5"
+  end
+
   test "does not dispatch a model effect after its ownership epoch is replaced", %{
     session: session,
     ownership: ownership

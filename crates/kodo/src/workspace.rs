@@ -317,6 +317,7 @@ fn canonicalize(path: &Path) -> Result<PathBuf, WorkspaceError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{Read, Seek, SeekFrom};
 
     use tempfile::TempDir;
 
@@ -411,6 +412,27 @@ mod tests {
             workspace.read_to_string_bounded("large.txt", 4),
             Err(WorkspaceError::FileTooLarge { limit: 4, .. })
         ));
+    }
+
+    #[test]
+    fn replace_text_atomically_swaps_the_file() {
+        let repository = git_repository();
+        let path = repository.path().join("message.txt");
+        fs::write(&path, "before value").unwrap();
+        let mut original_file = fs::File::open(&path).unwrap();
+        let workspace = Workspace::from_root(repository.path()).unwrap();
+
+        assert!(
+            workspace
+                .replace_text_if_unique("message.txt", "before", "after", 1024)
+                .unwrap()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "after value");
+
+        original_file.seek(SeekFrom::Start(0)).unwrap();
+        let mut original_content = String::new();
+        original_file.read_to_string(&mut original_content).unwrap();
+        assert_eq!(original_content, "before value");
     }
 
     fn git_repository() -> TempDir {

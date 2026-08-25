@@ -260,6 +260,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn protocol_version_accounts_for_replace_text() {
+        assert_eq!(PROTOCOL_VERSION, 5);
+    }
+
+    #[test]
     fn execution_limits_reject_incomplete_or_invalid_policy() {
         let limits = ExecutionLimits::standalone();
         assert!(limits.validate().is_ok());
