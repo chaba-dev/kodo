@@ -74,4 +74,28 @@ The valid corrected baseline is recorded in [`balanced-corrected-2026-08-25.json
 
 This satisfies the requirement to record a complete baseline, but the balanced recommendation is not ready to close Phase 7. Only one of 25 authored patches applied; the other 24 had invalid unified-diff hunk counts. All 10 implementation tasks and four search tasks also ended without a final answer after spending their last available model turn on tools.
 
-Profile revision 5 addresses those observed contract failures by adding an exact, single-match `replace_text` tool and withholding tools on the final model turn. A fresh paid run is required to measure whether those changes improve quality; do not compare the corrected implementation metrics directly with the invalid hidden-check metrics from the older fingerprint.
+Profile revision 5 addresses those observed contract failures by adding an exact, single-match `replace_text` tool and withholding tools on the final model turn. Its results follow; do not compare corrected implementation metrics with the invalid hidden-check metrics from the older fingerprint.
+
+## Balanced profile revision 5 — 2026-08-25
+
+[`balanced-profile-v5-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-profile-v5-2026-08-25.json) evaluates profile revision 5 against the corrected suite at revision `634f610d154dd377634ff3070c76fa96aefda292`.
+
+| Metric | Revision 4 | Revision 5 |
+| --- | ---: | ---: |
+| Search relevant-file recall | 55% | 76.7% |
+| Search evidence-citation recall | 45% | 35% |
+| Review defect and location recall | 90% | 100% |
+| Review severity accuracy | 90% | 70% |
+| Review false positives | 1 | 1 |
+| Implementation public-check pass rate | 50% | 50% |
+| Implementation hidden-check pass rate | 10% | 20% |
+| Implementation scope compliance | 100% | 100% |
+| Empty final answers | 14 | 0 |
+| Mean / p95 task latency | 10.24s / 24.27s | 14.83s / 43.20s |
+| Total tokens | 214,375 | 300,161 |
+| Provider-estimated cost | $0.029367 | $0.041681 |
+| Harness failure rate | 0% | 0% |
+
+The final-turn fix worked: every task produced an answer. Exact replacement also gave the primary a reliable mutation path, with 12 of 13 calls succeeding. The model still attempted 10 malformed unified patches, all of which were rejected. Implementation quality remains below an acceptable default: public success did not improve, hidden success reached only 20%, and six final reviews remained non-clean. Search file recall improved, but evidence citation regressed while latency, token use, and cost increased.
+
+Trace inspection also found two harness divergences from the runner contract: evaluation reads treated offsets and limits as bytes instead of lines, and verification rejected the root-equivalent `./` working directory. Both made the model consume turns on fragmented reads or rejected exact public commands and were corrected after this artifact. Keep Phase 7 open and evaluate those harness fixes before accepting or rejecting the mapping.
