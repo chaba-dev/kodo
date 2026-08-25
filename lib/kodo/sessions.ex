@@ -9,6 +9,7 @@ defmodule Kodo.Sessions do
   alias Kodo.Cluster.Instances
   alias Kodo.Cluster.Placement
   alias Kodo.ControlPlaneTelemetry
+  alias Kodo.Agent.ModelSettings
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
@@ -1161,9 +1162,11 @@ defmodule Kodo.Sessions do
   end
 
   defp create_session_locked(user, attrs) do
-    _runner = authorize_runner!(user, attrs[:runner_id] || attrs["runner_id"])
+    runner = authorize_runner!(user, attrs[:runner_id] || attrs["runner_id"])
     session = if user, do: %Session{user_id: user.id}, else: %Session{}
-    {model_mapping, attrs} = resolve_session_model(attrs)
+
+    {model_mapping, attrs} =
+      resolve_session_model(attrs, ModelSettings.layers(user.id, runner.id))
 
     with {:ok, session} <- session |> Session.create_changeset(attrs) |> Repo.insert(),
          {:ok, event} <-
@@ -1186,18 +1189,19 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp resolve_session_model(attrs) do
+  defp resolve_session_model(attrs, override_layers) do
     case fetch_attr(attrs, :model) do
       :error ->
-        mapping = Kodo.Agent.ModelMapping.balanced()
+        mapping = Kodo.Agent.ModelMapping.balanced(override_layers)
         primary = Kodo.Agent.ModelMapping.role!(mapping, :primary)
         {mapping, put_session_model(attrs, primary["model"])}
 
       {:ok, model} when is_binary(model) and model != "" ->
-        {Kodo.Agent.ModelMapping.balanced([{"session", %{primary: %{model: model}}}]), attrs}
+        layers = override_layers ++ [{"session", %{primary: %{model: model}}}]
+        {Kodo.Agent.ModelMapping.balanced(layers), attrs}
 
       {:ok, _invalid} ->
-        {Kodo.Agent.ModelMapping.balanced(), attrs}
+        {Kodo.Agent.ModelMapping.balanced(override_layers), attrs}
     end
   end
 

@@ -39,6 +39,18 @@ defmodule KodoWeb.Router do
 
     post "/runners", RunnerRegistrationController, :create
     delete "/auth/token", AgentSessionController, :delete
+    get "/model-settings", ModelSettingsController, :show
+    put "/model-settings/roles/:role", ModelSettingsController, :put_user
+    delete "/model-settings/roles/:role", ModelSettingsController, :delete_user
+
+    put "/model-settings/repositories/:runner_id/roles/:role",
+        ModelSettingsController,
+        :put_repository
+
+    delete "/model-settings/repositories/:runner_id/roles/:role",
+           ModelSettingsController,
+           :delete_repository
+
     post "/sessions", SessionController, :create
     get "/sessions/:id", SessionController, :show
     post "/sessions/:id/messages", SessionController, :message
