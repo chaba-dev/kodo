@@ -40,7 +40,7 @@ defmodule Kodo.Agent.EvaluationRunnerTest do
            }
   end
 
-  test "workspace search defaults an empty path list to the workspace root" do
+  test "workspace search defaults empty paths to the workspace root" do
     root = Path.join(System.tmp_dir!(), "kodo-eval-search-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(root, "lib"))
     File.write!(Path.join(root, "lib/example.ex"), "def health, do: :ok\n")
@@ -49,6 +49,11 @@ defmodule Kodo.Agent.EvaluationRunnerTest do
 
     assert %{"matches" => matches} =
              EvaluationRunner.search_workspace(root, %{"query" => "health", "paths" => []})
+
+    assert matches =~ "lib/example.ex:1:def health"
+
+    assert %{"matches" => matches} =
+             EvaluationRunner.search_workspace(root, %{"query" => "health", "paths" => [""]})
 
     assert matches =~ "lib/example.ex:1:def health"
   end

@@ -370,7 +370,11 @@ defmodule Kodo.Agent.EvaluationRunner do
         _ -> ["."]
       end
 
-    paths = safe_paths(root, requested_paths)
+    paths =
+      case safe_paths(root, requested_paths) do
+        [] -> ["."]
+        paths -> paths
+      end
 
     {output, _} =
       System.cmd(
@@ -497,7 +501,10 @@ defmodule Kodo.Agent.EvaluationRunner do
   defp safe_paths(root, paths),
     do:
       Enum.flat_map(paths, fn path ->
-        if match?({:ok, _}, confined(root, path)), do: [path], else: []
+        if is_binary(path) and String.trim(path) != "" and
+             match?({:ok, _}, confined(root, path)),
+           do: [path],
+           else: []
       end)
 
   defp changed_paths(root),
