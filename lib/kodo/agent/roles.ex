@@ -61,6 +61,13 @@ defmodule Kodo.Agent.Roles do
                "Review the supplied original task and final diff for actionable defects introduced by the diff. Report only a change that must be made to restore correctness or prevent a regression, with severity, location, explanation, and a concrete suggested fix. Do not report a correct change, summarize the diff as a finding, or emit a finding whose suggested fix says no change is needed. Set clean=true if and only if findings is empty."
              )
 
+  @review_v4 @review_v3
+             |> Map.put(:version, 4)
+             |> Map.put(
+               :prompt,
+               "Review the supplied original task and final diff for actionable defects introduced by the diff. The original task is authoritative: a diff that implements its requested behavior is not a defect. Never recommend reverting required behavior. Report only a concrete correctness failure or regression visible in the diff, with severity, location, explanation, and a fix that changes code. Do not report speculation, optional improvements, performance concerns without evidence, correct code, or a finding whose suggested fix says no change is needed. Set clean=true if and only if findings is empty."
+             )
+
   @primary_v3 @primary_v2
               |> Map.put(:version, 3)
               |> Map.put(:toolset_version, "workspace-v2")
@@ -81,6 +88,14 @@ defmodule Kodo.Agent.Roles do
                 "You are Kodo's primary coding agent. Inspect evidence, make the smallest correct change, and verify it. Prefer replace_text for exact edits to existing files; old_text must occur exactly once. Use apply_patch for changes replace_text cannot express, and provide a complete git unified diff with correct diff --git, ---, +++, and @@ hunk counts. Batch independent tool calls when useful and leave enough budget to verify and summarize."
               )
 
+  @primary_v6 @primary_v5
+              |> Map.put(:version, 6)
+              |> Map.put(:toolset_version, "workspace-v5")
+              |> Map.put(
+                :prompt,
+                "You are Kodo's primary coding agent. Inspect the complete target file, make the smallest correct change with replace_text, and verify it. Use the exact public verification command from the task with cwd '.'. After every edit, reread the changed file and run that exact command; if either exposes an error, fix it before doing anything else. Do not substitute mix commands or invent working directories. Treat review feedback as a claim: inspect the current file and preserve behavior required by the original task before changing code. Leave enough budget to verify and summarize."
+              )
+
   @search_v3 @search_v2
              |> Map.put(:version, 3)
              |> Map.put(:budget, %{max_continuations: 6, max_tokens: 30_000})
@@ -95,12 +110,13 @@ defmodule Kodo.Agent.Roles do
       2 => @primary_v2,
       3 => @primary_v3,
       4 => @primary_v4,
-      5 => @primary_v5
+      5 => @primary_v5,
+      6 => @primary_v6
     },
     search: %{1 => @search_v1, 2 => @search_v2, 3 => @search_v3},
-    review: %{1 => @review_v1, 2 => @review_v2, 3 => @review_v3}
+    review: %{1 => @review_v1, 2 => @review_v2, 3 => @review_v3, 4 => @review_v4}
   }
-  @current_versions %{primary: 5, search: 3, review: 3}
+  @current_versions %{primary: 6, search: 3, review: 4}
 
   @type role :: :primary | :search | :review
 

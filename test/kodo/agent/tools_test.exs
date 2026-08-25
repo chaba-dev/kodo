@@ -18,6 +18,9 @@ defmodule Kodo.Agent.ToolsTest do
 
     replace = Enum.find(Tools.definitions("workspace-v4"), &(&1.name == "replace_text"))
     assert replace.description =~ "exactly once"
+
+    assert Enum.any?(Tools.definitions("workspace-v5"), &(&1.name == "replace_text"))
+    refute Enum.any?(Tools.definitions("workspace-v5"), &(&1.name == "apply_patch"))
   end
 
   test "translates only exact typed runner arguments" do

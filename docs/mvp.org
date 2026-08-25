@@ -797,7 +797,12 @@ delivery checklist.
   final-review findings for correct changes. Profile revision 6 removes those
   evaluator tools and tightens the review contract. Keep this milestone open
   pending evidence for revision 6; 50% hidden implementation success is not yet
-  an acceptable default recommendation.
+  an acceptable default recommendation. Revision 6 improved search file/evidence
+  recall to 85%/80% and standalone review recall to 100%, but implementation
+  regressed to 60% public and 40% hidden success because review findings remained
+  speculative and sometimes reversed correct changes. Revision 7 removes the
+  consistently unusable patch tool, requires exact verification after edits, and
+  makes the original task authoritative during review. Evaluate it next.
 
 ** TODO Milestone 8: Reliability and release candidate
 

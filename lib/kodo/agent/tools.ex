@@ -107,6 +107,10 @@ defmodule Kodo.Agent.Tools do
       ]
   end
 
+  def definitions("workspace-v5") do
+    Enum.reject(definitions("workspace-v4"), &(&1.name == "apply_patch"))
+  end
+
   def definitions("read-only-v1") do
     Enum.reject(
       definitions("workspace-v1"),

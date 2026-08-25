@@ -83,9 +83,9 @@ defmodule Kodo.Agent.LoopTest do
     assert invocation.payload["model"] == "test:model"
     assert invocation.payload["reasoning"] == "none"
     assert invocation.version == 3
-    assert invocation.payload["role_contract_version"] == 5
-    assert invocation.payload["role_prompt_version"] == 5
-    assert invocation.payload["toolset_version"] == "workspace-v4"
+    assert invocation.payload["role_contract_version"] == 6
+    assert invocation.payload["role_prompt_version"] == 6
+    assert invocation.payload["toolset_version"] == "workspace-v5"
     assert invocation.payload["capability_validation"]["tools"]
     assert invocation.payload["capability_validation"]["required_context_window"] == 100_000
 
@@ -386,7 +386,7 @@ defmodule Kodo.Agent.LoopTest do
              event.type == "review_invocation_started" and
                event.payload["role"] == "review" and
                event.payload["model"] == "openai:gpt-4o-mini" and
-               event.payload["role_contract_version"] == 3
+               event.payload["role_contract_version"] == 4
            end)
 
     assert Enum.any?(events, fn event ->
