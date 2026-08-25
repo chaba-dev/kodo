@@ -99,3 +99,28 @@ Profile revision 5 addresses those observed contract failures by adding an exact
 The final-turn fix worked: every task produced an answer. Exact replacement also gave the primary a reliable mutation path, with 12 of 13 calls succeeding. The model still attempted 10 malformed unified patches, all of which were rejected. Implementation quality remains below an acceptable default: public success did not improve, hidden success reached only 20%, and six final reviews remained non-clean. Search file recall improved, but evidence citation regressed while latency, token use, and cost increased.
 
 Trace inspection also found two harness divergences from the runner contract: evaluation reads treated offsets and limits as bytes instead of lines, and verification rejected the root-equivalent `./` working directory. Both made the model consume turns on fragmented reads or rejected exact public commands. Final-diff review also lacked the original task, allowing unsupported findings to trigger harmful correction attempts. All three issues were corrected after this artifact. Keep Phase 7 open and evaluate those fixes before accepting or rejecting the mapping.
+
+## Harness-corrected profile revision 5 — 2026-08-25
+
+[`balanced-profile-v5-harness-corrected-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-profile-v5-harness-corrected-2026-08-25.json) evaluates the same profile after aligning evaluation reads, root working directories, and final-diff review context with the runner contract. It completed all 30 tasks without harness errors at revision `e72a38892ac1b39669fa834d08c01460deb01290`.
+
+| Metric | Earlier revision 5 | Harness-corrected revision 5 |
+| --- | ---: | ---: |
+| Search relevant-file recall | 76.7% | 81.7% |
+| Search evidence-citation recall | 35% | 70% |
+| Review defect and location recall | 100% | 80% |
+| Review severity accuracy | 70% | 80% |
+| Review false positives | 1 | 1 |
+| Implementation public-check pass rate | 50% | 70% |
+| Implementation hidden-check pass rate | 20% | 50% |
+| Implementation clean-review rate | 40% | 40% |
+| Implementation scope compliance | 100% | 100% |
+| Empty final answers | 0 | 0 |
+| Mean / p95 task latency | 14.83s / 43.20s | 13.95s / 58.19s |
+| Total tokens | 300,161 | 302,109 |
+| Provider-estimated cost | $0.041681 | $0.042832 |
+| Harness failure rate | 0% | 0% |
+
+The harness corrections materially improved search evidence and implementation outcomes: seven public and five hidden implementation checks passed. Seventeen of 21 exact replacements succeeded. All 10 unified patches were still rejected, so exact replacement remains the only reliable mutation path for this model.
+
+Trace inspection found two remaining contract issues. The synchronous evaluation harness advertised `poll_command` and `stop_command` despite supporting neither. Final-diff review also emitted findings for correct changes, including one whose explanation and suggested fix explicitly said no fix was needed; those false findings triggered unnecessary correction loops. Evaluation turns now omit asynchronous command tools, and review contract version 3 requires actionable defects and internally consistent clean results. These changes advance the balanced profile to revision 6. Keep Phase 7 open pending evidence for revision 6; the current 50% hidden-check success is improved but not yet an acceptable default recommendation.

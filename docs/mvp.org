@@ -790,11 +790,14 @@ delivery checklist.
   hidden-check metric is invalid for the same reason as the first run.
 - [ ] Exit criterion: a user can override one role while inheriting all other
   recommendations, and the default mapping has recorded evaluation results.
-  The corrected baseline is recorded, but its 10% hidden implementation success
-  is not an acceptable default recommendation. Profile revision 5 eliminated
-  empty final answers and improved hidden implementation success to 20%, but
-  public success remained 50% while latency and cost increased. Further
-  investigation is required before another live evaluation.
+  The harness-corrected profile revision 5 run improved search file/evidence
+  recall to 81.7%/70% and public/hidden implementation success to 70%/50%, with
+  no empty answers or harness failures. Trace inspection found unsupported
+  asynchronous command tools in the synchronous evaluator and non-actionable
+  final-review findings for correct changes. Profile revision 6 removes those
+  evaluator tools and tightens the review contract. Keep this milestone open
+  pending evidence for revision 6; 50% hidden implementation success is not yet
+  an acceptable default recommendation.
 
 ** TODO Milestone 8: Reliability and release candidate
 

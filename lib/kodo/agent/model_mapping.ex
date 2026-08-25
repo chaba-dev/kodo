@@ -4,7 +4,7 @@ defmodule Kodo.Agent.ModelMapping do
   alias Kodo.Agent.Roles
 
   @profile "balanced"
-  @profile_revision 5
+  @profile_revision 6
   @balanced %{
     primary: %{model: "openai:gpt-4o-mini", reasoning: "none"},
     search: %{model: "openai:gpt-4o-mini", reasoning: "none"},

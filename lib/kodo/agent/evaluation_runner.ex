@@ -248,7 +248,7 @@ defmodule Kodo.Agent.EvaluationRunner do
       case adapter.generate(
              role["model"],
              state.history,
-             Tools.definitions_for_turn(
+             tool_definitions_for_turn(
                contract.toolset_version,
                step + 1,
                contract.budget.max_continuations
@@ -263,6 +263,13 @@ defmodule Kodo.Agent.EvaluationRunner do
           raise "model request failed: #{inspect(reason)}"
       end
     end
+  end
+
+  @doc false
+  def tool_definitions_for_turn(version, turn, max_turns) do
+    version
+    |> Tools.definitions_for_turn(turn, max_turns)
+    |> Enum.reject(&(&1.name in ["poll_command", "stop_command"]))
   end
 
   defp continue_loop(adapter, role, contract, state, response, started, step) do

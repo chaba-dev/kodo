@@ -7,7 +7,7 @@ defmodule Kodo.Agent.RolesTest do
     assert Map.keys(Roles.all()) |> Enum.sort() == [:primary, :review, :search]
 
     for {role, contract} <- Roles.all() do
-      assert contract.version == %{primary: 5, review: 2, search: 3}[role]
+      assert contract.version == %{primary: 5, review: 3, search: 3}[role]
       assert is_atom(contract.responsibility)
       assert is_binary(contract.prompt)
       assert contract.prompt != ""
@@ -35,5 +35,8 @@ defmodule Kodo.Agent.RolesTest do
     assert Roles.fetch!(:primary, 5).prompt =~ "Prefer replace_text"
     assert Roles.fetch!(:search, 3).budget.max_continuations == 6
     assert Roles.fetch!(:search, 3).prompt =~ "reserve the final turn"
+    assert Roles.fetch!(:review, 3).prompt =~ "actionable defect"
+    assert Roles.fetch!(:review, 3).prompt =~ "Do not report a correct change"
+    assert Roles.fetch!(:review, 3).prompt =~ "clean=true if and only if findings is empty"
   end
 end

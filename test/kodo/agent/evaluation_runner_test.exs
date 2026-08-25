@@ -138,6 +138,16 @@ defmodule Kodo.Agent.EvaluationRunnerTest do
              )
   end
 
+  test "evaluation turns advertise only tools the synchronous harness supports" do
+    names =
+      EvaluationRunner.tool_definitions_for_turn("workspace-v4", 1, 8)
+      |> Enum.map(& &1.name)
+
+    assert "start_command" in names
+    refute "poll_command" in names
+    refute "stop_command" in names
+  end
+
   test "aggregate records quality, latency, usage, cost availability, and failure rate" do
     tasks = [
       %{

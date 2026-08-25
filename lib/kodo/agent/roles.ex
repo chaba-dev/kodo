@@ -54,6 +54,13 @@ defmodule Kodo.Agent.Roles do
                input_modalities: [:text]
              })
 
+  @review_v3 @review_v2
+             |> Map.put(:version, 3)
+             |> Map.put(
+               :prompt,
+               "Review the supplied original task and final diff for actionable defects introduced by the diff. Report only a change that must be made to restore correctness or prevent a regression, with severity, location, explanation, and a concrete suggested fix. Do not report a correct change, summarize the diff as a finding, or emit a finding whose suggested fix says no change is needed. Set clean=true if and only if findings is empty."
+             )
+
   @primary_v3 @primary_v2
               |> Map.put(:version, 3)
               |> Map.put(:toolset_version, "workspace-v2")
@@ -91,9 +98,9 @@ defmodule Kodo.Agent.Roles do
       5 => @primary_v5
     },
     search: %{1 => @search_v1, 2 => @search_v2, 3 => @search_v3},
-    review: %{1 => @review_v1, 2 => @review_v2}
+    review: %{1 => @review_v1, 2 => @review_v2, 3 => @review_v3}
   }
-  @current_versions %{primary: 5, search: 3, review: 2}
+  @current_versions %{primary: 5, search: 3, review: 3}
 
   @type role :: :primary | :search | :review
 
