@@ -4,7 +4,6 @@ defmodule Kodo.Agent.EvaluationRunner do
   alias Kodo.Agent.{EvaluationSuite, ModelMapping, Roles, Tools}
 
   @timeout 120_000
-  @max_steps 10
   @max_output 32_000
   @review_schema %{
     "type" => "object",
@@ -17,12 +16,13 @@ defmodule Kodo.Agent.EvaluationRunner do
         "items" => %{
           "type" => "object",
           "additionalProperties" => false,
-          "required" => ["severity", "path", "line", "explanation"],
+          "required" => ["severity", "path", "line", "explanation", "suggested_fix"],
           "properties" => %{
             "severity" => %{"type" => "string", "enum" => ["low", "medium", "high"]},
             "path" => %{"type" => "string"},
             "line" => %{"type" => "integer", "minimum" => 1},
-            "explanation" => %{"type" => "string"}
+            "explanation" => %{"type" => "string"},
+            "suggested_fix" => %{"type" => "string"}
           }
         }
       }
@@ -31,6 +31,7 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   @doc "Runs every task and returns a JSON-safe report. Errors are isolated per task."
   def run(opts \\ []) do
+    started_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
     suite = Keyword.get_lazy(opts, :suite, &EvaluationSuite.load!/0)
     adapter = Keyword.get(opts, :adapter, Kodo.LLM.ReqLLM)
     mapping = Keyword.get(opts, :mapping, ModelMapping.balanced())
@@ -38,6 +39,7 @@ defmodule Kodo.Agent.EvaluationRunner do
     tasks = Enum.map(suite["tasks"], &safe_task(&1, adapter, mapping))
 
     %{
+      "run" => %{"started_at" => started_at, "revision" => revision()},
       "suite" => %{
         "name" => suite["name"],
         "version" => suite["version"],
@@ -113,9 +115,13 @@ defmodule Kodo.Agent.EvaluationRunner do
           %{"error" => Exception.format(kind, reason), "trace" => [], "usage" => %{}}
       end
 
+    estimated_cost =
+      get_in(result, ["usage", :total_cost]) || get_in(result, ["usage", "total_cost"])
+
     result
     |> Map.put("id", task["id"])
     |> Map.put("type", task["type"])
+    |> Map.put("estimated_cost_usd", estimated_cost)
     |> Map.put("latency_ms", System.monotonic_time(:millisecond) - started)
   end
 
@@ -124,7 +130,7 @@ defmodule Kodo.Agent.EvaluationRunner do
       role = ModelMapping.role!(mapping, :search)
       contract = Roles.fetch!(:search, role["role_contract_version"])
       prompt = task["prompt"] <> " Cite each finding as path:line and quote evidence."
-      {answer, trace, usage} = tool_loop(adapter, role, contract, prompt, root, [], [])
+      {answer, trace, usage} = tool_loop(adapter, role, contract, prompt, root, [], [], mapping)
 
       %{
         "answer" => answer,
@@ -164,9 +170,38 @@ defmodule Kodo.Agent.EvaluationRunner do
       contract = Roles.fetch!(:primary, role["role_contract_version"])
       checks = task["expected"]["public_checks"]
       prompt = implementation_prompt(task, checks)
-      {answer, trace, usage} = tool_loop(adapter, role, contract, prompt, root, checks, [])
+
+      {answer, trace, usage} =
+        tool_loop(adapter, role, contract, prompt, root, checks, [], mapping)
+
       {diff, 0} = System.cmd("git", ["diff", "--no-ext-diff"], cd: root, stderr_to_stdout: true)
-      review = structured_review(adapter, mapping, diff)
+      initial_review = structured_review(adapter, mapping, diff)
+
+      {answer, trace, usage, review} =
+        if initial_review.object["clean"] do
+          {answer, trace, usage, initial_review}
+        else
+          correction_prompt =
+            "Final-diff review found supported issues. Address them, rerun the affected public " <>
+              "checks, and finish with a summary: " <>
+              Jason.encode!(initial_review.object["findings"])
+
+          {corrected_answer, correction_trace, correction_usage} =
+            tool_loop(adapter, role, contract, correction_prompt, root, checks, [], mapping)
+
+          {corrected_diff, 0} =
+            System.cmd("git", ["diff", "--no-ext-diff"], cd: root, stderr_to_stdout: true)
+
+          corrected_review = structured_review(adapter, mapping, corrected_diff)
+
+          {corrected_answer,
+           trace ++
+             [%{"kind" => "structured_review", "object" => initial_review.object}] ++
+             correction_trace,
+           usage |> merge_usage(initial_review.usage) |> merge_usage(correction_usage),
+           corrected_review}
+        end
+
       public = run_checks(root, checks)
       materialize(root, task["fixture"]["hidden_files"])
       hidden = run_checks(root, task["expected"]["hidden_checks"])
@@ -191,36 +226,38 @@ defmodule Kodo.Agent.EvaluationRunner do
     end)
   end
 
-  defp tool_loop(adapter, role, contract, prompt, root, commands, trace) do
+  defp tool_loop(adapter, role, contract, prompt, root, commands, trace, mapping) do
     state = %{
       root: root,
       commands: commands,
       history: messages(contract.prompt, prompt),
       trace: trace,
-      usage: %{}
+      usage: %{},
+      mapping: mapping
     }
 
     loop(adapter, role, contract, state, 0)
   end
 
-  defp loop(_adapter, _role, _contract, state, @max_steps),
-    do: {"", state.trace, state.usage}
-
   defp loop(adapter, role, contract, state, step) do
-    started = System.monotonic_time(:millisecond)
+    if step >= contract.budget.max_continuations do
+      {"", state.trace, state.usage}
+    else
+      started = System.monotonic_time(:millisecond)
 
-    case adapter.generate(
-           role["model"],
-           state.history,
-           Tools.definitions(contract.toolset_version),
-           timeout: @timeout,
-           reasoning: role["reasoning"]
-         ) do
-      {:ok, response} ->
-        continue_loop(adapter, role, contract, state, response, started, step)
+      case adapter.generate(
+             role["model"],
+             state.history,
+             Tools.definitions(contract.toolset_version),
+             timeout: @timeout,
+             reasoning: role["reasoning"]
+           ) do
+        {:ok, response} ->
+          continue_loop(adapter, role, contract, state, response, started, step)
 
-      {:error, reason} ->
-        raise "model request failed: #{inspect(reason)}"
+        {:error, reason} ->
+          raise "model request failed: #{inspect(reason)}"
+      end
     end
   end
 
@@ -247,13 +284,9 @@ defmodule Kodo.Agent.EvaluationRunner do
   end
 
   defp continue_after_tools(adapter, role, contract, state, response, calls, step) do
-    assistant = %{
-      "role" => "assistant",
-      "content" => response.text,
-      "tool_calls" => json_calls(calls)
-    }
+    assistant = assistant_message(response, calls)
 
-    {results, tool_trace} = execute_calls(calls, state.root, state.commands)
+    {results, tool_trace} = execute_calls(calls, state, adapter)
 
     state = %{
       state
@@ -264,9 +297,14 @@ defmodule Kodo.Agent.EvaluationRunner do
     loop(adapter, role, contract, state, step + 1)
   end
 
-  defp execute_calls(calls, root, commands) do
+  defp execute_calls(calls, state, adapter) do
     Enum.map_reduce(calls, [], fn call, trace ->
-      output = execute_tool(call.name, call.arguments, root, commands)
+      output =
+        if call.name == "delegate_search" do
+          delegated_search(adapter, state.mapping, state.root, call.arguments["question"])
+        else
+          execute_tool(call.name, call.arguments, state.root, state.commands)
+        end
 
       message = %{
         "role" => "tool",
@@ -281,7 +319,7 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   defp execute_tool("list_files", args, root, _), do: list_files(root, args["path"])
   defp execute_tool("read_file", args, root, _), do: read_file(root, args)
-  defp execute_tool("search_code", args, root, _), do: search(root, args)
+  defp execute_tool("search_code", args, root, _), do: search_workspace(root, args)
   defp execute_tool("git_status", _, root, _), do: git(root, ["status", "--short"])
 
   defp execute_tool("git_diff", args, root, _),
@@ -289,9 +327,6 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   defp execute_tool("apply_patch", args, root, _), do: apply_patch(root, args["patch"])
   defp execute_tool("start_command", args, root, commands), do: command(root, args, commands)
-
-  defp execute_tool("delegate_search", args, root, _),
-    do: delegated_search(root, args["question"])
 
   defp execute_tool(name, _args, _root, _), do: %{"error" => "unsupported tool #{name}"}
 
@@ -327,8 +362,15 @@ defmodule Kodo.Agent.EvaluationRunner do
     end
   end
 
-  defp search(root, args) do
-    paths = safe_paths(root, args["paths"] || ["."])
+  @doc false
+  def search_workspace(root, args) do
+    requested_paths =
+      case args["paths"] do
+        paths when is_list(paths) and paths != [] -> paths
+        _ -> ["."]
+      end
+
+    paths = safe_paths(root, requested_paths)
 
     {output, _} =
       System.cmd(
@@ -342,13 +384,22 @@ defmodule Kodo.Agent.EvaluationRunner do
   end
 
   defp apply_patch(root, patch) when byte_size(patch) <= 100_000 do
-    case System.cmd("git", ["apply", "--whitespace=nowarn", "-"],
-           cd: root,
-           input: patch,
-           stderr_to_stdout: true
-         ) do
-      {output, 0} -> %{"applied" => true, "output" => truncate(output)}
-      {output, status} -> %{"applied" => false, "status" => status, "output" => truncate(output)}
+    patch_path = Path.join(root, ".kodo-eval.patch")
+    File.write!(patch_path, patch)
+
+    try do
+      case System.cmd("git", ["apply", "--whitespace=nowarn", patch_path],
+             cd: root,
+             stderr_to_stdout: true
+           ) do
+        {output, 0} ->
+          %{"applied" => true, "output" => truncate(output)}
+
+        {output, status} ->
+          %{"applied" => false, "status" => status, "output" => truncate(output)}
+      end
+    after
+      File.rm(patch_path)
     end
   end
 
@@ -367,17 +418,14 @@ defmodule Kodo.Agent.EvaluationRunner do
     end
   end
 
-  defp delegated_search(root, question) do
-    terms =
-      question
-      |> String.split(~r/\W+/, trim: true)
-      |> Enum.filter(&(byte_size(&1) > 3))
-      |> Enum.take(5)
+  defp delegated_search(adapter, mapping, root, question) do
+    role = ModelMapping.role!(mapping, :search)
+    contract = Roles.fetch!(:search, role["role_contract_version"])
 
-    outputs =
-      Enum.map(terms, fn term -> search(root, %{"query" => term, "paths" => ["."]})["matches"] end)
+    {answer, trace, usage} =
+      tool_loop(adapter, role, contract, question, root, [], [], mapping)
 
-    %{"question" => question, "evidence" => truncate(Enum.join(outputs, "\n"))}
+    %{"question" => question, "evidence" => answer, "trace" => trace, "usage" => usage}
   end
 
   defp structured_review(adapter, mapping, diff) do
@@ -467,6 +515,14 @@ defmodule Kodo.Agent.EvaluationRunner do
   defp messages(system, user),
     do: [%{"role" => "system", "content" => system}, %{"role" => "user", "content" => user}]
 
+  defp assistant_message(%{assistant: nil, text: text}, calls) do
+    %{"role" => "assistant", "content" => text, "tool_calls" => json_calls(calls)}
+  end
+
+  defp assistant_message(%{assistant: provider_state}, _calls) do
+    %{"role" => "assistant", "provider_state" => provider_state}
+  end
+
   defp json_calls(calls),
     do: Enum.map(calls, &%{"id" => &1.id, "name" => &1.name, "arguments" => &1.arguments})
 
@@ -489,10 +545,71 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   defp toolsets, do: Map.new(["read-only-v1", "workspace-v2"], &{&1, Tools.definitions(&1)})
 
-  defp aggregate(tasks),
-    do: %{
+  @doc false
+  def aggregate(tasks) do
+    completed = Enum.reject(tasks, &Map.has_key?(&1, "error"))
+    search = Enum.filter(completed, &(&1["type"] == "search"))
+    review = Enum.filter(completed, &(&1["type"] == "review"))
+    implementation = Enum.filter(completed, &(&1["type"] == "implementation"))
+    latencies = Enum.map(tasks, & &1["latency_ms"])
+
+    %{
       "task_count" => length(tasks),
-      "completed" => Enum.count(tasks, &(not Map.has_key?(&1, "error"))),
-      "errors" => Enum.count(tasks, &Map.has_key?(&1, "error"))
+      "completed" => length(completed),
+      "errors" => length(tasks) - length(completed),
+      "failure_rate" => ratio(length(tasks) - length(completed), length(tasks)),
+      "latency_ms" => %{
+        "total" => Enum.sum(latencies),
+        "mean" => average(latencies),
+        "p95" => percentile(latencies, 0.95)
+      },
+      "usage" => Enum.reduce(completed, %{}, &merge_usage(&2, &1["usage"])),
+      "estimated_cost_usd" => Enum.sum_by(completed, &(&1["estimated_cost_usd"] || 0)),
+      "quality" => %{
+        "search" => %{
+          "relevant_file_recall" => average_metric(search, "relevant_file_recall"),
+          "evidence_citation_recall" => average_metric(search, "evidence_citation_recall"),
+          "irrelevant_files" => sum_metric(search, "irrelevant_files")
+        },
+        "review" => %{
+          "defect_recall" => average_metric(review, "defect_recall"),
+          "severity_accuracy" => average_metric(review, "severity_accuracy"),
+          "location_accuracy" => average_metric(review, "location_accuracy"),
+          "false_positives" => sum_metric(review, "false_positives")
+        },
+        "implementation" => %{
+          "public_check_pass_rate" => boolean_rate(implementation, "public_checks_passed"),
+          "hidden_check_pass_rate" => boolean_rate(implementation, "hidden_checks_passed"),
+          "scope_compliance_rate" => boolean_rate(implementation, "scope_compliant"),
+          "clean_review_rate" => boolean_rate(implementation, "review_clean")
+        }
+      }
     }
+  end
+
+  defp revision do
+    case System.cmd("git", ["rev-parse", "HEAD"], stderr_to_stdout: true) do
+      {revision, 0} -> String.trim(revision)
+      _error -> nil
+    end
+  end
+
+  defp average_metric(tasks, key),
+    do: tasks |> Enum.map(&get_in(&1, ["metrics", key])) |> average()
+
+  defp sum_metric(tasks, key), do: Enum.sum_by(tasks, &get_in(&1, ["metrics", key]))
+
+  defp boolean_rate(tasks, key),
+    do: ratio(Enum.count(tasks, &get_in(&1, ["metrics", key])), length(tasks))
+
+  defp average([]), do: nil
+  defp average(values), do: Enum.sum(values) / length(values)
+
+  defp percentile([], _percentile), do: nil
+
+  defp percentile(values, percentile) do
+    values
+    |> Enum.sort()
+    |> Enum.at(ceil(length(values) * percentile) - 1)
+  end
 end

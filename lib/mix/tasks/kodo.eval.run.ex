@@ -13,7 +13,7 @@ defmodule Mix.Tasks.Kodo.Eval.Run do
       Mix.raise("usage: mix kodo.eval.run --output PATH")
     end
 
-    Mix.Task.run("app.start")
+    {:ok, _applications} = Application.ensure_all_started(:req_llm)
     output = Path.expand(opts[:output])
     File.mkdir_p!(Path.dirname(output))
     File.write!(output, Jason.encode!(EvaluationRunner.run(), pretty: true))
