@@ -9,6 +9,7 @@ should be read.
 |---|---|
 | [1: Bound control-plane database load](0001/README.adoc) | Keep heartbeat, recovery, ownership, and session-index database work proportional to live replicas and active sessions |
 | [2: Extend Kodo to mobile and tablet clients](0002/README.adoc) | Start with a responsive PWA, handle disconnection gracefully, and preserve a path to native clients |
+| [3: Define behavioral evaluation and release benchmarking](0003/README.adoc) | Separate role quality from multi-turn behavior, calibrate observable scoring, and benchmark frozen release candidates |
 
 ## Source format
 

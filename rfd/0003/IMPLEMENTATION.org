@@ -1,0 +1,34 @@
+#+TITLE: RFD 0003 implementation checklist
+
+Implements [[file:README.adoc][RFD 3: Define behavioral evaluation and release benchmarking]].
+
+- [ ] Define the fingerprinted ~behavior-alpha-v1~ suite schema for setup state,
+  event-triggered turns, allowed actions, prohibited outcomes, expected
+  evidence, and applicable rubric dimensions.
+- [ ] Author five to eight pilot episodes spanning every critical rubric
+  dimension and representative non-critical dimensions.
+- [ ] Implement deterministic assertions for changed paths, command and check
+  execution, external actions, required ordering, and preservation of unrelated
+  state.
+- [ ] Implement structured rubric judgment with dimension-level evidence
+  citations and no dependency on hidden reasoning or implementation-specific
+  instructions.
+- [ ] Build and manually label a calibration set containing full successes,
+  partial recovery, critical failures, and fluent claims contradicted by final
+  state.
+- [ ] Measure judge agreement by dimension, review disagreements, and document
+  the calibration level required before scores become regression gates.
+- [ ] Run the pilot at least three times for the balanced, Terra-oriented, and
+  Sol-primary/Terra-search-review candidate mappings; record quality, variance,
+  latency, token usage, cost, and harness failures.
+- [ ] Expand the calibrated suite to 20 to 30 episodes with each rubric
+  dimension exercised at least three times.
+- [ ] Add behavioral result validation and accepted-baseline checks to the
+  generic benchmark tests without changing the historical ~mvp-v1~ contract.
+- [ ] Adopt fingerprint-bound regression thresholds only after repeated runs
+  establish a stable accepted baseline.
+- [ ] Define and execute the release-candidate benchmark checklist for ~0.1.0~,
+  including complete role-quality and behavioral runs against the frozen code
+  and model-role mapping.
+- [ ] Record release benchmark provenance on a revision reachable from the
+  release while reserving Git tags exclusively for product releases.

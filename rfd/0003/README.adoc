@@ -1,0 +1,153 @@
+:authors: Kodo contributors
+:state: prediscussion
+:discussion:
+:labels: evaluation, benchmarks, agents, quality, releases
+:toc:
+
+= RFD 3 Define behavioral evaluation and release benchmarking
+
+== Goal
+
+Evaluate whether Kodo completes coding tasks correctly and whether it makes
+sound decisions across realistic multi-turn interactions. The benchmark system
+must distinguish model capability, agent behavior, evaluator reliability, and
+operational tradeoffs without depending on hidden model reasoning or
+implementation-specific instructions.
+
+This RFD defines the stable suite boundaries, scoring evidence, calibration,
+threshold lifecycle, and release procedure. Machine-readable criteria, task
+fixtures, and recorded results remain outside the RFD so they can evolve under
+their own versioned contracts.
+
+== Decision
+
+Kodo will maintain separate but complementary benchmark suites:
+
+* Role-quality suites evaluate bounded search, review, and implementation
+  outcomes against purpose-built fixtures. The existing `mvp-v1` suite remains
+  frozen as historical evidence for this boundary.
+* Behavioral suites evaluate observable decisions and final state over
+  multi-turn episodes. The first suite will be named `behavior-alpha-v1` and
+  will use the `agent-behavior-v1` rubric in
+  link:../../test/evals/criteria.json[`test/evals/criteria.json`].
+
+Results from one suite cannot compensate for failure in the other. Strong code
+generation does not excuse an unauthorized external action, and safe
+interaction does not excuse an incorrect implementation.
+
+== Behavioral episode design
+
+Behavioral episodes are synthetic, reproducible interactions derived from
+general task patterns rather than private conversations or account history.
+They must not contain personal names, service identifiers, repository secrets,
+or provider-specific agent instructions.
+
+The initial suite should contain 20 to 30 episodes and exercise every rubric
+dimension at least three times. One episode may cover several dimensions when
+their interaction is the behavior under test. Scenarios should include paired
+forms where practical:
+
+* a direct, self-contained instruction and a multi-turn equivalent with a late
+  correction;
+* a uniquely resolved contextual reference and one with multiple consequential
+  interpretations;
+* permission to implement and a distinct request or refusal to publish;
+* a reported diagnosis supported by current evidence and one contradicted by
+  the source of truth;
+* an idempotent local failure and a non-idempotent external action whose outcome
+  is uncertain; and
+* a requested change with explicit scope and a tempting unrelated cleanup.
+
+Episodes define setup state, allowed actions, prohibited outcomes, injected
+turns, expected evidence, and applicable rubric dimensions. Injected turns are
+triggered by observable events rather than timing assumptions so runs remain
+repeatable across models with different latency.
+
+== Evidence and scoring
+
+Scoring uses observable events and resulting state. Deterministic assertions
+own facts that the harness can establish directly, including changed paths,
+commands executed, checks completed, external actions attempted, ordering of
+required steps, and preservation of unrelated state.
+
+A structured model judge may score judgment that cannot be reduced to state
+assertions, such as whether clarification was proportionate or a completion
+claim was calibrated to its evidence. Every judged score must identify the
+applicable dimension and cite the turns or actions that support it. The judge
+must not infer hidden reasoning or reward recital of the rubric.
+
+Each applicable dimension receives `0`, `0.5`, or `1` according to the named
+rubric. Reports include every dimension, deterministic assertion outcomes, the
+weighted mean, critical failures, harness failures, latency, token usage, and
+estimated cost. Aggregate scores never hide dimension-level results.
+
+== Judge calibration
+
+Automated behavioral scores are not regression or release gates until the
+judge is calibrated against a manually labeled reference set. Calibration must
+include clear successes, clear failures, partially recovered behavior, and
+adversarial cases where fluent explanations conflict with the observed state.
+
+The evaluation report records agreement by dimension and preserves judge
+disagreements for review. Recurring disagreements are resolved by clarifying
+scenario evidence or rubric semantics, not by changing expected labels to favor
+a preferred model. A model under evaluation should not be its sole judge.
+
+Before a full suite run, a pilot of five to eight representative episodes runs
+each candidate configuration at least three times. The pilot validates harness
+behavior, judge stability, scenario discrimination, and expected cost before
+additional provider usage is authorized.
+
+== Targets and regression thresholds
+
+The desirable behavioral target is a weighted episode score of at least `0.9`.
+A zero on any critical dimension fails the episode regardless of its aggregate.
+Dimension-specific targets remain defined by the versioned rubric.
+
+Targets guide improvement but are not automatically release gates. A suite may
+adopt regression thresholds only after calibration and repeated runs establish
+a stable accepted baseline. Thresholds are anchored to one suite fingerprint
+and may be raised when stronger evidence is accepted. They are not lowered
+merely to admit a regressing candidate.
+
+Changes to metric meaning, scoring semantics, or critical-failure policy create
+a new named rubric or standard. Adding scenarios creates a new suite fingerprint
+or suite generation rather than silently rewriting historical results.
+
+== Release-candidate procedure
+
+Benchmark runs used for a release occur after the release-candidate code and
+model-role mapping are frozen. The release report includes:
+
+* the complete role-quality suite;
+* the calibrated behavioral suite;
+* repeated runs needed to characterize stochastic variance;
+* correctness, behavior, harness reliability, latency, token usage, and cost;
+  and
+* the rationale for the selected model-role mapping and any accepted exceptions.
+
+The pre-MVP benchmark artifacts are development evidence and need not retain
+permanent Git reachability. Before release `0.1.0`, Kodo will run a fresh
+benchmark round against the frozen release candidate and record its reachable
+revision. Git tags are reserved for product releases; benchmark provenance must
+not create non-release tags.
+
+== Artifact ownership
+
+The benchmark sources have distinct responsibilities:
+
+* link:../../test/evals/criteria.json[`test/evals/criteria.json`] owns versioned
+  standards, rubrics, targets, and the suite catalog.
+* `test/evals/<suite>/` owns fingerprinted tasks, suite thresholds, accepted
+  baselines, and candidate results.
+* link:../../test/evals/README.adoc[`test/evals/README.adoc`] owns the benchmark
+  data model, lifecycle, governance, and reference-generation contract.
+* link:../../docs/evaluations.md[`docs/evaluations.md`] owns run analysis and
+  comparisons.
+* This RFD owns the durable separation of suites, evidence boundary,
+  calibration requirement, and release procedure.
+
+== Implementation
+
+Progress against this proposal is tracked in the
+link:IMPLEMENTATION.org[RFD 3 implementation checklist].
