@@ -83,9 +83,9 @@ defmodule Kodo.Agent.LoopTest do
     assert invocation.payload["model"] == "test:model"
     assert invocation.payload["reasoning"] == "none"
     assert invocation.version == 3
-    assert invocation.payload["role_contract_version"] == 4
-    assert invocation.payload["role_prompt_version"] == 4
-    assert invocation.payload["toolset_version"] == "workspace-v3"
+    assert invocation.payload["role_contract_version"] == 5
+    assert invocation.payload["role_prompt_version"] == 5
+    assert invocation.payload["toolset_version"] == "workspace-v4"
     assert invocation.payload["capability_validation"]["tools"]
     assert invocation.payload["capability_validation"]["required_context_window"] == 100_000
 
@@ -608,6 +608,59 @@ defmodule Kodo.Agent.LoopTest do
              Sessions.events_after(session.id),
              &(&1.type == "model_invocation_started")
            ) == 2
+  end
+
+  test "reserves the final continuation for an answer without tools", %{
+    runner: runner,
+    session: session,
+    ownership: ownership
+  } do
+    previous_test_pid = Application.get_env(:kodo, :fake_llm_test_pid)
+    Application.put_env(:kodo, :fake_llm_test_pid, self())
+    on_exit(fn -> restore_env(:fake_llm_test_pid, previous_test_pid) end)
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "force final turn"},
+        ownership: ownership
+      )
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets(max_continuations: 2),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:tool_request, request}, 1_000
+    assert request["request"]["tool"] == "apply_patch"
+
+    broadcast_success(runner, request, %{
+      "result" => "files_changed",
+      "paths" => ["example.txt"]
+    })
+
+    assert_receive {:tool_request, review_request}, 1_000
+    assert review_request["request"]["tool"] == "git_diff"
+
+    broadcast_success(runner, review_request, %{
+      "result" => "output",
+      "content" => "clean diff",
+      "truncated" => false
+    })
+
+    assert {:ok, "Finished before the budget expired."} = Task.await(loop)
+    assert_receive {:final_turn_tools, []}
+
+    assert Enum.any?(Sessions.events_after(session.id), fn event ->
+             event.type == "assistant_message_completed" and
+               event.payload["content"] == "Finished before the budget expired."
+           end)
   end
 
   test "rejects duplicate provider tool-call ids before dispatch", %{

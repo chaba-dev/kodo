@@ -58,6 +58,40 @@ defmodule Kodo.Agent.EvaluationRunnerTest do
     assert matches =~ "lib/example.ex:1:def health"
   end
 
+  test "workspace replacement requires one exact match" do
+    root = Path.join(System.tmp_dir!(), "kodo-eval-replace-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(root, "lib"))
+    path = Path.join(root, "lib/example.ex")
+    File.write!(path, "before\n")
+
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert %{"changed" => true, "path" => "lib/example.ex"} =
+             EvaluationRunner.replace_text(root, %{
+               "path" => "lib/example.ex",
+               "old_text" => "before",
+               "new_text" => "after"
+             })
+
+    assert File.read!(path) == "after\n"
+
+    assert %{"error" => "old_text must match exactly once"} =
+             EvaluationRunner.replace_text(root, %{
+               "path" => "lib/example.ex",
+               "old_text" => "missing",
+               "new_text" => "replacement"
+             })
+
+    File.write!(path, "duplicate duplicate\n")
+
+    assert %{"error" => "old_text must match exactly once"} =
+             EvaluationRunner.replace_text(root, %{
+               "path" => "lib/example.ex",
+               "old_text" => "duplicate",
+               "new_text" => "replacement"
+             })
+  end
+
   test "aggregate records quality, latency, usage, cost availability, and failure rate" do
     tasks = [
       %{

@@ -471,7 +471,13 @@ defmodule Kodo.Agent.Loop do
     mapping = projection.model_mapping || legacy_mapping(projection.model)
     primary = ModelMapping.role!(mapping, :primary)
     contract = Roles.fetch!(:primary, primary["role_contract_version"])
-    tools = Tools.definitions(contract.toolset_version)
+
+    tools =
+      Tools.definitions_for_turn(
+        contract.toolset_version,
+        invocation,
+        budgets[:max_continuations]
+      )
 
     with :ok <- within_budget(invocation, usage(current_turn(events)), budgets),
          {:ok, capability_validation} <-
@@ -944,7 +950,11 @@ defmodule Kodo.Agent.Loop do
              state.context.adapter.generate(
                state.search["model"],
                messages,
-               Tools.definitions(state.contract.toolset_version),
+               Tools.definitions_for_turn(
+                 state.contract.toolset_version,
+                 continuation,
+                 state.contract.budget.max_continuations
+               ),
                timeout: state.context.budgets[:model_timeout],
                reasoning: state.search["reasoning"]
              )

@@ -34,6 +34,19 @@ defmodule Kodo.Test.FakeLLM do
   def generate(model, messages, tools, opts) do
     last = List.last(messages)
 
+    force_final_turn? =
+      Enum.any?(messages, &(&1["role"] == "user" and &1["content"] == "force final turn"))
+
+    if force_final_turn? and tools == [] do
+      test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
+      send(test_pid, {:final_turn_tools, tools})
+      final("Finished before the budget expired.")
+    else
+      generate_response(model, messages, tools, opts, last)
+    end
+  end
+
+  defp generate_response(model, messages, tools, opts, last) do
     if last["content"] == "capture contract" do
       test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
       send(test_pid, {:llm_request, model, hd(messages), tools, opts})
@@ -82,6 +95,14 @@ defmodule Kodo.Test.FakeLLM do
 
   defp initial(%{"content" => "capture contract"}), do: final("The fix is complete.")
   defp initial(%{"content" => "final answer"}), do: final("Ready for review.")
+
+  defp initial(%{"content" => "force final turn"}) do
+    tool_call(
+      "force-final-turn-patch",
+      "apply_patch",
+      %{"patch" => "--- a/example.txt\n+++ b/example.txt\n@@ -1 +1 @@\n-before\n+after\n"}
+    )
+  end
 
   defp initial(%{"content" => "Final-diff review found supported issues." <> _findings}),
     do: final("Addressed review findings.")

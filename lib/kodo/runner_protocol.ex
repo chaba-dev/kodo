@@ -98,11 +98,11 @@ defmodule Kodo.RunnerProtocol do
              is_boolean(truncated),
       do: {:ok, response}
 
-  def validate_tool_response(%{"tool" => "apply_patch"}, %{
+  def validate_tool_response(%{"tool" => tool}, %{
         "result" => "files_changed",
         "paths" => paths
       })
-      when is_list(paths),
+      when tool in ["apply_patch", "replace_text"] and is_list(paths),
       do: validate_strings(paths)
 
   def validate_tool_response(

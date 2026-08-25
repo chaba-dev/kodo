@@ -66,6 +66,14 @@ defmodule Kodo.Agent.Roles do
                 "You are Kodo's primary coding agent. Inspect evidence, make the smallest correct patch, and verify it. apply_patch accepts only a complete git unified diff with diff --git, ---, +++, and @@ hunk headers; never send replacement text alone. Batch independent tool calls when useful and leave enough budget to verify and summarize."
               )
 
+  @primary_v5 @primary_v4
+              |> Map.put(:version, 5)
+              |> Map.put(:toolset_version, "workspace-v4")
+              |> Map.put(
+                :prompt,
+                "You are Kodo's primary coding agent. Inspect evidence, make the smallest correct change, and verify it. Prefer replace_text for exact edits to existing files; old_text must occur exactly once. Use apply_patch for changes replace_text cannot express, and provide a complete git unified diff with correct diff --git, ---, +++, and @@ hunk counts. Batch independent tool calls when useful and leave enough budget to verify and summarize."
+              )
+
   @search_v3 @search_v2
              |> Map.put(:version, 3)
              |> Map.put(:budget, %{max_continuations: 6, max_tokens: 30_000})
@@ -75,11 +83,17 @@ defmodule Kodo.Agent.Roles do
              )
 
   @contracts %{
-    primary: %{1 => @primary_v1, 2 => @primary_v2, 3 => @primary_v3, 4 => @primary_v4},
+    primary: %{
+      1 => @primary_v1,
+      2 => @primary_v2,
+      3 => @primary_v3,
+      4 => @primary_v4,
+      5 => @primary_v5
+    },
     search: %{1 => @search_v1, 2 => @search_v2, 3 => @search_v3},
     review: %{1 => @review_v1, 2 => @review_v2}
   }
-  @current_versions %{primary: 4, search: 3, review: 2}
+  @current_versions %{primary: 5, search: 3, review: 2}
 
   @type role :: :primary | :search | :review
 

@@ -37,6 +37,8 @@ pub enum RunnerError {
     Git(String),
     #[error("patch is invalid: {0}")]
     Patch(String),
+    #[error("text replacement is invalid: {0}")]
+    Replace(String),
     #[error("path is not valid UTF-8: {0}")]
     NonUtf8Path(PathBuf),
     #[error("{0}")]
@@ -174,6 +176,14 @@ impl Runner {
             ToolRequest::ApplyPatch { patch } => {
                 self.apply_patch_authorized(patch, authority).await
             }
+            ToolRequest::ReplaceText {
+                path,
+                old_text,
+                new_text,
+            } => {
+                self.replace_text_authorized(path, old_text, new_text, authority)
+                    .await
+            }
             request => {
                 let runner = self.clone();
                 let blocking_authority = authority.clone();
@@ -209,6 +219,7 @@ impl Runner {
             ToolRequest::GitStatus => self.git_output(["status", "--short"], &[]),
             ToolRequest::GitDiff { paths } => self.git_diff(&paths),
             ToolRequest::ApplyPatch { .. }
+            | ToolRequest::ReplaceText { .. }
             | ToolRequest::StartCommand { .. }
             | ToolRequest::PollCommand { .. }
             | ToolRequest::StopCommand { .. } => {
@@ -521,6 +532,57 @@ impl Runner {
         let applied = self.git_apply_authorized(&patch, &authority).await?;
         successful_patch(applied)?;
         Ok(ToolResult::FilesChanged { paths })
+    }
+
+    async fn replace_text_authorized(
+        &self,
+        path: String,
+        old_text: String,
+        new_text: String,
+        authority: AuthorityGuard,
+    ) -> Result<ToolResult, RunnerError> {
+        if old_text.is_empty() {
+            return Err(RunnerError::Replace("old_text cannot be empty".into()));
+        }
+        let input_bytes = path
+            .len()
+            .checked_add(old_text.len())
+            .and_then(|size| size.checked_add(new_text.len()))
+            .ok_or_else(|| RunnerError::Replace("input size overflow".into()))?;
+        if input_bytes > self.limits.max_patch_input_bytes {
+            return Err(RunnerError::Replace(format!(
+                "replacement exceeds {} byte limit",
+                self.limits.max_patch_input_bytes
+            )));
+        }
+        let relative = self.confined_relative(&path)?;
+        let _permit = Arc::clone(&self.blocking_tools)
+            .acquire_owned()
+            .await
+            .map_err(|error| RunnerError::Task(error.to_string()))?;
+        let _mutation = self.mutation_lock.lock().await;
+        let runner = self.clone();
+        let replacement_authority = authority.clone();
+        let relative_for_write = relative.clone();
+        let changed = tokio::task::spawn_blocking(move || -> Result<bool, RunnerError> {
+            replacement_authority.ensure_valid()?;
+            Ok(runner.workspace.replace_text_if_unique(
+                &relative_for_write,
+                &old_text,
+                &new_text,
+                runner.limits.max_file_input_bytes,
+            )?)
+        })
+        .await
+        .map_err(|error| RunnerError::Task(error.to_string()))??;
+        if !changed {
+            return Err(RunnerError::Replace(
+                "old_text must match exactly once".into(),
+            ));
+        }
+        Ok(ToolResult::FilesChanged {
+            paths: vec![relative],
+        })
     }
 
     fn preflight_patch(
@@ -1127,6 +1189,54 @@ mod tests {
             fs::read_to_string(repository.path().join("file.txt")).unwrap(),
             "after\n"
         );
+    }
+
+    #[tokio::test]
+    async fn replaces_text_only_when_it_has_one_exact_match() {
+        let repository = repository();
+        fs::write(repository.path().join("file.txt"), "before\n").unwrap();
+        let runner = runner(&repository);
+
+        let result = runner
+            .execute(ToolRequest::ReplaceText {
+                path: "file.txt".into(),
+                old_text: "before".into(),
+                new_text: "after".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            ToolResult::FilesChanged {
+                paths: vec!["file.txt".into()]
+            }
+        );
+        assert_eq!(
+            fs::read_to_string(repository.path().join("file.txt")).unwrap(),
+            "after\n"
+        );
+
+        let error = runner
+            .execute(ToolRequest::ReplaceText {
+                path: "file.txt".into(),
+                old_text: "missing".into(),
+                new_text: "replacement".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exactly once"));
+
+        fs::write(repository.path().join("file.txt"), "same same\n").unwrap();
+        let error = runner
+            .execute(ToolRequest::ReplaceText {
+                path: "file.txt".into(),
+                old_text: "same".into(),
+                new_text: "replacement".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exactly once"));
     }
 
     #[tokio::test]

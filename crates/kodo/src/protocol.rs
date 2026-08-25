@@ -165,6 +165,11 @@ pub enum ToolRequest {
     ApplyPatch {
         patch: String,
     },
+    ReplaceText {
+        path: String,
+        old_text: String,
+        new_text: String,
+    },
     StartCommand {
         command: String,
         cwd: String,

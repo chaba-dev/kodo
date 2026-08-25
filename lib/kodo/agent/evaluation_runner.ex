@@ -248,7 +248,11 @@ defmodule Kodo.Agent.EvaluationRunner do
       case adapter.generate(
              role["model"],
              state.history,
-             Tools.definitions(contract.toolset_version),
+             Tools.definitions_for_turn(
+               contract.toolset_version,
+               step + 1,
+               contract.budget.max_continuations
+             ),
              timeout: @timeout,
              reasoning: role["reasoning"]
            ) do
@@ -326,6 +330,7 @@ defmodule Kodo.Agent.EvaluationRunner do
     do: git(root, ["diff", "--"] ++ safe_paths(root, args["paths"]))
 
   defp execute_tool("apply_patch", args, root, _), do: apply_patch(root, args["patch"])
+  defp execute_tool("replace_text", args, root, _), do: replace_text(root, args)
   defp execute_tool("start_command", args, root, commands), do: command(root, args, commands)
 
   defp execute_tool(name, _args, _root, _), do: %{"error" => "unsupported tool #{name}"}
@@ -408,6 +413,25 @@ defmodule Kodo.Agent.EvaluationRunner do
   end
 
   defp apply_patch(_root, _patch), do: %{"error" => "patch exceeds limit"}
+
+  @doc false
+  def replace_text(root, %{
+        "path" => path,
+        "old_text" => old_text,
+        "new_text" => new_text
+      }) do
+    with true <- old_text != "",
+         {:ok, target} <- confined(root, path),
+         {:ok, content} <- File.read(target),
+         1 <- content |> :binary.matches(old_text) |> length() do
+      File.write!(target, String.replace(content, old_text, new_text, global: false))
+      %{"changed" => true, "path" => path}
+    else
+      false -> %{"error" => "old_text must match exactly once"}
+      count when is_integer(count) -> %{"error" => "old_text must match exactly once"}
+      {:error, reason} -> %{"error" => inspect(reason)}
+    end
+  end
 
   defp command(root, args, commands) do
     command = String.trim(args["command"] || "")
@@ -550,7 +574,7 @@ defmodule Kodo.Agent.EvaluationRunner do
   defp contracts,
     do: Map.new(Roles.all(), fn {role, contract} -> {Atom.to_string(role), contract} end)
 
-  defp toolsets, do: Map.new(["read-only-v1", "workspace-v3"], &{&1, Tools.definitions(&1)})
+  defp toolsets, do: Map.new(["read-only-v1", "workspace-v4"], &{&1, Tools.definitions(&1)})
 
   @doc false
   def aggregate(tasks) do

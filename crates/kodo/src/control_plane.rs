@@ -31,13 +31,14 @@ const PHOENIX_SERIALIZER_VERSION: &str = "2.0.0";
 const JOIN_REFERENCE: &str = "1";
 const FIRST_HEARTBEAT_REFERENCE: u64 = 2;
 const REGISTRATION_PATH: &str = "api/runners";
-const RUNNER_CAPABILITIES: [&str; 9] = [
+const RUNNER_CAPABILITIES: [&str; 10] = [
     "list_files",
     "search_code",
     "read_file",
     "git_status",
     "git_diff",
     "apply_patch",
+    "replace_text",
     "start_command",
     "poll_command",
     "stop_command",
