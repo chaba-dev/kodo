@@ -334,6 +334,9 @@ defmodule Kodo.Agent.LoopTest do
     ownership: ownership
   } do
     {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+    previous_review_pid = Application.get_env(:kodo, :fake_llm_review_pid)
+    Application.put_env(:kodo, :fake_llm_review_pid, self())
+    on_exit(fn -> restore_env(:fake_llm_review_pid, previous_review_pid) end)
 
     {:ok, _event} =
       Sessions.append_event(
@@ -360,6 +363,11 @@ defmodule Kodo.Agent.LoopTest do
       "content" => "clean diff",
       "truncated" => false
     })
+
+    assert_receive {:review_messages, messages}
+    review_request = List.last(messages)["content"]
+    assert review_request =~ "Original task:\nfinal answer"
+    assert review_request =~ "Review this final diff:\n\nclean diff"
 
     assert {:ok, "Ready for review."} = Task.await(loop)
 

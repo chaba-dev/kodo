@@ -61,6 +61,10 @@ defmodule Kodo.Test.FakeLLM do
 
   @impl true
   def generate_object(_model, messages, _schema, _opts) do
+    if test_pid = Application.get_env(:kodo, :fake_llm_review_pid) do
+      send(test_pid, {:review_messages, messages})
+    end
+
     diff = List.last(messages)["content"]
 
     object =

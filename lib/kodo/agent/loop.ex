@@ -182,6 +182,13 @@ defmodule Kodo.Agent.Loop do
     |> List.last()
   end
 
+  defp original_task(events) do
+    events
+    |> Enum.filter(&(&1.type == "user_message"))
+    |> List.last()
+    |> then(& &1.payload["content"])
+  end
+
   defp run_final_review(text, primary_invocation_id, context) do
     review = ModelMapping.role!(context.mapping, :review)
     contract = Roles.fetch!(:review, review["role_contract_version"])
@@ -218,13 +225,16 @@ defmodule Kodo.Agent.Loop do
          :ok <- rehoming_boundary(),
          {:ok, generated} <-
            Sessions.dispatch_if_owner(context.ownership, fn ->
+             task = original_task(context.events)
+
              context.adapter.generate_object(
                review["model"],
                [
                  %{"role" => "system", "content" => contract.prompt},
                  %{
                    "role" => "user",
-                   "content" => "Review this final diff:\n\n#{diff.output["content"]}"
+                   "content" =>
+                     "Original task:\n#{task}\n\nReview this final diff:\n\n#{diff.output["content"]}"
                  }
                ],
                @review_schema,

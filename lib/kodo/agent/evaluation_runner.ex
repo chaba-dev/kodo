@@ -175,7 +175,7 @@ defmodule Kodo.Agent.EvaluationRunner do
         tool_loop(adapter, role, contract, prompt, root, checks, [], mapping)
 
       {diff, 0} = System.cmd("git", ["diff", "--no-ext-diff"], cd: root, stderr_to_stdout: true)
-      initial_review = structured_review(adapter, mapping, diff)
+      initial_review = structured_review(adapter, mapping, task["prompt"], diff)
 
       {answer, trace, usage, review} =
         if initial_review.object["clean"] do
@@ -192,7 +192,7 @@ defmodule Kodo.Agent.EvaluationRunner do
           {corrected_diff, 0} =
             System.cmd("git", ["diff", "--no-ext-diff"], cd: root, stderr_to_stdout: true)
 
-          corrected_review = structured_review(adapter, mapping, corrected_diff)
+          corrected_review = structured_review(adapter, mapping, task["prompt"], corrected_diff)
 
           {corrected_answer,
            trace ++
@@ -468,12 +468,18 @@ defmodule Kodo.Agent.EvaluationRunner do
     %{"question" => question, "evidence" => answer, "trace" => trace, "usage" => usage}
   end
 
-  defp structured_review(adapter, mapping, diff) do
+  defp structured_review(adapter, mapping, task, diff) do
     role = ModelMapping.role!(mapping, :review)
     contract = Roles.fetch!(:review, role["role_contract_version"])
 
     {:ok, response} =
-      adapter.generate_object(role["model"], messages(contract.prompt, diff), @review_schema,
+      adapter.generate_object(
+        role["model"],
+        messages(
+          contract.prompt,
+          "Original task:\n#{task}\n\nReview this final diff:\n\n#{diff}"
+        ),
+        @review_schema,
         timeout: @timeout,
         reasoning: role["reasoning"]
       )
