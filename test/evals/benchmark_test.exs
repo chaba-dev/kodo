@@ -14,6 +14,7 @@ defmodule Kodo.EvaluationBenchmarkTest do
     assert map_size(catalog["standards"]) > 0
     assert Map.has_key?(catalog["standards"], catalog["current_standard"])
     assert catalog["suites"] != []
+    assert File.exists?(Path.join(__DIR__, "README.adoc"))
 
     Enum.each(catalog["standards"], fn {_name, standard} ->
       criteria = standard["criteria"]
@@ -42,10 +43,12 @@ defmodule Kodo.EvaluationBenchmarkTest do
     standard = Map.fetch!(catalog["standards"], contract["standard"])
     baseline_path = Path.expand(contract["baseline_result"], Path.dirname(contract_path))
     baseline = baseline_path |> File.read!() |> Jason.decode!()
+    reference_path = Path.join(Path.dirname(contract_path), "README.adoc")
     criteria = standard["criteria"]
     criterion_ids = MapSet.new(criteria, & &1["id"])
     threshold_ids = contract["regression_thresholds"] |> Map.keys() |> MapSet.new()
 
+    assert File.exists?(reference_path)
     assert contract["version"] == 1
     assert contract["suite"] == entry["name"]
     assert contract["suite"] == baseline["suite"]["name"]
