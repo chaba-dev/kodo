@@ -12,6 +12,8 @@ defmodule Kodo.EvaluationBenchmarkTest do
     assert catalog["schema_version"] == 1
     assert is_map(catalog["standards"])
     assert map_size(catalog["standards"]) > 0
+    assert is_map(catalog["rubrics"])
+    assert map_size(catalog["rubrics"]) > 0
     assert Map.has_key?(catalog["standards"], catalog["current_standard"])
     assert catalog["suites"] != []
     assert File.exists?(Path.join(__DIR__, "README.adoc"))
@@ -29,6 +31,30 @@ defmodule Kodo.EvaluationBenchmarkTest do
         assert is_list(criterion["metric_path"])
         assert criterion["metric_path"] != []
         assert is_number(criterion["target"])
+      end)
+    end)
+  end
+
+  test "behavior rubrics define observable weighted dimensions", %{catalog: catalog} do
+    Enum.each(catalog["rubrics"], fn {_name, rubric} ->
+      dimensions = rubric["dimensions"]
+      ids = Enum.map(dimensions, & &1["id"])
+
+      assert rubric["description"] != ""
+      assert Map.keys(rubric["scoring"]) |> Enum.sort() == ["0", "0.5", "1"]
+      assert rubric["aggregation"]["method"] == "weighted_mean"
+      assert rubric["aggregation"]["episode_target"] > 0
+      assert rubric["aggregation"]["episode_target"] <= 1
+      assert dimensions != []
+      assert length(ids) == MapSet.size(MapSet.new(ids))
+
+      Enum.each(dimensions, fn dimension ->
+        assert dimension["description"] != ""
+        assert dimension["observable"] != ""
+        assert dimension["weight"] > 0
+        assert dimension["target"] > 0
+        assert dimension["target"] <= 1
+        assert is_boolean(dimension["critical"])
       end)
     end)
   end
