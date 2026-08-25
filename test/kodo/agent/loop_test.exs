@@ -386,7 +386,7 @@ defmodule Kodo.Agent.LoopTest do
              event.type == "review_invocation_started" and
                event.payload["role"] == "review" and
                event.payload["model"] == "openai:gpt-4o-mini" and
-               event.payload["role_contract_version"] == 4
+               event.payload["role_contract_version"] == 5
            end)
 
     assert Enum.any?(events, fn event ->

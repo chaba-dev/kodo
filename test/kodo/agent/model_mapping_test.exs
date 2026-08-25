@@ -7,7 +7,7 @@ defmodule Kodo.Agent.ModelMappingTest do
     mapping = ModelMapping.balanced()
 
     assert mapping["profile"] == "balanced"
-    assert mapping["profile_revision"] == 8
+    assert mapping["profile_revision"] == 9
     assert Map.keys(mapping["roles"]) |> Enum.sort() == ~w(primary review search)
 
     assert %{

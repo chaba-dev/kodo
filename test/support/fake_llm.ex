@@ -25,6 +25,7 @@ defmodule Kodo.Test.FakeLLM do
        "context_window" => capabilities.min_context,
        "input_modalities" => Enum.map(capabilities.input_modalities, &to_string/1),
        "json_schema" => capabilities.structured_output == :json_schema,
+       "structured_output" => capabilities.structured_output in [:json_schema, :object],
        "required_context_window" => capabilities.min_context,
        "tools" => capabilities.tools
      }}

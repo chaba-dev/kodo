@@ -68,6 +68,10 @@ defmodule Kodo.Agent.Roles do
                "Review the supplied original task and final diff for actionable defects introduced by the diff. The original task is authoritative: a diff that implements its requested behavior is not a defect. Never recommend reverting required behavior. Report only a concrete correctness failure or regression visible in the diff, with severity, location, explanation, and a fix that changes code. Do not report speculation, optional improvements, performance concerns without evidence, correct code, or a finding whose suggested fix says no change is needed. Set clean=true if and only if findings is empty."
              )
 
+  @review_v5 @review_v4
+             |> Map.put(:version, 5)
+             |> put_in([:capabilities, :structured_output], :object)
+
   @primary_v3 @primary_v2
               |> Map.put(:version, 3)
               |> Map.put(:toolset_version, "workspace-v2")
@@ -114,9 +118,15 @@ defmodule Kodo.Agent.Roles do
       6 => @primary_v6
     },
     search: %{1 => @search_v1, 2 => @search_v2, 3 => @search_v3},
-    review: %{1 => @review_v1, 2 => @review_v2, 3 => @review_v3, 4 => @review_v4}
+    review: %{
+      1 => @review_v1,
+      2 => @review_v2,
+      3 => @review_v3,
+      4 => @review_v4,
+      5 => @review_v5
+    }
   }
-  @current_versions %{primary: 6, search: 3, review: 4}
+  @current_versions %{primary: 6, search: 3, review: 5}
 
   @type role :: :primary | :search | :review
 

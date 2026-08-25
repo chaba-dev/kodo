@@ -39,6 +39,15 @@ defmodule Kodo.LLM.ReqLLMTest do
              )
   end
 
+  test "uses strict tool output for GPT-5.6 models without native JSON Schema metadata" do
+    for model_spec <- ~w(openai:gpt-5.6-terra openai:gpt-5.6-sol) do
+      model = ReqLLM.model!(model_spec)
+
+      refute ReqLLM.ModelHelpers.json_schema?(model)
+      assert ReqLLM.Providers.OpenAI.determine_output_mode(model, []) == :tool_strict
+    end
+  end
+
   test "uses every validated ReqLLM reasoning effort in request options" do
     contract = Kodo.Agent.Roles.fetch!(:primary)
 

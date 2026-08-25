@@ -7,7 +7,7 @@ defmodule Kodo.Agent.RolesTest do
     assert Map.keys(Roles.all()) |> Enum.sort() == [:primary, :review, :search]
 
     for {role, contract} <- Roles.all() do
-      assert contract.version == %{primary: 6, review: 4, search: 3}[role]
+      assert contract.version == %{primary: 6, review: 5, search: 3}[role]
       assert is_atom(contract.responsibility)
       assert is_binary(contract.prompt)
       assert contract.prompt != ""
@@ -43,5 +43,7 @@ defmodule Kodo.Agent.RolesTest do
     assert Roles.fetch!(:review, 3).prompt =~ "clean=true if and only if findings is empty"
     assert Roles.fetch!(:review, 4).prompt =~ "original task is authoritative"
     assert Roles.fetch!(:review, 4).prompt =~ "Never recommend reverting required behavior"
+    assert Roles.fetch!(:review, 4).capabilities.structured_output == :json_schema
+    assert Roles.fetch!(:review, 5).capabilities.structured_output == :object
   end
 end
