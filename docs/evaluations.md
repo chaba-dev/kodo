@@ -140,3 +140,23 @@ Profile revision 7 responds directly: review contract version 4 makes the origin
 Trace inspection identified a concrete evaluation bug behind the implementation regression: correction turns received only review findings, not the original task, allowed paths, or exact public command. Consequently, every correction verification attempt used a disallowed command or working directory. The reviewer also continued to return internally contradictory findings such as “the code is correct” with “No change needed,” despite the prompt prohibition.
 
 Profile revision 8 retains the cheaper toolset but restores the complete implementation contract in correction turns. A shared review-result gate now drops findings outside the actual diff and findings whose suggested fix explicitly requires no change, preventing those results from triggering harmful correction loops in both live sessions and evaluations.
+
+## Accepted balanced profile revision 8 — 2026-08-25
+
+[`balanced-profile-v8-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-profile-v8-2026-08-25.json) completed all 30 tasks without errors and is the accepted Phase 7 recommendation.
+
+| Metric | Revision 7 | Revision 8 |
+| --- | ---: | ---: |
+| Search relevant-file recall | 73.3% | 86.7% |
+| Search evidence-citation recall | 65% | 55% |
+| Review defect and location recall | 100% | 90% |
+| Review false positives | 1 | 2 |
+| Implementation public-check pass rate | 50% | 90% |
+| Implementation hidden-check pass rate | 30% | 80% |
+| Implementation scope compliance | 100% | 100% |
+| Mean / p95 task latency | 13.46s / 35.63s | 14.11s / 45.00s |
+| Total tokens | 285,099 | 274,841 |
+| Provider-estimated cost | $0.039358 | $0.038445 |
+| Harness failure rate | 0% | 0% |
+
+Restoring correction context produced the decisive improvement: nine of ten implementations passed public verification and eight passed hidden verification, while every correction command used the allowed exact command rather than being rejected. The remaining implementation failures were slug whitespace handling and path parent-traversal handling. Final review remains overcritical and often reports optional or unsupported concerns, but the primary now checks those claims against the task and preserves verified behavior; standalone review still achieved 90% defect/location recall. Further review-precision tuning can proceed independently and does not block the Phase 7 mapping recommendation.
