@@ -423,7 +423,8 @@ defmodule Kodo.Agent.LoopTest do
 
     broadcast_success(runner, first_review, %{
       "result" => "output",
-      "content" => "REVIEW_FINDING",
+      "content" =>
+        "diff --git a/lib/example.ex b/lib/example.ex\n--- a/lib/example.ex\n+++ b/lib/example.ex\nREVIEW_FINDING",
       "truncated" => false
     })
 

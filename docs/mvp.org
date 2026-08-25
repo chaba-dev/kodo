@@ -802,7 +802,11 @@ delivery checklist.
   regressed to 60% public and 40% hidden success because review findings remained
   speculative and sometimes reversed correct changes. Revision 7 removes the
   consistently unusable patch tool, requires exact verification after edits, and
-  makes the original task authoritative during review. Evaluate it next.
+  makes the original task authoritative during review. Revision 7 reduced cost
+  and latency but regressed to 50% public and 30% hidden implementation success:
+  correction turns had lost the original task and exact command, and every
+  correction verification was rejected. Revision 8 restores that context and
+  rejects review findings outside the diff or explicitly requiring no change.
 
 ** TODO Milestone 8: Reliability and release candidate
 

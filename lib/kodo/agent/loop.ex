@@ -2,6 +2,7 @@ defmodule Kodo.Agent.Loop do
   @moduledoc "Event-driven, restartable primary-agent model and runner loop."
 
   alias Kodo.Agent.ModelMapping
+  alias Kodo.Agent.ReviewResult
   alias Kodo.Agent.Roles
   alias Kodo.Agent.Tools
   alias Kodo.LLM
@@ -244,6 +245,7 @@ defmodule Kodo.Agent.Loop do
            end),
          :ok <- within_budget(1, token_count(generated.usage), contract.budget),
          {:ok, result} <- validate_review_object(generated.object),
+         result = ReviewResult.actionable(result, diff.output["content"]),
          {:ok, result_event} <-
            persist_review_result(
              context.session_id,

@@ -1,7 +1,7 @@
 defmodule Kodo.Agent.EvaluationRunner do
   @moduledoc "Runs the pinned MVP evaluation suite against a live LLM adapter."
 
-  alias Kodo.Agent.{EvaluationSuite, ModelMapping, Roles, Tools}
+  alias Kodo.Agent.{EvaluationSuite, ModelMapping, ReviewResult, Roles, Tools}
 
   @timeout 120_000
   @max_output 32_000
@@ -182,9 +182,7 @@ defmodule Kodo.Agent.EvaluationRunner do
           {answer, trace, usage, initial_review}
         else
           correction_prompt =
-            "Final-diff review found supported issues. Address them, rerun the affected public " <>
-              "checks, and finish with a summary: " <>
-              Jason.encode!(initial_review.object["findings"])
+            correction_prompt(task, checks, initial_review.object["findings"])
 
           {corrected_answer, correction_trace, correction_usage} =
             tool_loop(adapter, role, contract, correction_prompt, root, checks, [], mapping)
@@ -491,7 +489,15 @@ defmodule Kodo.Agent.EvaluationRunner do
         reasoning: role["reasoning"]
       )
 
-    response
+    %{response | object: ReviewResult.actionable(response.object, diff)}
+  end
+
+  @doc false
+  def correction_prompt(task, checks, findings) do
+    implementation_prompt(task, checks) <>
+      "\nFinal-diff review reported these claims. Inspect the current file, address only supported " <>
+      "issues, rerun the exact public command, and finish with a summary: " <>
+      Jason.encode!(findings)
   end
 
   defp implementation_prompt(task, checks) do

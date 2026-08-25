@@ -148,6 +148,22 @@ defmodule Kodo.Agent.EvaluationRunnerTest do
     refute "stop_command" in names
   end
 
+  test "correction prompts retain the original task and exact verification command" do
+    task = %{
+      "prompt" => "Fix add/2.",
+      "expected" => %{"allowed_paths" => ["lib/calc.ex"]}
+    }
+
+    prompt =
+      EvaluationRunner.correction_prompt(task, ["elixir -r lib/calc.ex test/public_test.exs"], [
+        %{"path" => "lib/calc.ex", "line" => 2}
+      ])
+
+    assert prompt =~ "Fix add/2."
+    assert prompt =~ "Only modify: lib/calc.ex"
+    assert prompt =~ "elixir -r lib/calc.ex test/public_test.exs"
+  end
+
   test "aggregate records quality, latency, usage, cost availability, and failure rate" do
     tasks = [
       %{
