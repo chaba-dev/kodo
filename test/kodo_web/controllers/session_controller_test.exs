@@ -94,6 +94,8 @@ defmodule KodoWeb.SessionControllerTest do
        }}
     )
 
+    respond_to_review(runner.id)
+
     assert_receive {:session_event,
                     %{type: "session_status_changed", payload: %{"status" => "completed"}}}
 
@@ -221,6 +223,8 @@ defmodule KodoWeb.SessionControllerTest do
        }}
     )
 
+    respond_to_review(runner.id)
+
     assert_receive {:session_event,
                     %{type: "session_status_changed", payload: %{"status" => "completed"}}}
   end
@@ -302,5 +306,22 @@ defmodule KodoWeb.SessionControllerTest do
     conn
     |> put_req_header("content-type", "application/json")
     |> post(path, Jason.encode!(params))
+  end
+
+  defp respond_to_review(runner_id) do
+    assert_receive {:tool_request, request}
+    assert request["request"]["tool"] == "git_diff"
+
+    Phoenix.PubSub.broadcast(
+      Kodo.PubSub,
+      "runner_responses:#{runner_id}",
+      {:runner_tool_response, runner_id,
+       %{
+         "protocol_version" => 4,
+         "request_id" => request["request_id"],
+         "status" => "success",
+         "response" => %{"result" => "output", "content" => "clean diff", "truncated" => false}
+       }}
+    )
   end
 end

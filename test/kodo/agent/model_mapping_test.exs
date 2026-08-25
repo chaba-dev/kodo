@@ -7,14 +7,14 @@ defmodule Kodo.Agent.ModelMappingTest do
     mapping = ModelMapping.balanced()
 
     assert mapping["profile"] == "balanced"
-    assert mapping["profile_revision"] == 2
+    assert mapping["profile_revision"] == 3
     assert Map.keys(mapping["roles"]) |> Enum.sort() == ~w(primary review search)
 
     assert %{
              "provider" => "openai",
              "model" => "openai:gpt-4o-mini",
              "reasoning" => "none",
-             "role_contract_version" => 2,
+             "role_contract_version" => 3,
              "sources" => %{"model" => "profile", "reasoning" => "profile"}
            } = mapping["roles"]["primary"]
   end

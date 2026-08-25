@@ -69,6 +69,18 @@ defmodule Kodo.Agent.Tools do
     ]
   end
 
+  def definitions("workspace-v2") do
+    definitions("workspace-v1") ++
+      [
+        tool(
+          "delegate_search",
+          "Delegate one focused codebase question to a read-only search agent",
+          %{"question" => @string},
+          ["question"]
+        )
+      ]
+  end
+
   def definitions("read-only-v1") do
     Enum.reject(
       definitions("workspace-v1"),
@@ -127,6 +139,10 @@ defmodule Kodo.Agent.Tools do
   defp translate("apply_patch", %{"patch" => patch} = args) when is_binary(patch),
     do: exact(args, ["patch"], "apply_patch")
 
+  defp translate("delegate_search", %{"question" => question} = args)
+       when is_binary(question) and question != "",
+       do: exact(args, ["question"], "delegate_search")
+
   defp translate(
          "start_command",
          %{"command" => command, "cwd" => cwd, "timeout_ms" => timeout} = args
@@ -147,7 +163,7 @@ defmodule Kodo.Agent.Tools do
   end
 
   defp translate(name, _args) do
-    if Enum.any?(definitions(), &(&1.name == name)) do
+    if Enum.any?(definitions("workspace-v2"), &(&1.name == name)) do
       {:error, :invalid_tool_call}
     else
       {:error, :unknown_tool}

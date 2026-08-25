@@ -5,6 +5,9 @@ defmodule Kodo.Agent.ToolsTest do
 
   test "resolves definitions by their persisted toolset version" do
     assert Tools.definitions("workspace-v1") == Tools.definitions()
+
+    assert Enum.any?(Tools.definitions("workspace-v2"), &(&1.name == "delegate_search"))
+    refute Enum.any?(Tools.definitions("read-only-v1"), &(&1.name == "delegate_search"))
   end
 
   test "translates only exact typed runner arguments" do

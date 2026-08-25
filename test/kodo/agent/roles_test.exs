@@ -6,8 +6,8 @@ defmodule Kodo.Agent.RolesTest do
   test "defines complete versioned contracts for the initial roles" do
     assert Map.keys(Roles.all()) |> Enum.sort() == [:primary, :review, :search]
 
-    for {_role, contract} <- Roles.all() do
-      assert contract.version == 2
+    for {role, contract} <- Roles.all() do
+      assert contract.version == if(role == :primary, do: 3, else: 2)
       assert is_atom(contract.responsibility)
       assert is_binary(contract.prompt)
       assert contract.prompt != ""
@@ -28,5 +28,6 @@ defmodule Kodo.Agent.RolesTest do
 
     refute Map.has_key?(Roles.fetch!(:primary, 1), :capabilities)
     assert Roles.fetch!(:primary, 2).capabilities.min_context == 100_000
+    assert Roles.fetch!(:primary, 3).toolset_version == "workspace-v2"
   end
 end

@@ -144,9 +144,11 @@ defmodule Kodo.Sessions.ActiveSessionTest do
   end
 
   test "drain waits for an in-flight model effect and yields at its next durable boundary", %{
+    runner: runner,
     session: session
   } do
     manager = start_instance_manager!()
+    {:ok, _runner_registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
     assert :ok = Sessions.start_turn(session.id, "ownership barrier")
     assert_receive {:model_dispatch_started, dispatch_pid}
@@ -158,6 +160,9 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     send(dispatch_pid, :release_model_dispatch)
 
     assert {:error, {:drain_incomplete, [:no_compatible_instance]}} = Task.await(drain)
+
+    assert_receive {:tool_request, review_request}
+    respond_to_tool(runner.id, review_request)
 
     assert_receive {:session_event,
                     %{type: "session_status_changed", payload: %{"status" => "completed"}}}
@@ -387,7 +392,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
                     %{type: "session_status_changed", payload: %{"status" => "completed"}}}
 
     assert Enum.count(Sessions.events_after(replay.id), &(&1.type == "approval_requested")) == 1
-    assert Enum.count(Sessions.events_after(replay.id), &(&1.type == "tool_requested")) == 1
+    assert Enum.count(Sessions.events_after(replay.id), &(&1.type == "tool_requested")) == 2
   end
 
   test "redispatches the same request id after a crash during tool execution", %{
@@ -439,11 +444,18 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert Enum.count(events, &(&1.type == "model_response")) == 4
   end
 
-  test "reads terminal state without restarting its coordinator", %{session: session} do
+  test "reads terminal state without restarting its coordinator", %{
+    runner: runner,
+    session: session
+  } do
+    {:ok, _runner_registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
     assert :ok = Sessions.start_turn(session.id, "token budget")
     [{pid, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
     ref = Process.monitor(pid)
+
+    assert_receive {:tool_request, review_request}
+    respond_to_tool(runner.id, review_request)
 
     assert_receive {:session_event,
                     %{type: "session_status_changed", payload: %{"status" => "completed"}}}
@@ -746,6 +758,12 @@ defmodule Kodo.Sessions.ActiveSessionTest do
   end
 
   defp respond_to_tool(runner_id, request) do
+    response =
+      case request["request"]["tool"] do
+        "git_diff" -> %{"result" => "output", "content" => "clean diff", "truncated" => false}
+        _other -> %{"result" => "files_changed", "paths" => []}
+      end
+
     Phoenix.PubSub.broadcast(
       Kodo.PubSub,
       "runner_responses:#{runner_id}",
@@ -754,9 +772,14 @@ defmodule Kodo.Sessions.ActiveSessionTest do
          "protocol_version" => 4,
          "request_id" => request["request_id"],
          "status" => "success",
-         "response" => %{"result" => "files_changed", "paths" => []}
+         "response" => response
        }}
     )
+
+    if request["request"]["tool"] != "git_diff" do
+      assert_receive {:tool_request, next_request}
+      respond_to_tool(runner_id, next_request)
+    end
   end
 
   defp start_instance_manager!(overrides \\ []) do

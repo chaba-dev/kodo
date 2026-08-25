@@ -83,9 +83,9 @@ defmodule Kodo.Agent.LoopTest do
     assert invocation.payload["model"] == "test:model"
     assert invocation.payload["reasoning"] == "none"
     assert invocation.version == 3
-    assert invocation.payload["role_contract_version"] == 2
-    assert invocation.payload["role_prompt_version"] == 2
-    assert invocation.payload["toolset_version"] == "workspace-v1"
+    assert invocation.payload["role_contract_version"] == 3
+    assert invocation.payload["role_prompt_version"] == 3
+    assert invocation.payload["toolset_version"] == "workspace-v2"
     assert invocation.payload["capability_validation"]["tools"]
     assert invocation.payload["capability_validation"]["required_context_window"] == 100_000
 
@@ -162,6 +162,282 @@ defmodule Kodo.Agent.LoopTest do
              )
 
     refute Enum.any?(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
+  end
+
+  test "delegates focused read-only investigation and returns only its final evidence", %{
+    runner: runner,
+    session: session,
+    ownership: ownership
+  } do
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "delegate search"},
+        ownership: ownership
+      )
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:tool_request, request}
+    assert request["request"]["tool"] == "read_file"
+
+    Phoenix.PubSub.broadcast(
+      Kodo.PubSub,
+      "runner_responses:#{runner.id}",
+      {:runner_tool_response, runner.id,
+       %{
+         "protocol_version" => 4,
+         "request_id" => request["request_id"],
+         "status" => "success",
+         "response" => %{
+           "result" => "file",
+           "content" => "helper documentation",
+           "offset" => 0,
+           "next_offset" => nil,
+           "truncated" => false
+         }
+       }}
+    )
+
+    assert_receive {:tool_request, review_request}
+    assert review_request["request"]["tool"] == "git_diff"
+
+    broadcast_success(runner, review_request, %{
+      "result" => "output",
+      "content" => "clean diff",
+      "truncated" => false
+    })
+
+    assert {:ok, "Used delegated evidence."} = Task.await(loop)
+
+    events = Sessions.events_after(session.id)
+
+    assert Enum.any?(events, fn event ->
+             event.type == "subagent_invocation_started" and
+               event.payload["role"] == "search" and
+               event.payload["model"] == "openai:gpt-4o-mini" and
+               event.payload["toolset_version"] == "read-only-v1"
+           end)
+
+    assert Enum.any?(events, fn event ->
+             event.type == "tool_completed" and
+               event.payload["name"] == "delegate_search" and
+               event.payload["output"] == %{
+                 "result" => "search_evidence",
+                 "content" => "README.md:1 contains the requested helper evidence."
+               }
+           end)
+  end
+
+  test "denies search tools outside the persisted read-only toolset", %{
+    session: session,
+    ownership: ownership
+  } do
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "delegate unsafe search"},
+        ownership: ownership
+      )
+
+    assert {:error, {:tool_denied, "apply_patch"}} =
+             Loop.run(session.id,
+               adapter: Kodo.Test.FakeLLM,
+               budgets: budgets([]),
+               ownership: ownership
+             )
+
+    refute Enum.any?(Sessions.events_after(session.id), fn event ->
+             event.type == "tool_requested" and event.payload["name"] == "apply_patch"
+           end)
+  end
+
+  test "resumes delegated search without redispatching a completed read", %{
+    runner: runner,
+    session: session,
+    ownership: ownership
+  } do
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+    Application.put_env(:kodo, :fake_llm_search_resume_pid, self())
+    on_exit(fn -> Application.delete_env(:kodo, :fake_llm_search_resume_pid) end)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "delegate search"},
+        ownership: ownership
+      )
+
+    interrupted =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:tool_request, read_request}
+
+    broadcast_success(runner, read_request, %{
+      "result" => "file",
+      "content" => "helper documentation",
+      "offset" => 0,
+      "next_offset" => nil,
+      "truncated" => false
+    })
+
+    assert_receive :search_continuation_started
+    Task.shutdown(interrupted, :brutal_kill)
+    Application.delete_env(:kodo, :fake_llm_search_resume_pid)
+
+    resumed =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:tool_request, review_request}
+    assert review_request["request"]["tool"] == "git_diff"
+
+    broadcast_success(runner, review_request, %{
+      "result" => "output",
+      "content" => "clean diff",
+      "truncated" => false
+    })
+
+    assert {:ok, "Used delegated evidence."} = Task.await(resumed)
+
+    assert Enum.count(Sessions.events_after(session.id), fn event ->
+             event.type == "tool_requested" and event.payload["name"] == "read_file"
+           end) == 1
+  end
+
+  test "reviews the final diff with the persisted review mapping before completion", %{
+    runner: runner,
+    session: session,
+    ownership: ownership
+  } do
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "final answer"},
+        ownership: ownership
+      )
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:tool_request, request}
+    assert request["request"] == %{"tool" => "git_diff", "paths" => []}
+
+    broadcast_success(runner, request, %{
+      "result" => "output",
+      "content" => "clean diff",
+      "truncated" => false
+    })
+
+    assert {:ok, "Ready for review."} = Task.await(loop)
+
+    assert {:ok, "Ready for review."} =
+             Loop.run(session.id,
+               adapter: Kodo.Test.FakeLLM,
+               budgets: budgets([]),
+               ownership: ownership
+             )
+
+    refute_receive {:tool_request, _duplicate_review}
+
+    events = Sessions.events_after(session.id)
+
+    assert Enum.any?(events, fn event ->
+             event.type == "review_invocation_started" and
+               event.payload["role"] == "review" and
+               event.payload["model"] == "openai:gpt-4o-mini" and
+               event.payload["role_contract_version"] == 2
+           end)
+
+    assert Enum.any?(events, fn event ->
+             event.type == "review_result" and event.payload["clean"] and
+               event.payload["findings"] == []
+           end)
+  end
+
+  test "feeds supported review findings back to primary and reviews the correction", %{
+    runner: runner,
+    session: session,
+    ownership: ownership
+  } do
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "final answer"},
+        ownership: ownership
+      )
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:tool_request, first_review}
+
+    broadcast_success(runner, first_review, %{
+      "result" => "output",
+      "content" => "REVIEW_FINDING",
+      "truncated" => false
+    })
+
+    assert_receive {:tool_request, corrected_review}
+
+    broadcast_success(runner, corrected_review, %{
+      "result" => "output",
+      "content" => "clean corrected diff",
+      "truncated" => false
+    })
+
+    assert {:ok, "Addressed review findings."} = Task.await(loop)
+
+    events = Sessions.events_after(session.id)
+    results = Enum.filter(events, &(&1.type == "review_result"))
+
+    assert Enum.map(results, & &1.payload["clean"]) == [false, true]
+
+    assert Enum.any?(events, fn event ->
+             event.type == "review_feedback" and
+               hd(event.payload["findings"])["path"] == "lib/example.ex"
+           end)
   end
 
   test "ownership transfer waits for an in-flight model dispatch boundary", %{
@@ -424,6 +700,20 @@ defmodule Kodo.Agent.LoopTest do
     Keyword.merge(
       [max_continuations: 8, max_tokens: 1_000, model_timeout: 1_000, tool_timeout: 1_000],
       overrides
+    )
+  end
+
+  defp broadcast_success(runner, request, response) do
+    Phoenix.PubSub.broadcast(
+      Kodo.PubSub,
+      "runner_responses:#{runner.id}",
+      {:runner_tool_response, runner.id,
+       %{
+         "protocol_version" => 4,
+         "request_id" => request["request_id"],
+         "status" => "success",
+         "response" => response
+       }}
     )
   end
 

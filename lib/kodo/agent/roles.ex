@@ -54,12 +54,16 @@ defmodule Kodo.Agent.Roles do
                input_modalities: [:text]
              })
 
+  @primary_v3 @primary_v2
+              |> Map.put(:version, 3)
+              |> Map.put(:toolset_version, "workspace-v2")
+
   @contracts %{
-    primary: %{1 => @primary_v1, 2 => @primary_v2},
+    primary: %{1 => @primary_v1, 2 => @primary_v2, 3 => @primary_v3},
     search: %{1 => @search_v1, 2 => @search_v2},
     review: %{1 => @review_v1, 2 => @review_v2}
   }
-  @current_versions %{primary: 2, search: 2, review: 2}
+  @current_versions %{primary: 3, search: 2, review: 2}
 
   @type role :: :primary | :search | :review
 
