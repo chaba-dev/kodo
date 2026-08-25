@@ -3,6 +3,7 @@ defmodule Kodo.LLM.ReqLLM do
 
   @behaviour Kodo.LLM
 
+  alias Kodo.Agent.ModelCapabilities
   alias ReqLLM.Context
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
@@ -11,10 +12,37 @@ defmodule Kodo.LLM.ReqLLM do
   alias ReqLLM.Tool
   alias ReqLLM.ToolCall
 
+  @reasoning_efforts %{
+    "minimal" => :minimal,
+    "low" => :low,
+    "medium" => :medium,
+    "high" => :high,
+    "xhigh" => :xhigh,
+    "max" => :max
+  }
+
+  @impl true
+  def validate_model(model, role_mapping, contract) do
+    with {:ok, resolved} <- resolve_dispatchable_model(model),
+         :ok <- validate_reasoning(role_mapping["reasoning"]) do
+      ModelCapabilities.validate(resolved, role_mapping, contract)
+    end
+  end
+
   @impl true
   def generate(model, messages, tools, opts) do
     context = build_context(messages)
     request(model, context, tools, opts)
+  end
+
+  @doc false
+  def request_options(tools, opts) do
+    [
+      tools: build_tools(tools),
+      receive_timeout: Keyword.fetch!(opts, :timeout),
+      total_timeout: Keyword.fetch!(opts, :timeout)
+    ]
+    |> put_reasoning_effort(opts[:reasoning])
   end
 
   @doc false
@@ -38,13 +66,7 @@ defmodule Kodo.LLM.ReqLLM do
   end
 
   defp request(model, context, tools, opts) do
-    request_opts =
-      [
-        tools: build_tools(tools),
-        receive_timeout: Keyword.fetch!(opts, :timeout),
-        total_timeout: Keyword.fetch!(opts, :timeout)
-      ]
-      |> put_reasoning_effort(opts[:reasoning])
+    request_opts = request_options(tools, opts)
 
     with {:ok, response} <- ReqLLM.generate_text(model, context, request_opts) do
       classified = Response.classify(response)
@@ -63,14 +85,26 @@ defmodule Kodo.LLM.ReqLLM do
 
   defp put_reasoning_effort(opts, reasoning) when reasoning in [nil, "none"], do: opts
 
-  defp put_reasoning_effort(opts, reasoning) when reasoning in ~w(minimal low medium high) do
-    Keyword.put(opts, :reasoning_effort, reasoning_effort(reasoning))
+  defp put_reasoning_effort(opts, reasoning) do
+    Keyword.put(opts, :reasoning_effort, Map.fetch!(@reasoning_efforts, reasoning))
   end
 
-  defp reasoning_effort("minimal"), do: :minimal
-  defp reasoning_effort("low"), do: :low
-  defp reasoning_effort("medium"), do: :medium
-  defp reasoning_effort("high"), do: :high
+  defp resolve_dispatchable_model(model) do
+    with {:ok, resolved} <- ReqLLM.model(model),
+         {:ok, _provider} <- ReqLLM.provider(resolved.provider) do
+      {:ok, resolved}
+    else
+      {:error, reason} -> {:error, {:model_not_available, reason}}
+    end
+  end
+
+  defp validate_reasoning(reasoning) when reasoning in [nil, "none"], do: :ok
+
+  defp validate_reasoning(reasoning) do
+    if Map.has_key?(@reasoning_efforts, reasoning),
+      do: :ok,
+      else: {:error, {:unsupported_reasoning, reasoning}}
+  end
 
   defp message(%{"role" => "system", "content" => content}), do: Context.system(content)
   defp message(%{"role" => "user", "content" => content}), do: Context.user(content)

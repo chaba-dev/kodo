@@ -7,12 +7,15 @@ defmodule Kodo.Agent.RolesTest do
     assert Map.keys(Roles.all()) |> Enum.sort() == [:primary, :review, :search]
 
     for {_role, contract} <- Roles.all() do
-      assert contract.version == 1
+      assert contract.version == 2
       assert is_atom(contract.responsibility)
       assert is_binary(contract.prompt)
       assert contract.prompt != ""
       assert contract.tools in [:workspace, :read_only]
       assert is_binary(contract.toolset_version)
+      assert contract.capabilities.tools
+      assert contract.capabilities.min_context > 0
+      assert contract.capabilities.input_modalities == [:text]
       assert contract.budget.max_continuations > 0
       assert contract.budget.max_tokens > 0
       assert is_atom(contract.output)
@@ -22,5 +25,8 @@ defmodule Kodo.Agent.RolesTest do
   test "resolves a contract by its persisted version" do
     assert Roles.fetch!(:primary, 1).prompt ==
              "You are Kodo's primary coding agent. Inspect evidence, make the smallest correct patch, and verify it."
+
+    refute Map.has_key?(Roles.fetch!(:primary, 1), :capabilities)
+    assert Roles.fetch!(:primary, 2).capabilities.min_context == 100_000
   end
 end

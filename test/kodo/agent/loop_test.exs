@@ -82,9 +82,12 @@ defmodule Kodo.Agent.LoopTest do
     assert invocation.payload["provider"] == "test"
     assert invocation.payload["model"] == "test:model"
     assert invocation.payload["reasoning"] == "none"
-    assert invocation.payload["role_contract_version"] == 1
-    assert invocation.payload["role_prompt_version"] == 1
+    assert invocation.version == 3
+    assert invocation.payload["role_contract_version"] == 2
+    assert invocation.payload["role_prompt_version"] == 2
     assert invocation.payload["toolset_version"] == "workspace-v1"
+    assert invocation.payload["capability_validation"]["tools"]
+    assert invocation.payload["capability_validation"]["required_context_window"] == 100_000
 
     assert invocation.payload["model_mapping"]["roles"]["review"]["model"] ==
              "openai:gpt-4o-mini"
@@ -120,16 +123,16 @@ defmodule Kodo.Agent.LoopTest do
              )
 
     assert_receive {:llm_request, "test:model", system, tools, opts}
-    assert system["content"] == Kodo.Agent.Roles.fetch!(:primary, 1).prompt
+    assert system["content"] == Kodo.Agent.Roles.fetch!(:primary, 2).prompt
     assert tools == Tools.definitions("workspace-v1")
     assert opts[:reasoning] == "none"
 
     invocation =
       Enum.find(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
 
-    assert invocation.version == 2
+    assert invocation.version == 3
     assert invocation.payload["model"] == "test:model"
-    assert invocation.payload["role_contract_version"] == 1
+    assert invocation.payload["role_contract_version"] == 2
     assert invocation.payload["toolset_version"] == "workspace-v1"
 
     assert invocation.payload["model_mapping"]["roles"]["primary"]["sources"]["model"] ==

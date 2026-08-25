@@ -777,8 +777,8 @@ delivery checklist.
 
 - [X] Versioned primary, search, and review contracts.
 - [X] The versioned ~balanced~ profile.
-- [ ] Per-role user and repository overrides.
-- [ ] Capability validation and invocation metadata.
+- [X] Per-role user and repository overrides.
+- [X] Capability validation and invocation metadata.
 - [ ] Search and final-diff review integration.
 - [ ] Initial 30-task evaluation suite.
 - [ ] Exit criterion: a user can override one role while inheriting all other

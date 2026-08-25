@@ -132,8 +132,17 @@ defmodule Kodo.Agent.Loop do
     tools = Tools.definitions(contract.toolset_version)
 
     with :ok <- within_budget(invocation, usage(current_turn(events)), budgets),
+         {:ok, capability_validation} <-
+           adapter.validate_model(primary["model"], primary, contract),
          {:ok, invocation_id} <-
-           start_invocation(session_id, invocation, mapping, primary, ownership),
+           start_invocation(
+             session_id,
+             invocation,
+             mapping,
+             primary,
+             capability_validation,
+             ownership
+           ),
          :ok <- rehoming_boundary(),
          {:ok, response} <-
            Sessions.dispatch_if_owner(ownership, fn ->
@@ -198,7 +207,14 @@ defmodule Kodo.Agent.Loop do
   defp assistant_message(%{"assistant" => provider_state}),
     do: %{"role" => "assistant", "provider_state" => provider_state}
 
-  defp start_invocation(session_id, continuation, mapping, primary, ownership) do
+  defp start_invocation(
+         session_id,
+         continuation,
+         mapping,
+         primary,
+         capability_validation,
+         ownership
+       ) do
     invocation_id = Ecto.UUID.generate()
 
     case Sessions.append_event(
@@ -214,9 +230,10 @@ defmodule Kodo.Agent.Loop do
              "role_contract_version" => primary["role_contract_version"],
              "role_prompt_version" => primary["role_contract_version"],
              "toolset_version" => primary["toolset_version"],
+             "capability_validation" => capability_validation,
              "model_mapping" => mapping
            },
-           version: 2,
+           version: 3,
            ownership: ownership
          ) do
       {:ok, _event} -> {:ok, invocation_id}

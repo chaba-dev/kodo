@@ -30,6 +30,40 @@ defmodule Kodo.LLM.ReqLLMTest do
     assert function_exported?(adapter, :generate, 4)
   end
 
+  test "rejects catalog models whose provider cannot be dispatched" do
+    assert {:error, {:model_not_available, _reason}} =
+             Adapter.validate_model(
+               "302ai:MiniMax-M1",
+               %{"reasoning" => "none"},
+               Kodo.Agent.Roles.fetch!(:primary)
+             )
+  end
+
+  test "uses every validated ReqLLM reasoning effort in request options" do
+    contract = Kodo.Agent.Roles.fetch!(:primary)
+
+    for reasoning <- ~w(xhigh max) do
+      assert {:ok, _metadata} =
+               Adapter.validate_model(
+                 "anthropic:claude-fable-5",
+                 %{"reasoning" => reasoning},
+                 contract
+               )
+
+      assert Adapter.request_options([], timeout: 100, reasoning: reasoning)[:reasoning_effort] ==
+               String.to_existing_atom(reasoning)
+    end
+  end
+
+  test "rejects reasoning values the adapter cannot encode" do
+    assert {:error, {:unsupported_reasoning, "extreme"}} =
+             Adapter.validate_model(
+               "anthropic:claude-fable-5",
+               %{"reasoning" => "extreme"},
+               Kodo.Agent.Roles.fetch!(:primary)
+             )
+  end
+
   test "reconstructs a tool exchange from provider-independent persisted values" do
     context =
       Adapter.build_context([
