@@ -56,4 +56,22 @@ Reject this candidate based on the still-valid comparison: it reduced search rec
 
 The hidden commands now explicitly require the public test file before executing the hidden test script. The corrected suite fingerprint is `e73ad35df41b5defd6d390e3b941066a42bf6b1fd2bb06ba712271fa7b0881d9`.
 
-A fresh 30-task run against this fingerprint is required before Phase 7 can close. Do not compare corrected implementation metrics directly with the invalid hidden-check metrics from the older fingerprint.
+The valid corrected baseline is recorded in [`balanced-corrected-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-corrected-2026-08-25.json). It ran profile revision 4 at revision `91a7eb71f865a20375b9f78157cd31e0b3936e81`, completed all 30 tasks, and executed both public and hidden implementation checks.
+
+| Metric | Corrected result |
+| --- | ---: |
+| Search relevant-file recall | 55% |
+| Search evidence-citation recall | 45% |
+| Review defect and location recall | 90% |
+| Review false positives | 1 |
+| Implementation public-check pass rate | 50% |
+| Implementation hidden-check pass rate | 10% |
+| Implementation scope compliance | 100% |
+| Mean / p95 task latency | 10.24s / 24.27s |
+| Total tokens | 214,375 |
+| Provider-estimated cost | $0.029367 |
+| Harness failure rate | 0% |
+
+This satisfies the requirement to record a complete baseline, but the balanced recommendation is not ready to close Phase 7. Only one of 25 authored patches applied; the other 24 had invalid unified-diff hunk counts. All 10 implementation tasks and four search tasks also ended without a final answer after spending their last available model turn on tools.
+
+Profile revision 5 addresses those observed contract failures by adding an exact, single-match `replace_text` tool and withholding tools on the final model turn. A fresh paid run is required to measure whether those changes improve quality; do not compare the corrected implementation metrics directly with the invalid hidden-check metrics from the older fingerprint.
