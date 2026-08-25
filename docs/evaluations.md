@@ -30,3 +30,18 @@ The first complete live baseline is recorded in [`balanced-2026-08-25.json`](../
 | Harness failure rate | 0% |
 
 This is a reproducible baseline, not evidence that the current balanced profile is a useful default. Search recall and implementation success are too low to close the Phase 7 recommendation criterion. Compare a revised profile or role contract against this artifact before changing the recommendation.
+
+## Rejected stronger-model candidate — 2026-08-25
+
+[`gpt5-mini-primary-search-2026-08-25.json`](../priv/evals/mvp-v1/results/gpt5-mini-primary-search-2026-08-25.json) overrides only the primary and search roles with `openai:gpt-5-mini`; the review role inherits the balanced recommendation. This directly exercises partial role override inheritance against the same suite fingerprint.
+
+| Metric | Balanced baseline | GPT-5 mini candidate |
+| --- | ---: | ---: |
+| Search relevant-file recall | 30% | 0% |
+| Review defect and location recall | 80% | 80% |
+| Implementation public and hidden pass rate | 50% | 50% |
+| Mean task latency | 8.42s | 10.92s |
+| Provider-estimated cost | $0.021951 | $0.059196 |
+| Harness failure rate | 0% | 0% |
+
+Reject this candidate: it is dominated by the balanced baseline on quality, latency, and cost. Its search traces consistently consumed the four-continuation budget on tool calls without producing a final answer. The implementation traces also confirm that model substitution alone does not resolve repeated invalid unified patches. Revise the versioned search and patch-use contracts before evaluating another model mapping.
