@@ -169,7 +169,7 @@ Restoring correction context produced the decisive improvement: nine of ten impl
 
 ## GPT-5.6 API candidates — 2026-08-25
 
-Three candidates compare GPT-5.6 Terra and Sol for primary and search while retaining `openai:gpt-4o-mini` for review. Kodo capability validation accepts both GPT-5.6 models for primary and search, but the current ReqLLM catalog does not declare JSON Schema support for either model, so neither can satisfy the review-role contract. ChatGPT-subscription routing was not used: the current adapter dispatches through the OpenAI API and does not yet implement the OAuth device authorization and account flow required by the Codex backend.
+Three candidates compare GPT-5.6 Terra and Sol for primary and search while retaining `openai:gpt-4o-mini` for review. At the time of these runs, review contract v4 required native JSON Schema metadata, which the current ReqLLM catalog does not declare for either GPT-5.6 model. Review contract v5, evaluated below, replaces that provider-mechanism requirement with schema-validated object output. ChatGPT-subscription routing was not used: the current adapter dispatches through the OpenAI API and does not yet implement the OAuth device authorization and account flow required by the Codex backend.
 
 | Metric | 4o-mini baseline | Terra primary/search | Sol primary, Terra search | Sol primary/search |
 | --- | ---: | ---: | ---: | ---: |
@@ -189,6 +189,28 @@ Three candidates compare GPT-5.6 Terra and Sol for primary and search while reta
 
 The artifacts are [`terra-primary-search-2026-08-25.json`](../test/evals/mvp-v1/results/terra-primary-search-2026-08-25.json), [`sol-primary-terra-search-2026-08-25.json`](../test/evals/mvp-v1/results/sol-primary-terra-search-2026-08-25.json), and [`sol-primary-search-2026-08-25.json`](../test/evals/mvp-v1/results/sol-primary-search-2026-08-25.json). The Terra-primary run lost implementation task 4 to an upstream OpenAI 503; its implementation rates are therefore over nine completed tasks and cannot establish a reliable primary recommendation.
 
-Terra materially improves search: both Terra runs found and cited every expected file and evidence item. Sol search produced the same recall, cited one more irrelevant file than the Sol-primary/Terra-search candidate, increased mean latency by 16%, and increased cost by 48%, so Sol is not justified for search. Sol primary is the first mapping to meet the shared 100% public and 90% hidden implementation targets. The resulting Sol-primary/Terra-search candidate is the strongest quality mapping, but it exceeds the mvp-v1 p95 latency ceiling and costs 27 times the balanced baseline; retain revision 8 as the balanced default and treat this candidate as evidence for a future quality-oriented profile.
+Terra materially improves search: both Terra runs found and cited every expected file and evidence item. Sol search produced the same recall, cited one more irrelevant file than the Sol-primary/Terra-search candidate, increased mean latency by 16%, and increased cost by 48%, so Sol is not justified for search. Sol primary is the first mapping to meet the shared 100% public and 90% hidden implementation targets. The resulting Sol-primary/Terra-search candidate is the strongest quality mapping, but it exceeds the mvp-v1 p95 latency ceiling and costs 27 times the balanced baseline; retain revision 8's balanced model selection and treat this candidate as evidence for a future quality-oriented profile.
 
 The reports record `reasoning: none`, which currently means that Kodo omitted an explicit reasoning-effort parameter. GPT-5.6 still used its provider-default reasoning and reported 4,968–8,524 reasoning tokens. ReqLLM's current model metadata does not advertise supported effort values for Terra or Sol, so Kodo capability validation rejects explicit `minimal` through `max` settings. Future GPT-5.6 comparisons must resolve this catalog/adapter gap before claiming an explicit reasoning level.
+
+## GPT-5.6 review candidates — 2026-08-25
+
+Review contract v5 requires schema-validated object generation rather than one provider-specific encoding. ReqLLM uses native JSON Schema where model metadata supports it and a forced strict tool call otherwise; its strict output validator applies to both paths. Direct live probes returned valid objects for Terra and Sol, and both models completed the full suite when assigned only to review.
+
+| Metric | 4o-mini baseline | Terra review | Sol review |
+| --- | ---: | ---: | ---: |
+| Completed tasks | 30 | 30 | 30 |
+| Review defect recall | 90% | 100% | 100% |
+| Review location accuracy | 90% | 100% | 100% |
+| Review severity accuracy | 80% | 80% | 80% |
+| Review false positives | 2 | 0 | 0 |
+| Implementation public-check pass rate | 90% | 80% | 80% |
+| Implementation hidden-check pass rate | 80% | 60% | 70% |
+| Implementation clean-review rate | 10% | 80% | 80% |
+| Mean / p95 task latency | 14.11s / 45.00s | 10.25s / 39.55s | 13.37s / 53.35s |
+| Provider-estimated cost | $0.038445 | $0.090465 | $0.233356 |
+| Harness failure rate | 0% | 0% | 0% |
+
+The artifacts are [`terra-review-2026-08-25.json`](../test/evals/mvp-v1/results/terra-review-2026-08-25.json) and [`sol-review-2026-08-25.json`](../test/evals/mvp-v1/results/sol-review-2026-08-25.json). Both GPT-5.6 reviewers were perfectly precise on the standalone review tasks, but they marked eight of ten implementation diffs clean and did not recover all failing implementations. Because those implementation tasks also rerun the stochastic `gpt-4o-mini` primary, the lower implementation rates cannot be attributed solely to review; they do show that neither review candidate has evidence to replace the balanced reviewer. Terra matched Sol's standalone review quality at 39% of its cost and lower latency, making Terra the preferred GPT-5.6 review candidate for further repetitions.
+
+Profile revision 9 adopts review contract v5 while preserving the balanced `gpt-4o-mini` model selection. Since `gpt-4o-mini` advertises native JSON Schema, its request path is unchanged; the revision broadens valid user overrides without changing the accepted revision 8 benchmark baseline.

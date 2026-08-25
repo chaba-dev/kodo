@@ -52,11 +52,15 @@ a replacement for the accepted balanced baseline. The detailed comparison and
 reasoning-configuration caveat are recorded in
 link:../../../docs/evaluations.md[the evaluation analysis].
 
-Terra and Sol cannot currently be assigned to review through the normal Kodo
-capability boundary because the bundled model catalog does not declare JSON
-Schema support for them. ChatGPT-subscription evaluation additionally requires
-the OpenAI Codex OAuth device authorization and account flow, which is not part
-of this suite iteration.
+Review contract v5 allows both models to use ReqLLM's schema-validated strict-tool
+fallback when native JSON Schema metadata is absent. Both completed review
+candidate runs with 100% defect and location recall and no false positives.
+Terra matched Sol's review quality with lower cost and latency, so it is the
+preferred GPT-5.6 review candidate for further repetitions. Neither replaces
+the balanced reviewer because the complete runs did not preserve the accepted
+implementation thresholds. ChatGPT-subscription evaluation additionally
+requires the OpenAI Codex OAuth device authorization and account flow, which is
+not part of this suite iteration.
 
 [[mvp-v1-artifacts]]
 == Artifacts

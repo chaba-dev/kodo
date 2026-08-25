@@ -7,7 +7,9 @@
   "candidate_results": [
     "results/terra-primary-search-2026-08-25.json",
     "results/sol-primary-terra-search-2026-08-25.json",
-    "results/sol-primary-search-2026-08-25.json"
+    "results/sol-primary-search-2026-08-25.json",
+    "results/terra-review-2026-08-25.json",
+    "results/sol-review-2026-08-25.json"
   ],
   "regression_thresholds": {
     "completed_tasks": 30,
