@@ -14,7 +14,8 @@ defmodule Kodo.Agent.EvaluationSuiteTest do
              "search" => 10
            }
 
-    assert EvaluationSuite.fingerprint(suite) =~ ~r/^[0-9a-f]{64}$/
+    assert EvaluationSuite.fingerprint(suite) ==
+             "e73ad35df41b5defd6d390e3b941066a42bf6b1fd2bb06ba712271fa7b0881d9"
   end
 
   test "rejects duplicate or incomplete task sets" do

@@ -1,13 +1,13 @@
 defmodule Kodo.Agent.EvaluationSuite do
   @moduledoc "Loads and validates the pinned MVP evaluation-suite artifact."
 
-  @suite_path "priv/evals/mvp-v1/suite.json"
+  @suite_path Path.expand("../../../test/evals/mvp-v1/suite.json", __DIR__)
+  @external_resource @suite_path
   @task_types ~w(search review implementation)
   @tasks_per_type 10
 
   def load! do
-    path = Application.app_dir(:kodo, @suite_path)
-    suite = path |> File.read!() |> Jason.decode!()
+    suite = @suite_path |> File.read!() |> Jason.decode!()
     validate!(suite)
   end
 

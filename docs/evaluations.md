@@ -1,6 +1,6 @@
 # MVP evaluations
 
-The pinned `mvp-v1` suite contains 10 search, 10 review, and 10 implementation tasks. Fixtures are purpose-built and stored in [`priv/evals/mvp-v1/suite.json`](../priv/evals/mvp-v1/suite.json), including hidden implementation checks that must not be exposed to the agent under evaluation.
+The pinned `mvp-v1` suite contains 10 search, 10 review, and 10 implementation tasks. Fixtures are purpose-built and stored in [`test/evals/mvp-v1/suite.json`](../test/evals/mvp-v1/suite.json), including hidden implementation checks that must not be exposed to the agent under evaluation.
 
 Validate the suite and print the artifact fingerprint with:
 
@@ -10,11 +10,11 @@ mix kodo.eval.validate
 
 Every recorded run must include the printed SHA-256 fingerprint, the fully resolved role mapping, role contract and toolset versions, event trace, latency, token usage, estimated cost, and per-task metrics described in `docs/mvp.org`. Materialize only `fixture.files` before an implementation attempt; add `fixture.hidden_files` immediately before hidden verification.
 
-Results belong in `priv/evals/mvp-v1/results/<mapping>-<date>.json`. Do not record a recommendation from structural validation alone: all 30 tasks must have actual outcomes, and failures or skipped tasks must remain visible.
+Results belong in `test/evals/mvp-v1/results/<mapping>-<date>.json`. Do not record a recommendation from structural validation alone: all 30 tasks must have actual outcomes, and failures or skipped tasks must remain visible.
 
 ## Balanced baseline — 2026-08-25
 
-The first live baseline is recorded in [`balanced-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-2026-08-25.json) for suite fingerprint `9fe83a629c90af1c663f700ec291140d1a04d4cceef37727917a14a3fea36599`. It ran all roles on `openai:gpt-4o-mini` with no reasoning and completed all 30 tasks without reported harness errors.
+The first live baseline is recorded in [`balanced-2026-08-25.json`](../test/evals/mvp-v1/results/balanced-2026-08-25.json) for suite fingerprint `9fe83a629c90af1c663f700ec291140d1a04d4cceef37727917a14a3fea36599`. It ran all roles on `openai:gpt-4o-mini` with no reasoning and completed all 30 tasks without reported harness errors.
 
 The old suite invoked hidden checks as `elixir -r lib/example.ex test/public_test.exs test/hidden_test.exs`. Elixir executed the public test script and treated the hidden test path as a command-line argument, so the hidden tests did not run. The recorded hidden-check pass rate is invalid. Public-check, search, review, latency, usage, and cost results remain usable.
 
@@ -36,7 +36,7 @@ This artifact is historical evidence, not a valid complete baseline and not evid
 
 ## Rejected stronger-model candidate — 2026-08-25
 
-[`gpt5-mini-primary-search-2026-08-25.json`](../priv/evals/mvp-v1/results/gpt5-mini-primary-search-2026-08-25.json) overrides only the primary and search roles with `openai:gpt-5-mini`; the review role inherits the balanced recommendation. This directly exercises partial role override inheritance against the same suite fingerprint.
+[`gpt5-mini-primary-search-2026-08-25.json`](../test/evals/mvp-v1/results/gpt5-mini-primary-search-2026-08-25.json) overrides only the primary and search roles with `openai:gpt-5-mini`; the review role inherits the balanced recommendation. This directly exercises partial role override inheritance against the same suite fingerprint.
 
 This run has the same hidden-check defect as the balanced artifact. Its hidden implementation metric is invalid; its public implementation, search, review, latency, usage, and cost results remain usable.
 
@@ -56,7 +56,7 @@ Reject this candidate based on the still-valid comparison: it reduced search rec
 
 The hidden commands now explicitly require the public test file before executing the hidden test script. The corrected suite fingerprint is `e73ad35df41b5defd6d390e3b941066a42bf6b1fd2bb06ba712271fa7b0881d9`.
 
-The valid corrected baseline is recorded in [`balanced-corrected-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-corrected-2026-08-25.json). It ran profile revision 4 at revision `91a7eb71f865a20375b9f78157cd31e0b3936e81`, completed all 30 tasks, and executed both public and hidden implementation checks.
+The valid corrected baseline is recorded in [`balanced-corrected-2026-08-25.json`](../test/evals/mvp-v1/results/balanced-corrected-2026-08-25.json). It ran profile revision 4 at revision `91a7eb71f865a20375b9f78157cd31e0b3936e81`, completed all 30 tasks, and executed both public and hidden implementation checks.
 
 | Metric | Corrected result |
 | --- | ---: |
@@ -78,7 +78,7 @@ Profile revision 5 addresses those observed contract failures by adding an exact
 
 ## Balanced profile revision 5 — 2026-08-25
 
-[`balanced-profile-v5-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-profile-v5-2026-08-25.json) evaluates profile revision 5 against the corrected suite at revision `634f610d154dd377634ff3070c76fa96aefda292`.
+[`balanced-profile-v5-2026-08-25.json`](../test/evals/mvp-v1/results/balanced-profile-v5-2026-08-25.json) evaluates profile revision 5 against the corrected suite at revision `634f610d154dd377634ff3070c76fa96aefda292`.
 
 | Metric | Revision 4 | Revision 5 |
 | --- | ---: | ---: |
@@ -102,7 +102,7 @@ Trace inspection also found two harness divergences from the runner contract: ev
 
 ## Harness-corrected profile revision 5 — 2026-08-25
 
-[`balanced-profile-v5-harness-corrected-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-profile-v5-harness-corrected-2026-08-25.json) evaluates the same profile after aligning evaluation reads, root working directories, and final-diff review context with the runner contract. It completed all 30 tasks without harness errors at revision `e72a38892ac1b39669fa834d08c01460deb01290`.
+[`balanced-profile-v5-harness-corrected-2026-08-25.json`](../test/evals/mvp-v1/results/balanced-profile-v5-harness-corrected-2026-08-25.json) evaluates the same profile after aligning evaluation reads, root working directories, and final-diff review context with the runner contract. It completed all 30 tasks without harness errors at revision `e72a38892ac1b39669fa834d08c01460deb01290`.
 
 | Metric | Earlier revision 5 | Harness-corrected revision 5 |
 | --- | ---: | ---: |
@@ -127,7 +127,7 @@ Trace inspection found two remaining contract issues. The synchronous evaluation
 
 ## Balanced profile revision 6 — 2026-08-25
 
-[`balanced-profile-v6-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-profile-v6-2026-08-25.json) completed all 30 tasks without harness errors. Search file/evidence recall improved to 85%/80%, and standalone review reached 100% defect and location recall with one false positive. Implementation regressed to 60% public and 40% hidden success, while no implementation received a clean final review. Mean latency rose to 16.67 seconds, total tokens to 349,685, and provider-estimated cost to $0.048249.
+[`balanced-profile-v6-2026-08-25.json`](../test/evals/mvp-v1/results/balanced-profile-v6-2026-08-25.json) completed all 30 tasks without harness errors. Search file/evidence recall improved to 85%/80%, and standalone review reached 100% defect and location recall with one false positive. Implementation regressed to 60% public and 40% hidden success, while no implementation received a clean final review. Mean latency rose to 16.67 seconds, total tokens to 349,685, and provider-estimated cost to $0.048249.
 
 The stricter review prompt overcorrected. It raised findings on every implementation, including correct implementations, speculative performance suggestions, and a finding whose text explicitly concluded that no change was needed. One review recommended reverting the required `add/2` fix, turning a passing implementation back into subtraction. Primary traces also spent 11 calls on malformed `apply_patch` requests despite 22 successful exact replacements, and frequently substituted disallowed `mix` commands or invented working directories for the exact public command.
 
@@ -135,7 +135,7 @@ Profile revision 7 responds directly: review contract version 4 makes the origin
 
 ## Balanced profile revision 7 — 2026-08-25
 
-[`balanced-profile-v7-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-profile-v7-2026-08-25.json) completed all 30 tasks without errors. Removing `apply_patch` reduced mean latency from 16.67 to 13.46 seconds, tokens from 349,685 to 285,099, and cost from $0.048249 to $0.039358. Review clean rate recovered from 0% to 30%, but search file/evidence recall fell to 73.3%/65% and implementation fell to 50% public and 30% hidden success.
+[`balanced-profile-v7-2026-08-25.json`](../test/evals/mvp-v1/results/balanced-profile-v7-2026-08-25.json) completed all 30 tasks without errors. Removing `apply_patch` reduced mean latency from 16.67 to 13.46 seconds, tokens from 349,685 to 285,099, and cost from $0.048249 to $0.039358. Review clean rate recovered from 0% to 30%, but search file/evidence recall fell to 73.3%/65% and implementation fell to 50% public and 30% hidden success.
 
 Trace inspection identified a concrete evaluation bug behind the implementation regression: correction turns received only review findings, not the original task, allowed paths, or exact public command. Consequently, every correction verification attempt used a disallowed command or working directory. The reviewer also continued to return internally contradictory findings such as “the code is correct” with “No change needed,” despite the prompt prohibition.
 
@@ -143,7 +143,7 @@ Profile revision 8 retains the cheaper toolset but restores the complete impleme
 
 ## Accepted balanced profile revision 8 — 2026-08-25
 
-[`balanced-profile-v8-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-profile-v8-2026-08-25.json) completed all 30 tasks without errors and is the accepted Phase 7 recommendation.
+[`balanced-profile-v8-2026-08-25.json`](../test/evals/mvp-v1/results/balanced-profile-v8-2026-08-25.json) completed all 30 tasks without errors and is the accepted Phase 7 recommendation.
 
 | Metric | Revision 7 | Revision 8 |
 | --- | ---: | ---: |
