@@ -28,6 +28,9 @@ The catalog separates shared metric semantics from suite-specific evidence:
   contains the tasks and expected evidence used by the evaluator.
 * An *accepted result* supplies the measured baseline that must satisfy every
   regression threshold in its suite contract.
+* A *candidate result* preserves a comparison run against the suite fingerprint.
+  Candidates are integrity-checked but do not become regression gates until one
+  is explicitly selected as the accepted result.
 
 Metric meaning and targets belong to named standards so future suites can reuse
 them. If metric semantics or cross-generation targets change incompatibly, add
@@ -51,9 +54,10 @@ test/evals/
         `-- <mapping>-<date>.json
 ----
 
-`benchmark_test.exs` validates all standards and registered suites. It also
-checks that each suite's accepted result has the registered fingerprint and
-meets every regression threshold.
+`benchmark_test.exs` validates all standards and registered suites. It checks
+that each accepted result has the registered fingerprint and meets every
+regression threshold. Registered candidate results must have the same suite
+fingerprint and task count, but their scores are not acceptance gates.
 
 [[benchmark-lifecycle]]
 // tag::reference-lifecycle[]

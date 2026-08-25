@@ -4,6 +4,11 @@
   "suite_fingerprint": "e73ad35df41b5defd6d390e3b941066a42bf6b1fd2bb06ba712271fa7b0881d9",
   "standard": "quality-v1",
   "baseline_result": "results/balanced-profile-v8-2026-08-25.json",
+  "candidate_results": [
+    "results/terra-primary-search-2026-08-25.json",
+    "results/sol-primary-terra-search-2026-08-25.json",
+    "results/sol-primary-search-2026-08-25.json"
+  ],
   "regression_thresholds": {
     "completed_tasks": 30,
     "harness_failure_rate": 0,

@@ -54,6 +54,7 @@ defmodule Kodo.EvaluationBenchmarkTest do
     assert contract["suite"] == baseline["suite"]["name"]
     assert contract["suite_fingerprint"] == baseline["suite"]["fingerprint"]
     assert criterion_ids == threshold_ids
+    assert_recorded_candidates(contract, contract_path, baseline["metrics"]["task_count"])
 
     Enum.each(criteria, fn criterion ->
       value = get_in(baseline, criterion["metric_path"])
@@ -66,6 +67,21 @@ defmodule Kodo.EvaluationBenchmarkTest do
       assert meets_threshold?(value, criterion["direction"], threshold),
              "#{contract["suite"]} #{criterion["id"]} value #{value} does not meet " <>
                "#{criterion["direction"]} threshold #{threshold}"
+    end)
+  end
+
+  defp assert_recorded_candidates(contract, contract_path, task_count) do
+    Enum.each(contract["candidate_results"] || [], fn result_path ->
+      result =
+        result_path
+        |> Path.expand(Path.dirname(contract_path))
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert result["suite"]["name"] == contract["suite"]
+      assert result["suite"]["fingerprint"] == contract["suite_fingerprint"]
+      assert result["metrics"]["task_count"] == task_count
+      assert length(result["tasks"]) == task_count
     end)
   end
 

@@ -166,3 +166,29 @@ Profile revision 8 retains the cheaper toolset but restores the complete impleme
 | Harness failure rate | 0% | 0% |
 
 Restoring correction context produced the decisive improvement: nine of ten implementations passed public verification and eight passed hidden verification, while every correction command used the allowed exact command rather than being rejected. The remaining implementation failures were slug whitespace handling and path parent-traversal handling. Final review remains overcritical and often reports optional or unsupported concerns, but the primary now checks those claims against the task and preserves verified behavior; standalone review still achieved 90% defect/location recall. Further review-precision tuning can proceed independently and does not block the Phase 7 mapping recommendation.
+
+## GPT-5.6 API candidates — 2026-08-25
+
+Three candidates compare GPT-5.6 Terra and Sol for primary and search while retaining `openai:gpt-4o-mini` for review. Kodo capability validation accepts both GPT-5.6 models for primary and search, but the current ReqLLM catalog does not declare JSON Schema support for either model, so neither can satisfy the review-role contract. ChatGPT-subscription routing was not used: the current adapter dispatches through the OpenAI API and does not yet implement the OAuth device authorization and account flow required by the Codex backend.
+
+| Metric | 4o-mini baseline | Terra primary/search | Sol primary, Terra search | Sol primary/search |
+| --- | ---: | ---: | ---: | ---: |
+| Completed tasks | 30 | 29 | 30 | 30 |
+| Search relevant-file recall | 86.7% | 100% | 100% | 100% |
+| Search evidence-citation recall | 55% | 100% | 100% | 100% |
+| Search irrelevant files | 5 | 7 | 6 | 7 |
+| Review defect/location recall | 90% | 100% | 100% | 100% |
+| Review severity accuracy | 80% | 80% | 90% | 90% |
+| Review false positives | 2 | 1 | 1 | 1 |
+| Implementation public-check pass rate | 90% | 88.9% | 100% | 100% |
+| Implementation hidden-check pass rate | 80% | 77.8% | 90% | 90% |
+| Implementation scope compliance | 100% | 100% | 100% | 100% |
+| Mean / p95 task latency | 14.11s / 45.00s | 12.91s / 39.98s | 16.71s / 59.62s | 19.45s / 53.40s |
+| Provider-estimated cost | $0.038445 | $0.403916 | $1.033123 | $1.524322 |
+| Harness failure rate | 0% | 3.3% | 0% | 0% |
+
+The artifacts are [`terra-primary-search-2026-08-25.json`](../test/evals/mvp-v1/results/terra-primary-search-2026-08-25.json), [`sol-primary-terra-search-2026-08-25.json`](../test/evals/mvp-v1/results/sol-primary-terra-search-2026-08-25.json), and [`sol-primary-search-2026-08-25.json`](../test/evals/mvp-v1/results/sol-primary-search-2026-08-25.json). The Terra-primary run lost implementation task 4 to an upstream OpenAI 503; its implementation rates are therefore over nine completed tasks and cannot establish a reliable primary recommendation.
+
+Terra materially improves search: both Terra runs found and cited every expected file and evidence item. Sol search produced the same recall, cited one more irrelevant file than the Sol-primary/Terra-search candidate, increased mean latency by 16%, and increased cost by 48%, so Sol is not justified for search. Sol primary is the first mapping to meet the shared 100% public and 90% hidden implementation targets. The resulting Sol-primary/Terra-search candidate is the strongest quality mapping, but it exceeds the mvp-v1 p95 latency ceiling and costs 27 times the balanced baseline; retain revision 8 as the balanced default and treat this candidate as evidence for a future quality-oriented profile.
+
+The reports record `reasoning: none`, which currently means that Kodo omitted an explicit reasoning-effort parameter. GPT-5.6 still used its provider-default reasoning and reported 4,968–8,524 reasoning tokens. ReqLLM's current model metadata does not advertise supported effort values for Terra or Sol, so Kodo capability validation rejects explicit `minimal` through `max` settings. Future GPT-5.6 comparisons must resolve this catalog/adapter gap before claiming an explicit reasoning level.

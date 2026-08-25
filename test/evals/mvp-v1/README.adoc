@@ -36,6 +36,28 @@ evidence citation and final-review precision remain below their `quality-v1`
 targets and should improve without regressing implementation correctness,
 scope, harness reliability, cost, or latency.
 
+[[mvp-v1-gpt-5-6-candidates]]
+== GPT-5.6 candidates
+
+Recorded OpenAI API comparisons cover Terra primary/search, Sol primary with
+Terra search, and Sol primary/search while retaining `gpt-4o-mini` for the
+structured review role. Terra achieved complete search file and evidence recall.
+Sol primary reached 100% public and 90% hidden implementation success. Sol did
+not improve search over Terra and increased both cost and latency.
+
+The Sol-primary/Terra-search mapping is the strongest observed quality profile,
+but it costs substantially more and exceeds the suite's p95 latency regression
+threshold. It is therefore evidence for a future quality-oriented profile, not
+a replacement for the accepted balanced baseline. The detailed comparison and
+reasoning-configuration caveat are recorded in
+link:../../../docs/evaluations.md[the evaluation analysis].
+
+Terra and Sol cannot currently be assigned to review through the normal Kodo
+capability boundary because the bundled model catalog does not declare JSON
+Schema support for them. ChatGPT-subscription evaluation additionally requires
+the OpenAI Codex OAuth device authorization and account flow, which is not part
+of this suite iteration.
+
 [[mvp-v1-artifacts]]
 == Artifacts
 
