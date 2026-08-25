@@ -92,6 +92,52 @@ defmodule Kodo.Agent.EvaluationRunnerTest do
              })
   end
 
+  test "workspace reads use the runner's line-based offset contract" do
+    root = Path.join(System.tmp_dir!(), "kodo-eval-read-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    File.write!(Path.join(root, "example.txt"), "one\ntwo\nthree\n")
+
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert %{
+             "content" => "two",
+             "offset" => 1,
+             "next_offset" => 2,
+             "truncated" => true
+           } =
+             EvaluationRunner.read_file(root, %{
+               "path" => "example.txt",
+               "offset" => 1,
+               "limit" => 1
+             })
+
+    assert %{
+             "content" => "three",
+             "offset" => 2,
+             "next_offset" => nil,
+             "truncated" => false
+           } =
+             EvaluationRunner.read_file(root, %{
+               "path" => "example.txt",
+               "offset" => 2,
+               "limit" => 2
+             })
+  end
+
+  test "workspace commands accept the root's equivalent dot-slash cwd" do
+    root = Path.join(System.tmp_dir!(), "kodo-eval-command-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert %{"status" => 0, "output" => "verified"} =
+             EvaluationRunner.run_command(
+               root,
+               %{"command" => "printf verified", "cwd" => "./", "timeout_ms" => 1_000},
+               ["printf verified"]
+             )
+  end
+
   test "aggregate records quality, latency, usage, cost availability, and failure rate" do
     tasks = [
       %{

@@ -331,7 +331,7 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   defp execute_tool("apply_patch", args, root, _), do: apply_patch(root, args["patch"])
   defp execute_tool("replace_text", args, root, _), do: replace_text(root, args)
-  defp execute_tool("start_command", args, root, commands), do: command(root, args, commands)
+  defp execute_tool("start_command", args, root, commands), do: run_command(root, args, commands)
 
   defp execute_tool(name, _args, _root, _), do: %{"error" => "unsupported tool #{name}"}
 
@@ -353,19 +353,30 @@ defmodule Kodo.Agent.EvaluationRunner do
     end
   end
 
-  defp read_file(root, args) do
+  @doc false
+  def read_file(root, args) do
     with {:ok, path} <- confined(root, args["path"]), {:ok, body} <- File.read(path) do
-      offset = min(args["offset"] || 0, byte_size(body))
-      limit = min(args["limit"] || @max_output, @max_output)
+      offset = args["offset"] || 0
+      limit = args["limit"] || @max_output
+      lines = body |> String.split(~r/\r\n|\n/, trim: false) |> drop_trailing_empty()
+      content = lines |> Enum.slice(offset, limit) |> Enum.join("\n")
+      next_line = offset + limit
 
       %{
-        "content" => binary_part(body, offset, min(limit, byte_size(body) - offset)),
-        "truncated" => byte_size(body) > offset + limit
+        "content" => content,
+        "offset" => offset,
+        "next_offset" => if(next_line < length(lines), do: next_line),
+        "truncated" => next_line < length(lines)
       }
     else
       error -> error_map(error)
     end
   end
+
+  defp drop_trailing_empty([]), do: []
+
+  defp drop_trailing_empty(lines),
+    do: if(List.last(lines) == "", do: List.delete_at(lines, -1), else: lines)
 
   @doc false
   def search_workspace(root, args) do
@@ -433,10 +444,11 @@ defmodule Kodo.Agent.EvaluationRunner do
     end
   end
 
-  defp command(root, args, commands) do
+  @doc false
+  def run_command(root, args, commands) do
     command = String.trim(args["command"] || "")
 
-    if command in commands and args["cwd"] in ["", "."] do
+    if command in commands and args["cwd"] in ["", ".", "./"] do
       [executable | argv] = OptionParser.split(command)
       env = [{"HTTP_PROXY", ""}, {"HTTPS_PROXY", ""}, {"ALL_PROXY", ""}, {"NO_PROXY", "*"}]
       {output, status} = System.cmd(executable, argv, cd: root, env: env, stderr_to_stdout: true)
