@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const LIMITS_VERSION: u16 = 1;
 pub const MAX_AUTHORITY_LEASE_MS: u64 = 15_000;
 const MAX_CONNECTED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024 - 4 * 1024;

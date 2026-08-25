@@ -66,7 +66,7 @@ defmodule KodoWeb.ModelSettingsControllerTest do
       platform: "linux",
       architecture: "x86_64",
       runner_version: "0.1.0",
-      protocol_version: 4,
+      protocol_version: 5,
       capabilities: []
     }
   end

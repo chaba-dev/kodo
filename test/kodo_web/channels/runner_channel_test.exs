@@ -10,7 +10,7 @@ defmodule KodoWeb.RunnerChannelTest do
     platform: "linux",
     architecture: "x86_64",
     runner_version: "0.1.0",
-    protocol_version: 4,
+    protocol_version: 5,
     capabilities: []
   }
 
@@ -33,14 +33,14 @@ defmodule KodoWeb.RunnerChannelTest do
     assert {:ok, socket} = connect(RunnerSocket, %{"token" => token}, connect_options())
 
     assert {:error, %{reason: _}} =
-             subscribe_and_join(socket, "runner:other", %{"protocol_version" => 4})
+             subscribe_and_join(socket, "runner:other", %{"protocol_version" => 5})
 
     assert {:ok, %{limits: limits}, channel} =
-             subscribe_and_join(socket, "runner:#{runner.id}", %{"protocol_version" => 4})
+             subscribe_and_join(socket, "runner:#{runner.id}", %{"protocol_version" => 5})
 
     assert limits == RunnerProtocol.limits()
 
-    request = %{"protocol_version" => 4, "request_id" => Ecto.UUID.generate()}
+    request = %{"protocol_version" => 5, "request_id" => Ecto.UUID.generate()}
     assert :ok = Runners.dispatch(runner.id, request)
     assert_push "tool_request", ^request
 
@@ -69,10 +69,10 @@ defmodule KodoWeb.RunnerChannelTest do
     topic = "runner:#{runner.id}"
 
     assert {:ok, _, _channel} =
-             subscribe_and_join(first_socket, topic, %{"protocol_version" => 4})
+             subscribe_and_join(first_socket, topic, %{"protocol_version" => 5})
 
     assert {:error, %{reason: "runner already connected"}} =
-             subscribe_and_join(second_socket, topic, %{"protocol_version" => 4})
+             subscribe_and_join(second_socket, topic, %{"protocol_version" => 5})
   end
 
   defp connect_options do

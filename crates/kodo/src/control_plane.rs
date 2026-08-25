@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn phoenix_frame_round_trips() {
-        let input = r#"["1","2","runner:abc","tool_request",{"protocol_version":4}]"#;
+        let input = r#"["1","2","runner:abc","tool_request",{"protocol_version":5}]"#;
         let frame = Frame::parse(input).unwrap();
         assert_eq!(frame.topic, "runner:abc");
         assert_eq!(frame.event, "tool_request");

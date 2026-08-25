@@ -47,7 +47,7 @@ defmodule Kodo.Test.DurableTestRunner do
           "runner_responses:#{runner_id}",
           {:runner_tool_response, runner_id,
            %{
-             "protocol_version" => 4,
+             "protocol_version" => 5,
              "request_id" => request["request_id"],
              "status" => "success",
              "response" => %{"result" => "files_changed", "paths" => []}
@@ -67,7 +67,7 @@ defmodule Kodo.Test.DurableTestRunner do
       "runner_responses:#{runner_id}",
       {:runner_tool_response, runner_id,
        %{
-         "protocol_version" => 4,
+         "protocol_version" => 5,
          "request_id" => request["request_id"],
          "status" => "success",
          "response" => %{"result" => "output", "content" => "clean diff", "truncated" => false}

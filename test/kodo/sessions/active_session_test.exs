@@ -25,7 +25,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 4,
+        protocol_version: 5,
         capabilities: []
       })
 
@@ -769,7 +769,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
       "runner_responses:#{runner_id}",
       {:runner_tool_response, runner_id,
        %{
-         "protocol_version" => 4,
+         "protocol_version" => 5,
          "request_id" => request["request_id"],
          "status" => "success",
          "response" => response

@@ -6,7 +6,7 @@ defmodule Kodo.RunnerProtocol do
   transport constants in sync when changing them.
   """
 
-  @version 4
+  @version 5
   @limits_version 1
   @authority_lease_ttl_ms 15_000
   @token_salt "runner socket v1"

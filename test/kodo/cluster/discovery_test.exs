@@ -37,7 +37,7 @@ defmodule Kodo.Cluster.DiscoveryTest do
     runner_id = Ecto.UUID.generate()
     :ok = Discovery.join_runner(runner_id)
 
-    request = %{"protocol_version" => 4, "request_id" => Ecto.UUID.generate()}
+    request = %{"protocol_version" => 5, "request_id" => Ecto.UUID.generate()}
     lease = %{"session_id" => Ecto.UUID.generate(), "ownership_epoch" => 1, "ttl_ms" => 15_000}
 
     assert Registry.lookup(Kodo.RunnerRegistry, runner_id) == []
