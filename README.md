@@ -1,23 +1,79 @@
 # Kodo コード
 
-WIP
+Kodo is a durable coding-agent control plane built with Phoenix and a confined
+Rust workspace runner. The MVP supports a shared CLI and LiveView session,
+approval policies, resumable command execution, final-diff review, and durable
+replay after a client or server restart.
 
-## CLI sessions
+## Install from source
 
-Create an agent token with `POST /api/auth/token`, then run Kodo from the Git
-worktree. The CLI registers and hosts that worktree's local runner for the
-duration of the command:
+Kodo currently ships from source. Linux and macOS require:
+
+- Erlang/OTP 28 and Elixir 1.20;
+- stable Rust (the Nix shell pins Rust 1.96);
+- PostgreSQL 17;
+- Git, `ripgrep`, and `jq`.
+
+Nix users can enter the complete development shell with `nix develop`.
+Otherwise install those prerequisites with the platform package manager, then
+run:
 
 ```sh
-export KODO_TOKEN="..."
-cargo run -p kodo -- start "Fix the failing greeting test"
+git clone https://github.com/chaba-dev/kodo.git
+cd kodo
+mix local.hex --force
+mix local.rebar --force
+mix deps.get
+docker compose up -d db
+mix setup
+cargo build --release -p kodo
+```
+
+The CLI binary is `target/release/kodo`. Add it to `PATH` or invoke it by that
+path. Start the Phoenix control plane with `mix phx.server`; it listens on
+`http://localhost:4451` in development and uses the PostgreSQL instance exposed
+by `docker compose` on port 5435.
+
+## Configure a model provider
+
+The balanced MVP profile uses OpenAI `gpt-4o-mini` for its primary, search, and
+review roles. Export the provider credential before starting Phoenix so ReqLLM
+can dispatch those requests:
+
+```sh
+export OPENAI_API_KEY="..."
+mix phx.server
+```
+
+Keep provider keys only in the control-plane environment; do not pass them to
+the runner. `--model provider:model` overrides the primary role for one session.
+The selected model must support the role contract's tool use and context
+requirements, and its provider's standard ReqLLM credential must be configured.
+The live-provider smoke test below is the quickest configuration check.
+
+## Start and resume CLI sessions
+
+Create an account in the web application and request a 30-day agent token:
+
+```sh
+export KODO_TOKEN="$(curl --fail --silent --show-error \
+  -H 'content-type: application/json' \
+  -d '{"email":"you@example.com","password":"..."}' \
+  http://localhost:4451/api/auth/token | jq -r .token)"
+```
+
+Treat this bearer token as a secret. Run Kodo from the target Git worktree. The
+CLI registers and hosts that worktree's local runner for the command's duration:
+
+```sh
+kodo start "Fix the failing greeting test"
 ```
 
 Resume the same durable event stream later with the session identifier printed
 by the start command:
 
 ```sh
-cargo run -p kodo -- resume SESSION_ID
+kodo resume SESSION_ID
 ```
 
 Use `--approval-policy standard` (the default), `safe`, or `read-only`. The CLI
@@ -25,19 +81,27 @@ shows the exact command for approval-gated process requests, defaults approval
 prompts to denial, and sends an agent cancellation when interrupted with
 Ctrl-C. `KODO_CONTROL_PLANE` defaults to `http://localhost:4451`.
 
+Tool output is bounded. Both clients label partial results with
+`[output truncated]`; request a narrower read, search, or diff before drawing a
+conclusion. Failed patches are recorded as `tool_failed` events with Git's error
+and leave the failed patch unapplied.
+
 ## End-to-end tests
 
-The hermetic full-stack test runs with the normal Elixir suite. It starts a real HTTP/WebSocket
-server and Rust runner against a temporary Git repository while using a deterministic model:
+The hermetic full-stack test runs with the normal Elixir suite. It starts a real
+HTTP/WebSocket server and Rust runner against a temporary Git repository while
+using a deterministic model:
 
 ```sh
 mix test test/e2e/hermetic_full_stack_test.exs
 ```
 
-Pull requests can run the opt-in live OpenAI smoke test when a repository owner, member, or
-collaborator comments exactly `/live-smoke-test`. Configure a protected GitHub Environment named
-`live-smoke` with an `OPENAI_API_KEY` secret and, optionally, a `LIVE_LLM_MODEL` variable. Require
-environment approval and use a low-quota key: the workflow intentionally executes the requested PR
+The release-candidate workflow repeats this acceptance test on Linux and macOS.
+Pull requests can run the opt-in live OpenAI smoke test when a repository owner,
+member, or collaborator comments exactly `/live-smoke-test`. Configure a
+protected GitHub Environment named `live-smoke` with an `OPENAI_API_KEY` secret
+and, optionally, a `LIVE_LLM_MODEL` variable. Require environment approval and
+use a low-quota key: the workflow intentionally executes the requested PR
 revision with that credential.
 
 ## Deployment boundary
