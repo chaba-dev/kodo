@@ -7,7 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::{io::ErrorKind, io::Read, io::Seek, io::SeekFrom, io::Write};
+use std::{io::ErrorKind, io::Read, io::Write};
 
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
@@ -197,7 +197,7 @@ impl Workspace {
         let path = validate_relative(path.as_ref())?;
         let display_path = self.root.join(path);
         let mut options = CapOpenOptions::new();
-        options.read(true).write(true);
+        options.read(true);
         let mut file =
             self.root_dir
                 .open_with(path, &options)
@@ -233,13 +233,50 @@ impl Workspace {
                 limit,
             });
         }
-        file.seek(SeekFrom::Start(0))
-            .and_then(|_| file.set_len(0))
-            .and_then(|_| file.write_all(replacement.as_bytes()))
+
+        let permissions = file
+            .metadata()
             .map_err(|source| WorkspaceError::Io {
+                path: display_path.clone(),
+                source,
+            })?
+            .permissions();
+        drop(file);
+
+        let file_name = path
+            .file_name()
+            .expect("validated file path has a file name");
+        let temporary_name = format!(
+            ".{}.kodo-{}.tmp",
+            file_name.to_string_lossy(),
+            uuid::Uuid::new_v4()
+        );
+        let temporary_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(temporary_name);
+        let mut temporary_options = CapOpenOptions::new();
+        temporary_options.write(true).create_new(true);
+
+        let result = (|| {
+            let mut temporary = self
+                .root_dir
+                .open_with(&temporary_path, &temporary_options)?;
+            temporary.set_permissions(permissions)?;
+            temporary.write_all(replacement.as_bytes())?;
+            temporary.sync_all()?;
+            drop(temporary);
+            self.root_dir.rename(&temporary_path, &self.root_dir, path)
+        })();
+
+        if let Err(source) = result {
+            let _cleanup_result = self.root_dir.remove_file(&temporary_path);
+            return Err(WorkspaceError::Io {
                 path: display_path,
                 source,
-            })?;
+            });
+        }
+
         Ok(true)
     }
 
