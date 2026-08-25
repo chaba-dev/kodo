@@ -2,139 +2,24 @@
   "version": 1,
   "suite": "mvp-v1",
   "suite_fingerprint": "e73ad35df41b5defd6d390e3b941066a42bf6b1fd2bb06ba712271fa7b0881d9",
+  "standard": "quality-v1",
   "baseline_result": "results/balanced-profile-v8-2026-08-25.json",
-  "policy": {
-    "regression_threshold": "The accepted baseline and future recommendations must meet every regression threshold.",
-    "target": "Targets are intentionally more demanding and guide improvements; they are not release gates yet."
-  },
-  "criteria": [
-    {
-      "id": "completed_tasks",
-      "description": "Number of suite tasks that completed without an evaluation-harness error.",
-      "metric_path": ["metrics", "completed"],
-      "direction": "minimum",
-      "regression_threshold": 30,
-      "target": 30
-    },
-    {
-      "id": "harness_failure_rate",
-      "description": "Fraction of tasks lost to provider, evaluator, timeout, decoding, or infrastructure errors rather than an incorrect answer.",
-      "metric_path": ["metrics", "failure_rate"],
-      "direction": "maximum",
-      "regression_threshold": 0,
-      "target": 0
-    },
-    {
-      "id": "search_relevant_file_recall",
-      "description": "Mean fraction of known relevant files named in each search answer.",
-      "metric_path": ["metrics", "quality", "search", "relevant_file_recall"],
-      "direction": "minimum",
-      "regression_threshold": 0.85,
-      "target": 0.9
-    },
-    {
-      "id": "search_evidence_citation_recall",
-      "description": "Mean fraction of expected evidence cited with its path and either the expected line or text.",
-      "metric_path": ["metrics", "quality", "search", "evidence_citation_recall"],
-      "direction": "minimum",
-      "regression_threshold": 0.55,
-      "target": 0.85
-    },
-    {
-      "id": "search_irrelevant_files",
-      "description": "Total fixture files cited across search tasks that are not marked relevant.",
-      "metric_path": ["metrics", "quality", "search", "irrelevant_files"],
-      "direction": "maximum",
-      "regression_threshold": 5,
-      "target": 2
-    },
-    {
-      "id": "review_defect_recall",
-      "description": "Mean fraction of seeded defects reported at the exact expected path and line.",
-      "metric_path": ["metrics", "quality", "review", "defect_recall"],
-      "direction": "minimum",
-      "regression_threshold": 0.9,
-      "target": 0.95
-    },
-    {
-      "id": "review_location_accuracy",
-      "description": "Mean fraction of seeded findings located at the exact expected path and line; currently equivalent to defect recall.",
-      "metric_path": ["metrics", "quality", "review", "location_accuracy"],
-      "direction": "minimum",
-      "regression_threshold": 0.9,
-      "target": 0.95
-    },
-    {
-      "id": "review_severity_accuracy",
-      "description": "Mean fraction of seeded findings reported with the expected severity at the expected path.",
-      "metric_path": ["metrics", "quality", "review", "severity_accuracy"],
-      "direction": "minimum",
-      "regression_threshold": 0.8,
-      "target": 0.9
-    },
-    {
-      "id": "review_false_positives",
-      "description": "Total review findings that do not match a seeded defect at its expected path and line.",
-      "metric_path": ["metrics", "quality", "review", "false_positives"],
-      "direction": "maximum",
-      "regression_threshold": 2,
-      "target": 0
-    },
-    {
-      "id": "implementation_public_check_pass_rate",
-      "description": "Fraction of implementation tasks for which every check visible to the model passed.",
-      "metric_path": ["metrics", "quality", "implementation", "public_check_pass_rate"],
-      "direction": "minimum",
-      "regression_threshold": 0.9,
-      "target": 1
-    },
-    {
-      "id": "implementation_hidden_check_pass_rate",
-      "description": "Fraction of implementation tasks for which every withheld verification check passed.",
-      "metric_path": ["metrics", "quality", "implementation", "hidden_check_pass_rate"],
-      "direction": "minimum",
-      "regression_threshold": 0.8,
-      "target": 0.9
-    },
-    {
-      "id": "implementation_scope_compliance_rate",
-      "description": "Fraction of implementation tasks that changed only explicitly allowed paths.",
-      "metric_path": ["metrics", "quality", "implementation", "scope_compliance_rate"],
-      "direction": "minimum",
-      "regression_threshold": 1,
-      "target": 1
-    },
-    {
-      "id": "implementation_clean_review_rate",
-      "description": "Fraction of implementation tasks whose final structured review reported no actionable defect; tracked separately because reviewer precision is still improving.",
-      "metric_path": ["metrics", "quality", "implementation", "clean_review_rate"],
-      "direction": "minimum",
-      "regression_threshold": 0.1,
-      "target": 0.8
-    },
-    {
-      "id": "mean_latency_ms",
-      "description": "Mean end-to-end duration per evaluation task; the regression threshold allows approximately 20 percent variance over the accepted baseline.",
-      "metric_path": ["metrics", "latency_ms", "mean"],
-      "direction": "maximum",
-      "regression_threshold": 17000,
-      "target": 12000
-    },
-    {
-      "id": "p95_latency_ms",
-      "description": "95th-percentile end-to-end duration per evaluation task; the regression threshold allows approximately 20 percent variance over the accepted baseline.",
-      "metric_path": ["metrics", "latency_ms", "p95"],
-      "direction": "maximum",
-      "regression_threshold": 54000,
-      "target": 30000
-    },
-    {
-      "id": "estimated_cost_usd",
-      "description": "Provider-estimated cost for the complete 30-task run; the regression threshold allows approximately 20 percent variance over the accepted baseline.",
-      "metric_path": ["metrics", "estimated_cost_usd"],
-      "direction": "maximum",
-      "regression_threshold": 0.047,
-      "target": 0.04
-    }
-  ]
+  "regression_thresholds": {
+    "completed_tasks": 30,
+    "harness_failure_rate": 0,
+    "search_relevant_file_recall": 0.85,
+    "search_evidence_citation_recall": 0.55,
+    "search_irrelevant_files": 5,
+    "review_defect_recall": 0.9,
+    "review_location_accuracy": 0.9,
+    "review_severity_accuracy": 0.8,
+    "review_false_positives": 2,
+    "implementation_public_check_pass_rate": 0.9,
+    "implementation_hidden_check_pass_rate": 0.8,
+    "implementation_scope_compliance_rate": 1,
+    "implementation_clean_review_rate": 0.1,
+    "mean_latency_ms": 17000,
+    "p95_latency_ms": 54000,
+    "estimated_cost_usd": 0.047
+  }
 }

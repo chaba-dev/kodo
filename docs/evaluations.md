@@ -14,9 +14,9 @@ Results belong in `test/evals/mvp-v1/results/<mapping>-<date>.json`. Do not reco
 
 ## Benchmark criteria
 
-[`criteria.json`](../test/evals/mvp-v1/criteria.json) is the machine-readable quality contract for this suite. Each criterion defines its metric path, meaning, comparison direction, regression threshold, and improvement target. Regression thresholds are anchored to the accepted revision 8 result and are gates for future recommendations. Targets are deliberately stricter and guide subsequent quality work without making known MVP gaps—especially search evidence and final-review precision—look complete.
+The top-level [`criteria.json`](../test/evals/criteria.json) is the machine-readable benchmark catalog. Its named, immutable standards define metric paths, meanings, comparison directions, and improvement targets shared by suite generations. Each registered suite has a smaller contract—such as [`mvp-v1/criteria.json`](../test/evals/mvp-v1/criteria.json)—that references a standard and defines fingerprint-bound regression thresholds anchored to its accepted result.
 
-`test/evals/benchmark_test.exs` validates the criteria contract and verifies that the accepted baseline meets every regression threshold. When a better result is accepted, update `baseline_result` and raise thresholds where the new evidence supports doing so; thresholds must not be lowered merely to admit a regressing candidate. Cost and latency thresholds allow approximately 20% run-to-run variance over revision 8, while correctness, scope, and harness thresholds remain direct quality gates.
+`test/evals/benchmark_test.exs` validates every standard and registered suite, then verifies that each accepted baseline meets all of its regression thresholds. Add future suites to the catalog and preserve standards referenced by historical suites; introduce a new named standard when metric semantics or cross-generation targets change. When a better result is accepted, update that suite's `baseline_result` and raise thresholds where the new evidence supports doing so. Thresholds must not be lowered merely to admit a regressing candidate. The mvp-v1 cost and latency thresholds allow approximately 20% run-to-run variance over revision 8, while correctness, scope, and harness thresholds remain direct quality gates.
 
 ## Balanced baseline — 2026-08-25
 

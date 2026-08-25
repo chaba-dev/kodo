@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "current_standard": "quality-v1",
+  "policy": {
+    "standards": "Metric meaning and improvement targets belong to a named standard. Preserve old standards when adding a new one so historical suites remain reproducible.",
+    "suites": "Each suite references one standard and owns regression thresholds anchored to an accepted result with the same suite fingerprint.",
+    "thresholds": "Future recommendations must meet every suite regression threshold. Raise thresholds when accepting stronger evidence; do not lower them merely to admit a regressing candidate.",
+    "targets": "Targets guide improvements across suite generations and are not release gates until adopted as regression thresholds."
+  },
+  "standards": {
+    "quality-v1": {
+      "criteria": [
+        {
+          "id": "completed_tasks",
+          "description": "Number of suite tasks that completed without an evaluation-harness error.",
+          "metric_path": ["metrics", "completed"],
+          "direction": "minimum",
+          "target": 30
+        },
+        {
+          "id": "harness_failure_rate",
+          "description": "Fraction of tasks lost to provider, evaluator, timeout, decoding, or infrastructure errors rather than an incorrect answer.",
+          "metric_path": ["metrics", "failure_rate"],
+          "direction": "maximum",
+          "target": 0
+        },
+        {
+          "id": "search_relevant_file_recall",
+          "description": "Mean fraction of known relevant files named in each search answer.",
+          "metric_path": ["metrics", "quality", "search", "relevant_file_recall"],
+          "direction": "minimum",
+          "target": 0.9
+        },
+        {
+          "id": "search_evidence_citation_recall",
+          "description": "Mean fraction of expected evidence cited with its path and either the expected line or text.",
+          "metric_path": ["metrics", "quality", "search", "evidence_citation_recall"],
+          "direction": "minimum",
+          "target": 0.85
+        },
+        {
+          "id": "search_irrelevant_files",
+          "description": "Total fixture files cited across search tasks that are not marked relevant.",
+          "metric_path": ["metrics", "quality", "search", "irrelevant_files"],
+          "direction": "maximum",
+          "target": 2
+        },
+        {
+          "id": "review_defect_recall",
+          "description": "Mean fraction of seeded defects reported at the exact expected path and line.",
+          "metric_path": ["metrics", "quality", "review", "defect_recall"],
+          "direction": "minimum",
+          "target": 0.95
+        },
+        {
+          "id": "review_location_accuracy",
+          "description": "Mean fraction of seeded findings located at the exact expected path and line; currently equivalent to defect recall.",
+          "metric_path": ["metrics", "quality", "review", "location_accuracy"],
+          "direction": "minimum",
+          "target": 0.95
+        },
+        {
+          "id": "review_severity_accuracy",
+          "description": "Mean fraction of seeded findings reported with the expected severity at the expected path.",
+          "metric_path": ["metrics", "quality", "review", "severity_accuracy"],
+          "direction": "minimum",
+          "target": 0.9
+        },
+        {
+          "id": "review_false_positives",
+          "description": "Total review findings that do not match a seeded defect at its expected path and line.",
+          "metric_path": ["metrics", "quality", "review", "false_positives"],
+          "direction": "maximum",
+          "target": 0
+        },
+        {
+          "id": "implementation_public_check_pass_rate",
+          "description": "Fraction of implementation tasks for which every check visible to the model passed.",
+          "metric_path": ["metrics", "quality", "implementation", "public_check_pass_rate"],
+          "direction": "minimum",
+          "target": 1
+        },
+        {
+          "id": "implementation_hidden_check_pass_rate",
+          "description": "Fraction of implementation tasks for which every withheld verification check passed.",
+          "metric_path": ["metrics", "quality", "implementation", "hidden_check_pass_rate"],
+          "direction": "minimum",
+          "target": 0.9
+        },
+        {
+          "id": "implementation_scope_compliance_rate",
+          "description": "Fraction of implementation tasks that changed only explicitly allowed paths.",
+          "metric_path": ["metrics", "quality", "implementation", "scope_compliance_rate"],
+          "direction": "minimum",
+          "target": 1
+        },
+        {
+          "id": "implementation_clean_review_rate",
+          "description": "Fraction of implementation tasks whose final structured review reported no actionable defect; tracked separately because reviewer precision is still improving.",
+          "metric_path": ["metrics", "quality", "implementation", "clean_review_rate"],
+          "direction": "minimum",
+          "target": 0.8
+        },
+        {
+          "id": "mean_latency_ms",
+          "description": "Mean end-to-end duration per evaluation task.",
+          "metric_path": ["metrics", "latency_ms", "mean"],
+          "direction": "maximum",
+          "target": 12000
+        },
+        {
+          "id": "p95_latency_ms",
+          "description": "95th-percentile end-to-end duration per evaluation task.",
+          "metric_path": ["metrics", "latency_ms", "p95"],
+          "direction": "maximum",
+          "target": 30000
+        },
+        {
+          "id": "estimated_cost_usd",
+          "description": "Provider-estimated cost for the complete suite run.",
+          "metric_path": ["metrics", "estimated_cost_usd"],
+          "direction": "maximum",
+          "target": 0.04
+        }
+      ]
+    }
+  },
+  "suites": [
+    {
+      "name": "mvp-v1",
+      "criteria": "mvp-v1/criteria.json"
+    }
+  ]
+}
