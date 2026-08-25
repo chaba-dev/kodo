@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict dqVU4eDdPsesegv9HH5aaHRYSjaUgBN0KzALteCWQ9mT3ZHd3AwrfoLIMWaWkC2
+\restrict 6Ph7YPfQpD7sLNGLU4D7shfVZDgPeYcyk3kE9ke3zJ1fzkGbXwawaB2F29ALheV
 
 -- Dumped from database version 17.10
 -- Dumped by pg_dump version 18.4
@@ -36,6 +36,24 @@ COMMENT ON EXTENSION citext IS 'data type for case-insensitive character strings
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
+
+--
+-- Name: agent_role_overrides; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.agent_role_overrides (
+    id uuid NOT NULL,
+    user_id bigint NOT NULL,
+    runner_id uuid,
+    role character varying(32) NOT NULL,
+    model character varying(255),
+    reasoning character varying(32),
+    inserted_at timestamp without time zone NOT NULL,
+    updated_at timestamp without time zone NOT NULL,
+    CONSTRAINT agent_role_overrides_mapping_present CHECK ((((model IS NOT NULL) AND ((model)::text <> ''::text)) OR ((reasoning IS NOT NULL) AND ((reasoning)::text <> ''::text)))),
+    CONSTRAINT agent_role_overrides_role_valid CHECK (((role)::text = ANY ((ARRAY['primary'::character varying, 'search'::character varying, 'review'::character varying])::text[])))
+);
+
 
 --
 -- Name: cluster_placement_overrides; Type: TABLE; Schema: public; Owner: -
@@ -255,6 +273,14 @@ ALTER TABLE ONLY public.users_tokens ALTER COLUMN id SET DEFAULT nextval('public
 
 
 --
+-- Name: agent_role_overrides agent_role_overrides_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_role_overrides
+    ADD CONSTRAINT agent_role_overrides_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: cluster_placement_overrides cluster_placement_overrides_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -316,6 +342,27 @@ ALTER TABLE ONLY public.users
 
 ALTER TABLE ONLY public.users_tokens
     ADD CONSTRAINT users_tokens_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: agent_role_overrides_repository_role_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX agent_role_overrides_repository_role_index ON public.agent_role_overrides USING btree (user_id, runner_id, role) WHERE (runner_id IS NOT NULL);
+
+
+--
+-- Name: agent_role_overrides_runner_id_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX agent_role_overrides_runner_id_index ON public.agent_role_overrides USING btree (runner_id);
+
+
+--
+-- Name: agent_role_overrides_user_role_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX agent_role_overrides_user_role_index ON public.agent_role_overrides USING btree (user_id, role) WHERE (runner_id IS NULL);
 
 
 --
@@ -438,6 +485,22 @@ CREATE INDEX users_tokens_user_id_index ON public.users_tokens USING btree (user
 
 
 --
+-- Name: agent_role_overrides agent_role_overrides_runner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_role_overrides
+    ADD CONSTRAINT agent_role_overrides_runner_id_fkey FOREIGN KEY (runner_id) REFERENCES public.runners(id) ON DELETE CASCADE;
+
+
+--
+-- Name: agent_role_overrides agent_role_overrides_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.agent_role_overrides
+    ADD CONSTRAINT agent_role_overrides_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: cluster_placement_overrides cluster_placement_overrides_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -497,7 +560,7 @@ ALTER TABLE ONLY public.users_tokens
 -- PostgreSQL database dump complete
 --
 
-\unrestrict dqVU4eDdPsesegv9HH5aaHRYSjaUgBN0KzALteCWQ9mT3ZHd3AwrfoLIMWaWkC2
+\unrestrict 6Ph7YPfQpD7sLNGLU4D7shfVZDgPeYcyk3kE9ke3zJ1fzkGbXwawaB2F29ALheV
 
 INSERT INTO public."schema_migrations" (version) VALUES (20260807073017);
 INSERT INTO public."schema_migrations" (version) VALUES (20260808062115);
@@ -511,3 +574,4 @@ INSERT INTO public."schema_migrations" (version) VALUES (20260813214336);
 INSERT INTO public."schema_migrations" (version) VALUES (20260815051344);
 INSERT INTO public."schema_migrations" (version) VALUES (20260822084328);
 INSERT INTO public."schema_migrations" (version) VALUES (20260824012010);
+INSERT INTO public."schema_migrations" (version) VALUES (20260825042101);
