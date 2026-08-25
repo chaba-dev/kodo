@@ -81,6 +81,20 @@ defmodule Kodo.Agent.Tools do
       ]
   end
 
+  def definitions("workspace-v3") do
+    Enum.map(definitions("workspace-v2"), fn
+      %{name: "apply_patch"} = definition ->
+        %{
+          definition
+          | description:
+              "Apply a complete git unified diff with diff --git, ---, +++, and @@ hunk headers; replacement text alone is invalid"
+        }
+
+      definition ->
+        definition
+    end)
+  end
+
   def definitions("read-only-v1") do
     Enum.reject(
       definitions("workspace-v1"),
@@ -163,7 +177,7 @@ defmodule Kodo.Agent.Tools do
   end
 
   defp translate(name, _args) do
-    if Enum.any?(definitions("workspace-v2"), &(&1.name == name)) do
+    if Enum.any?(definitions("workspace-v3"), &(&1.name == name)) do
       {:error, :invalid_tool_call}
     else
       {:error, :unknown_tool}

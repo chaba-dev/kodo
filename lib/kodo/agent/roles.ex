@@ -58,12 +58,28 @@ defmodule Kodo.Agent.Roles do
               |> Map.put(:version, 3)
               |> Map.put(:toolset_version, "workspace-v2")
 
+  @primary_v4 @primary_v3
+              |> Map.put(:version, 4)
+              |> Map.put(:toolset_version, "workspace-v3")
+              |> Map.put(
+                :prompt,
+                "You are Kodo's primary coding agent. Inspect evidence, make the smallest correct patch, and verify it. apply_patch accepts only a complete git unified diff with diff --git, ---, +++, and @@ hunk headers; never send replacement text alone. Batch independent tool calls when useful and leave enough budget to verify and summarize."
+              )
+
+  @search_v3 @search_v2
+             |> Map.put(:version, 3)
+             |> Map.put(:budget, %{max_continuations: 6, max_tokens: 30_000})
+             |> Map.put(
+               :prompt,
+               "Investigate the requested codebase question using read-only tools. You have at most six model turns: batch independent tool calls and reserve the final turn for a concise answer supported by file and line evidence."
+             )
+
   @contracts %{
-    primary: %{1 => @primary_v1, 2 => @primary_v2, 3 => @primary_v3},
-    search: %{1 => @search_v1, 2 => @search_v2},
+    primary: %{1 => @primary_v1, 2 => @primary_v2, 3 => @primary_v3, 4 => @primary_v4},
+    search: %{1 => @search_v1, 2 => @search_v2, 3 => @search_v3},
     review: %{1 => @review_v1, 2 => @review_v2}
   }
-  @current_versions %{primary: 3, search: 2, review: 2}
+  @current_versions %{primary: 4, search: 3, review: 2}
 
   @type role :: :primary | :search | :review
 

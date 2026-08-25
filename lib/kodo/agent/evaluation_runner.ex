@@ -543,7 +543,7 @@ defmodule Kodo.Agent.EvaluationRunner do
   defp contracts,
     do: Map.new(Roles.all(), fn {role, contract} -> {Atom.to_string(role), contract} end)
 
-  defp toolsets, do: Map.new(["read-only-v1", "workspace-v2"], &{&1, Tools.definitions(&1)})
+  defp toolsets, do: Map.new(["read-only-v1", "workspace-v3"], &{&1, Tools.definitions(&1)})
 
   @doc false
   def aggregate(tasks) do

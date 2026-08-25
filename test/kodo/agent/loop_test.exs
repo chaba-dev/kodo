@@ -83,9 +83,9 @@ defmodule Kodo.Agent.LoopTest do
     assert invocation.payload["model"] == "test:model"
     assert invocation.payload["reasoning"] == "none"
     assert invocation.version == 3
-    assert invocation.payload["role_contract_version"] == 3
-    assert invocation.payload["role_prompt_version"] == 3
-    assert invocation.payload["toolset_version"] == "workspace-v2"
+    assert invocation.payload["role_contract_version"] == 4
+    assert invocation.payload["role_prompt_version"] == 4
+    assert invocation.payload["toolset_version"] == "workspace-v3"
     assert invocation.payload["capability_validation"]["tools"]
     assert invocation.payload["capability_validation"]["required_context_window"] == 100_000
 

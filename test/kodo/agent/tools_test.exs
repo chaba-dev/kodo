@@ -8,6 +8,13 @@ defmodule Kodo.Agent.ToolsTest do
 
     assert Enum.any?(Tools.definitions("workspace-v2"), &(&1.name == "delegate_search"))
     refute Enum.any?(Tools.definitions("read-only-v1"), &(&1.name == "delegate_search"))
+
+    old_patch = Enum.find(Tools.definitions("workspace-v2"), &(&1.name == "apply_patch"))
+    patch = Enum.find(Tools.definitions("workspace-v3"), &(&1.name == "apply_patch"))
+
+    refute old_patch.description =~ "diff --git"
+    assert patch.description =~ "diff --git"
+    assert patch.description =~ "@@"
   end
 
   test "translates only exact typed runner arguments" do

@@ -7,7 +7,7 @@ defmodule Kodo.Agent.RolesTest do
     assert Map.keys(Roles.all()) |> Enum.sort() == [:primary, :review, :search]
 
     for {role, contract} <- Roles.all() do
-      assert contract.version == if(role == :primary, do: 3, else: 2)
+      assert contract.version == %{primary: 4, review: 2, search: 3}[role]
       assert is_atom(contract.responsibility)
       assert is_binary(contract.prompt)
       assert contract.prompt != ""
@@ -29,5 +29,9 @@ defmodule Kodo.Agent.RolesTest do
     refute Map.has_key?(Roles.fetch!(:primary, 1), :capabilities)
     assert Roles.fetch!(:primary, 2).capabilities.min_context == 100_000
     assert Roles.fetch!(:primary, 3).toolset_version == "workspace-v2"
+    assert Roles.fetch!(:primary, 4).toolset_version == "workspace-v3"
+    assert Roles.fetch!(:primary, 4).prompt =~ "never send replacement text alone"
+    assert Roles.fetch!(:search, 3).budget.max_continuations == 6
+    assert Roles.fetch!(:search, 3).prompt =~ "reserve the final turn"
   end
 end
