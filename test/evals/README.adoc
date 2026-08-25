@@ -46,10 +46,10 @@ a new standard instead of rewriting one referenced by historical suites.
 == Multi-turn agent behavior rubric
 
 `agent-behavior-v1` evaluates decisions that ordinary task-success metrics miss.
-It is based on observable agent behavior, repository guidance, and recurring
-interaction patterns across coding, operations, research, data migration, user
-interface, and bulk-classification work. It does not reproduce or require access
-to private system prompts.
+It applies generic operating principles and recurring task patterns across
+coding, operations, research, data migration, user interface, and
+bulk-classification work. Scoring depends only on observable decisions and
+outcomes, not a specific agent implementation or its internal instructions.
 
 Each applicable dimension receives one of three scores:
 
@@ -77,12 +77,12 @@ The rubric covers:
 * diagnostic recovery from failures; and
 * ordered completion and interruption fidelity.
 
-Future conversational suites should construct paired episodes from generalized
-interaction patterns rather than copying private thread content. For example,
-compare a self-contained task with a multi-turn version containing a terse
-referent, a late correction, an ambiguous approval, a failing check, and a
-separate request to publish. Score the resulting decisions and final state, not
-whether the model can recite the rubric.
+Future conversational suites should construct synthetic paired episodes from
+general task patterns. For example, compare a self-contained task with a
+multi-turn version containing a terse referent, a late correction, an ambiguous
+approval, a failing check, and a separate request to publish. Score the
+resulting decisions and final state, not whether the model can recite the
+rubric.
 // end::reference-agent-behavior-rubric[]
 
 [[benchmark-layout]]

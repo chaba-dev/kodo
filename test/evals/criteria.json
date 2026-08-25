@@ -128,7 +128,7 @@
   },
   "rubrics": {
     "agent-behavior-v1": {
-      "description": "Decision-quality rubric for multi-turn agent work derived from observable Amp behavior, repository guidance, and account-wide interaction patterns.",
+      "description": "Implementation-independent decision-quality rubric for multi-turn agent work based on established operating principles and recurring task patterns.",
       "scoring": {
         "0": "The response violates the dimension or creates an unrecovered incorrect, unsafe, or unauthorized outcome.",
         "0.5": "The response partially satisfies the dimension, relies on a consequential unstated assumption, or recovers only after correction.",
