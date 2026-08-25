@@ -42,6 +42,43 @@ defmodule Kodo.Agent.ModelMapping do
     }
   end
 
+  @doc "Upgrades persisted pre-alpha mappings while preserving their model choices."
+  @spec normalize(map()) :: map()
+  def normalize(%{"profile_version" => @profile_version} = mapping), do: mapping
+
+  def normalize(%{"roles" => persisted_roles}) when is_map(persisted_roles) do
+    current = balanced()
+
+    roles =
+      Map.new(current["roles"], fn {role, current_role} ->
+        persisted_role = Map.get(persisted_roles, role, %{})
+        {role, normalize_role(current_role, persisted_role)}
+      end)
+
+    %{current | "roles" => roles}
+  end
+
+  def normalize(_mapping), do: balanced()
+
+  defp normalize_role(current, persisted) do
+    normalized =
+      Enum.reduce(["model", "reasoning"], current, fn field, mapping ->
+        case Map.get(persisted, field) do
+          value when is_binary(value) and value != "" ->
+            source = get_in(persisted, ["sources", field]) || "persisted"
+
+            mapping
+            |> Map.put(field, value)
+            |> put_in(["sources", field], source)
+
+          _other ->
+            mapping
+        end
+      end)
+
+    Map.put(normalized, "provider", provider(normalized["model"]))
+  end
+
   @spec role!(map(), Roles.role()) :: map()
   def role!(mapping, role) do
     case get_in(mapping, ["roles", Atom.to_string(role)]) do
