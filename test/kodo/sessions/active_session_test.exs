@@ -620,10 +620,18 @@ defmodule Kodo.Sessions.ActiveSessionTest do
                     %{type: "session_status_changed", payload: %{"status" => "completed"}}}
   end
 
-  test "cancellation interrupts a durable offline-runner wait", %{session: session} do
+  test "cancellation interrupts a durable tool response wait", %{
+    runner: runner,
+    session: session
+  } do
+    {:ok, _runner_registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
     :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
     assert :ok = Sessions.start_turn(session.id, "Fix it")
-    assert_receive {:session_event, %{type: "tool_started"}}
+    assert_receive {:tool_request, _request}
+
+    [{coordinator, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
+    ownership = :sys.get_state(coordinator).ownership
+    assert :ok = Sessions.dispatch_if_owner(ownership, fn -> :ok end)
 
     assert :ok = Sessions.cancel(session.id)
     assert Sessions.get_session!(session.id).status == "cancelled"
@@ -698,6 +706,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
                     }},
                    3_000
 
+    assert_receive :fake_llm_waiting
     refute first_invocation_id == second_invocation_id
     assert [{pid, _value}] = Registry.lookup(Kodo.SessionRegistry, session.id)
     assert :ok = ActiveSession.cancel(pid)
