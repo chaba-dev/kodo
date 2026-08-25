@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const LIMITS_VERSION: u16 = 1;
 pub const MAX_AUTHORITY_LEASE_MS: u64 = 15_000;
 const MAX_CONNECTED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024 - 4 * 1024;
@@ -165,6 +165,11 @@ pub enum ToolRequest {
     ApplyPatch {
         patch: String,
     },
+    ReplaceText {
+        path: String,
+        old_text: String,
+        new_text: String,
+    },
     StartCommand {
         command: String,
         cwd: String,
@@ -253,6 +258,11 @@ pub enum OutputStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_version_accounts_for_replace_text() {
+        assert_eq!(PROTOCOL_VERSION, 5);
+    }
 
     #[test]
     fn execution_limits_reject_incomplete_or_invalid_policy() {

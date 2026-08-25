@@ -9,7 +9,7 @@ defmodule Kodo.RunnersTest do
     platform: "linux",
     architecture: "x86_64",
     runner_version: "0.1.0",
-    protocol_version: 4,
+    protocol_version: 5,
     capabilities: ["shell"]
   }
 
@@ -37,7 +37,7 @@ defmodule Kodo.RunnersTest do
 
   test "registration rejects unsupported protocol versions" do
     assert {:error, changeset} = Runners.register(%{@valid | protocol_version: 2})
-    assert "must be equal to 4" in errors_on(changeset).protocol_version
+    assert "must be equal to 5" in errors_on(changeset).protocol_version
   end
 
   test "dispatch rejects payloads that cannot fit in a complete wire message" do

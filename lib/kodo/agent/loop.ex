@@ -2,6 +2,7 @@ defmodule Kodo.Agent.Loop do
   @moduledoc "Event-driven, restartable primary-agent model and runner loop."
 
   alias Kodo.Agent.ModelMapping
+  alias Kodo.Agent.ReviewResult
   alias Kodo.Agent.Roles
   alias Kodo.Agent.Tools
   alias Kodo.LLM
@@ -11,6 +12,29 @@ defmodule Kodo.Agent.Loop do
   alias Kodo.Sessions.Projection
 
   @protocol_version RunnerProtocol.version()
+  @review_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "properties" => %{
+      "clean" => %{"type" => "boolean"},
+      "findings" => %{
+        "type" => "array",
+        "items" => %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "properties" => %{
+            "severity" => %{"type" => "string", "enum" => ["low", "medium", "high"]},
+            "path" => %{"type" => "string"},
+            "line" => %{"type" => "integer", "minimum" => 1},
+            "explanation" => %{"type" => "string"},
+            "suggested_fix" => %{"type" => "string"}
+          },
+          "required" => ["severity", "path", "line", "explanation", "suggested_fix"]
+        }
+      }
+    },
+    "required" => ["clean", "findings"]
+  }
 
   def run(session_id, opts \\ []) do
     budgets = Keyword.get(opts, :budgets, Application.fetch_env!(:kodo, :agent_budgets))
@@ -82,7 +106,16 @@ defmodule Kodo.Agent.Loop do
          ownership
        )
        when calls != [] do
-    case execute_tools(session_id, projection.runner_id, response, calls, budgets, ownership) do
+    case execute_tools(
+           session_id,
+           projection.runner_id,
+           response,
+           calls,
+           adapter,
+           projection.model_mapping || legacy_mapping(projection.model),
+           budgets,
+           ownership
+         ) do
       {:ok, _results} ->
         continue_after_tools(session_id, adapter, budgets, invocations, ownership)
 
@@ -92,16 +125,332 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp resume_action(
-         %{payload: %{"tool_calls" => [], "text" => text}},
-         _session_id,
-         _projection,
-         _events,
+         %{payload: %{"tool_calls" => [], "text" => text}} = response,
+         session_id,
+         projection,
+         events,
+         adapter,
+         budgets,
+         invocations,
+         ownership
+       ) do
+    context = %{
+      session_id: session_id,
+      projection: projection,
+      events: events,
+      adapter: adapter,
+      budgets: budgets,
+      invocations: invocations,
+      ownership: ownership
+    }
+
+    review_final_answer(text, response, context)
+  end
+
+  defp review_final_answer(text, response, context) do
+    mapping =
+      context.projection.model_mapping || legacy_mapping(context.projection.model)
+
+    primary_invocation_id = response.payload["invocation_id"]
+
+    case review_result(context.events, primary_invocation_id) do
+      nil ->
+        run_final_review(text, primary_invocation_id, Map.put(context, :mapping, mapping))
+
+      result ->
+        handle_review_result(
+          text,
+          result,
+          context.session_id,
+          context.adapter,
+          context.budgets,
+          context.invocations,
+          context.ownership
+        )
+    end
+  end
+
+  defp review_result(events, primary_invocation_id) do
+    events
+    |> Enum.filter(fn event ->
+      event.type == "review_result" and
+        event.payload["primary_invocation_id"] == primary_invocation_id
+    end)
+    |> List.last()
+  end
+
+  defp original_task(events) do
+    events
+    |> Enum.filter(&(&1.type == "user_message"))
+    |> List.last()
+    |> then(& &1.payload["content"])
+  end
+
+  defp run_final_review(text, primary_invocation_id, context) do
+    review = ModelMapping.role!(context.mapping, :review)
+    contract = Roles.fetch!(:review, review["role_contract"])
+
+    with {:ok, capability_validation} <-
+           context.adapter.validate_model(review["model"], review, contract),
+         :ok <-
+           Phoenix.PubSub.subscribe(
+             Kodo.PubSub,
+             "runner_responses:#{context.projection.runner_id}"
+           ),
+         :ok <- Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{context.session_id}"),
+         :ok <- Runners.subscribe_lifecycle(),
+         {:ok, review_invocation_id} <-
+           start_review_invocation(
+             context.session_id,
+             primary_invocation_id,
+             context.mapping,
+             review,
+             contract,
+             capability_validation,
+             context.ownership
+           ),
+         {:ok, diff} <-
+           execute_tool(
+             context.session_id,
+             context.projection.runner_id,
+             review_invocation_id,
+             %{"id" => "final-diff", "name" => "git_diff", "arguments" => %{"paths" => []}},
+             Sessions.events_after(context.session_id),
+             context.budgets[:tool_timeout],
+             context.ownership
+           ),
+         :ok <- rehoming_boundary(),
+         {:ok, generated} <-
+           Sessions.dispatch_if_owner(context.ownership, fn ->
+             task = original_task(context.events)
+
+             context.adapter.generate_object(
+               review["model"],
+               [
+                 %{"role" => "system", "content" => contract.prompt},
+                 %{
+                   "role" => "user",
+                   "content" =>
+                     "Original task:\n#{task}\n\nReview this final diff:\n\n#{diff.output["content"]}"
+                 }
+               ],
+               @review_schema,
+               timeout: context.budgets[:model_timeout],
+               reasoning: review["reasoning"]
+             )
+           end),
+         :ok <- within_budget(1, token_count(generated.usage), contract.budget),
+         {:ok, result} <- validate_review_object(generated.object),
+         result = ReviewResult.actionable(result, diff.output["content"]),
+         {:ok, result_event} <-
+           persist_review_result(
+             context.session_id,
+             primary_invocation_id,
+             review_invocation_id,
+             generated.usage,
+             result,
+             context.ownership
+           ) do
+      handle_review_result(
+        text,
+        result_event,
+        context.session_id,
+        context.adapter,
+        context.budgets,
+        context.invocations,
+        context.ownership
+      )
+    end
+  end
+
+  defp start_review_invocation(
+         session_id,
+         primary_invocation_id,
+         mapping,
+         review,
+         contract,
+         capability_validation,
+         ownership
+       ) do
+    invocation_id = Ecto.UUID.generate()
+
+    case Sessions.append_event(
+           session_id,
+           "review_invocation_started",
+           %{
+             "invocation_id" => invocation_id,
+             "primary_invocation_id" => primary_invocation_id,
+             "role" => "review",
+             "provider" => review["provider"],
+             "model" => review["model"],
+             "reasoning" => review["reasoning"],
+             "role_contract" => contract.id,
+             "toolset_version" => contract.toolset_version,
+             "capability_validation" => capability_validation,
+             "model_mapping" => mapping
+           },
+           version: 1,
+           parent_id: primary_invocation_id,
+           ownership: ownership
+         ) do
+      {:ok, _event} -> {:ok, invocation_id}
+      error -> error
+    end
+  end
+
+  defp validate_review_object(object) do
+    with {:ok, encoded} <- Jason.encode(object),
+         {:ok, normalized} <- Jason.decode(encoded),
+         true <- Enum.sort(Map.keys(normalized)) == ["clean", "findings"],
+         clean when is_boolean(clean) <- normalized["clean"],
+         findings when is_list(findings) <- normalized["findings"],
+         true <- Enum.all?(findings, &valid_review_finding?/1),
+         true <- (clean and findings == []) or (not clean and findings != []) do
+      {:ok, normalized}
+    else
+      _invalid -> {:error, :invalid_review_result}
+    end
+  end
+
+  defp valid_review_finding?(finding) do
+    expected_keys = ["explanation", "line", "path", "severity", "suggested_fix"]
+
+    Enum.sort(Map.keys(finding)) == expected_keys and
+      Enum.all?(finding, &valid_review_field?/1)
+  end
+
+  defp valid_review_field?({"severity", severity}),
+    do: severity in ["low", "medium", "high"]
+
+  defp valid_review_field?({"line", line}), do: is_integer(line) and line > 0
+
+  defp valid_review_field?({field, value})
+       when field in ["path", "explanation", "suggested_fix"],
+       do: is_binary(value) and value != ""
+
+  defp valid_review_field?(_field), do: false
+
+  defp persist_review_result(
+         session_id,
+         primary_invocation_id,
+         review_invocation_id,
+         usage,
+         result,
+         ownership
+       ) do
+    with {:ok, _event} <-
+           Sessions.append_event(
+             session_id,
+             "review_invocation_completed",
+             %{
+               "invocation_id" => review_invocation_id,
+               "primary_invocation_id" => primary_invocation_id,
+               "role" => "review",
+               "usage" => usage || %{}
+             },
+             parent_id: review_invocation_id,
+             ownership: ownership
+           ) do
+      Sessions.append_event(
+        session_id,
+        "review_result",
+        Map.merge(result, %{
+          "invocation_id" => review_invocation_id,
+          "primary_invocation_id" => primary_invocation_id,
+          "role" => "review"
+        }),
+        version: 1,
+        parent_id: review_invocation_id,
+        ownership: ownership
+      )
+    end
+  end
+
+  defp handle_review_result(
+         text,
+         %{payload: %{"clean" => true}} = result,
+         session_id,
          _adapter,
          _budgets,
          _invocations,
-         _ownership
-       ),
-       do: {:ok, text}
+         ownership
+       ) do
+    with :ok <- persist_reviewed_answer(session_id, result, text, ownership) do
+      {:ok, text}
+    end
+  end
+
+  defp handle_review_result(
+         _text,
+         %{payload: %{"clean" => false, "findings" => findings}} = result,
+         session_id,
+         adapter,
+         budgets,
+         invocations,
+         ownership
+       ) do
+    events = Sessions.events_after(session_id)
+
+    with :ok <- persist_review_feedback(session_id, result, findings, events, ownership) do
+      events = Sessions.events_after(session_id)
+      projection = Projection.from_events(events)
+      infer(session_id, projection, events, adapter, budgets, invocations + 1, ownership)
+    end
+  end
+
+  defp persist_review_feedback(session_id, result, findings, events, ownership) do
+    if Enum.any?(events, fn event ->
+         event.type == "review_feedback" and
+           event.payload["review_invocation_id"] == result.payload["invocation_id"]
+       end) do
+      :ok
+    else
+      content =
+        "Final-diff review found supported issues. Address them and rerun affected verification: " <>
+          Jason.encode!(findings)
+
+      case Sessions.append_event(
+             session_id,
+             "review_feedback",
+             %{
+               "review_invocation_id" => result.payload["invocation_id"],
+               "content" => content,
+               "findings" => findings
+             },
+             version: 1,
+             parent_id: result.payload["invocation_id"],
+             ownership: ownership
+           ) do
+        {:ok, _event} -> :ok
+        error -> error
+      end
+    end
+  end
+
+  defp persist_reviewed_answer(session_id, result, text, ownership) do
+    invocation_id = result.payload["primary_invocation_id"]
+
+    if Enum.any?(Sessions.events_after(session_id), fn event ->
+         event.type == "assistant_message_completed" and
+           event.payload["invocation_id"] == invocation_id
+       end) do
+      :ok
+    else
+      case Sessions.append_event(
+             session_id,
+             "assistant_message_completed",
+             %{
+               "role" => "assistant",
+               "content" => text,
+               "invocation_id" => invocation_id
+             },
+             ownership: ownership
+           ) do
+        {:ok, _event} -> :ok
+        error -> error
+      end
+    end
+  end
 
   defp continue_after_tools(session_id, adapter, budgets, invocations, ownership) do
     events = Sessions.events_after(session_id)
@@ -128,8 +477,14 @@ defmodule Kodo.Agent.Loop do
   defp infer(session_id, projection, events, adapter, budgets, invocation, ownership) do
     mapping = projection.model_mapping || legacy_mapping(projection.model)
     primary = ModelMapping.role!(mapping, :primary)
-    contract = Roles.fetch!(:primary, primary["role_contract_version"])
-    tools = Tools.definitions(contract.toolset_version)
+    contract = Roles.fetch!(:primary, primary["role_contract"])
+
+    tools =
+      Tools.definitions_for_turn(
+        contract.toolset_version,
+        invocation,
+        budgets[:max_continuations]
+      )
 
     with :ok <- within_budget(invocation, usage(current_turn(events)), budgets),
          {:ok, capability_validation} <-
@@ -159,7 +514,8 @@ defmodule Kodo.Agent.Loop do
              session_id |> Sessions.events_after() |> current_turn() |> usage(),
              budgets
            ),
-         {:ok, _event} <- persist_model_response(session_id, invocation_id, response, ownership) do
+         {:ok, _event} <-
+           persist_model_response(session_id, invocation_id, response, mapping, ownership) do
       resume(session_id, adapter, budgets, ownership)
     end
   end
@@ -167,34 +523,44 @@ defmodule Kodo.Agent.Loop do
   defp transcript(events, contract) do
     system = %{"role" => "system", "content" => contract.prompt}
 
+    primary_invocations =
+      events
+      |> Enum.filter(&(&1.type == "model_invocation_started"))
+      |> MapSet.new(& &1.payload["invocation_id"])
+
     Enum.reduce(events, [system], fn event, messages ->
-      case transcript_message(event) do
+      case transcript_message(event, primary_invocations) do
         nil -> messages
         message -> messages ++ [message]
       end
     end)
   end
 
-  defp transcript_message(%{type: "user_message", payload: payload}),
+  defp transcript_message(%{type: "user_message", payload: payload}, _primary_invocations),
     do: %{"role" => "user", "content" => payload["content"]}
 
-  defp transcript_message(%{type: "model_response", payload: payload}),
+  defp transcript_message(%{type: "model_response", payload: payload}, _primary_invocations),
     do: assistant_message(payload)
 
-  defp transcript_message(%{type: type, payload: payload})
-       when type in ["tool_completed", "tool_failed"] do
-    content =
-      if type == "tool_completed", do: payload["output"], else: %{"error" => payload["error"]}
+  defp transcript_message(%{type: "review_feedback", payload: payload}, _primary_invocations),
+    do: %{"role" => "user", "content" => payload["content"]}
 
-    %{
-      "role" => "tool",
-      "tool_call_id" => payload["tool_call_id"],
-      "name" => payload["name"],
-      "content" => content
-    }
+  defp transcript_message(%{type: type, payload: payload}, primary_invocations)
+       when type in ["tool_completed", "tool_failed"] do
+    if MapSet.member?(primary_invocations, payload["invocation_id"]) do
+      content =
+        if type == "tool_completed", do: payload["output"], else: %{"error" => payload["error"]}
+
+      %{
+        "role" => "tool",
+        "tool_call_id" => payload["tool_call_id"],
+        "name" => payload["name"],
+        "content" => content
+      }
+    end
   end
 
-  defp transcript_message(_event), do: nil
+  defp transcript_message(_event, _primary_invocations), do: nil
 
   defp assistant_message(%{"assistant" => nil} = payload) do
     %{
@@ -227,8 +593,7 @@ defmodule Kodo.Agent.Loop do
              "provider" => primary["provider"],
              "model" => primary["model"],
              "reasoning" => primary["reasoning"],
-             "role_contract_version" => primary["role_contract_version"],
-             "role_prompt_version" => primary["role_contract_version"],
+             "role_contract" => primary["role_contract"],
              "toolset_version" => primary["toolset_version"],
              "capability_validation" => capability_validation,
              "model_mapping" => mapping
@@ -251,7 +616,7 @@ defmodule Kodo.Agent.Loop do
     )
   end
 
-  defp persist_model_response(session_id, invocation_id, response, ownership) do
+  defp persist_model_response(session_id, invocation_id, response, mapping, ownership) do
     events = [
       {"assistant_message_started", %{"invocation_id" => invocation_id}, [ownership: ownership]},
       {"model_response",
@@ -265,7 +630,7 @@ defmodule Kodo.Agent.Loop do
     ]
 
     events =
-      if response.text == "" do
+      if response.text == "" or defer_final_answer?(response, mapping) do
         events
       else
         events ++
@@ -282,11 +647,22 @@ defmodule Kodo.Agent.Loop do
     Sessions.append_events(session_id, events)
   end
 
+  defp defer_final_answer?(response, _mapping), do: response.tool_calls == []
+
   defp normalize_tool_calls(calls) do
     Enum.map(calls, &%{"id" => &1.id, "name" => &1.name, "arguments" => &1.arguments})
   end
 
-  defp execute_tools(session_id, runner_id, response, calls, budgets, ownership) do
+  defp execute_tools(
+         session_id,
+         runner_id,
+         response,
+         calls,
+         adapter,
+         mapping,
+         budgets,
+         ownership
+       ) do
     with :ok <- validate_tool_calls(calls),
          :ok <- Phoenix.PubSub.subscribe(Kodo.PubSub, "runner_responses:#{runner_id}"),
          :ok <- Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session_id}"),
@@ -301,6 +677,9 @@ defmodule Kodo.Agent.Loop do
         invocation_id: invocation_id,
         calls: calls,
         events: events,
+        adapter: adapter,
+        mapping: mapping,
+        budgets: budgets,
         timeout: budgets[:tool_timeout],
         ownership: ownership
       }
@@ -308,6 +687,18 @@ defmodule Kodo.Agent.Loop do
       Enum.reduce_while(Enum.with_index(calls), {:ok, []}, fn call_with_index, result ->
         reduce_tool_call(call_with_index, result, context)
       end)
+    end
+  end
+
+  defp reduce_tool_call(
+         {%{"name" => "delegate_search"} = call, _index},
+         {:ok, results},
+         context
+       ) do
+    case execute_search_tool(call, context) do
+      {:ok, result} -> {:cont, {:ok, results ++ [result]}}
+      {:error, :rehoming_requested} = error -> {:halt, error}
+      {:error, reason} -> {:halt, {:error, reason}}
     end
   end
 
@@ -338,6 +729,394 @@ defmodule Kodo.Agent.Loop do
           context.ownership
         )
     end
+  end
+
+  defp execute_search_tool(call, context) do
+    facts = tool_facts(context.events, context.invocation_id, call["id"])
+
+    case recorded_tool_result(facts, call["id"]) do
+      nil -> execute_unrecorded_search_tool(call, facts, context)
+      result -> result
+    end
+  end
+
+  defp execute_unrecorded_search_tool(call, facts, context) do
+    requested = Enum.find(facts, &(&1.type == "tool_requested"))
+    request_id = if requested, do: requested.payload["request_id"], else: Ecto.UUID.generate()
+
+    result =
+      with {:ok, %{"question" => question}} <- Tools.request(call["name"], call["arguments"]),
+           :ok <-
+             persist_request(
+               context.session_id,
+               context.invocation_id,
+               call,
+               request_id,
+               requested,
+               context.ownership
+             ),
+           :ok <- rehoming_boundary(),
+           :ok <-
+             persist_started(
+               context.session_id,
+               context.invocation_id,
+               call,
+               request_id,
+               facts,
+               context.ownership
+             ),
+           {:ok, evidence} <- run_search(question, call, context),
+           output = %{"result" => "search_evidence", "content" => evidence},
+           {:ok, _event} <-
+             Sessions.append_event(
+               context.session_id,
+               "tool_completed",
+               %{
+                 "tool_call_id" => call["id"],
+                 "request_id" => request_id,
+                 "name" => call["name"],
+                 "output" => output,
+                 "invocation_id" => context.invocation_id
+               },
+               parent_id: context.invocation_id,
+               ownership: context.ownership
+             ) do
+        {:ok, %{tool_call_id: call["id"], name: call["name"], output: output}}
+      end
+
+    case result do
+      {:error, :rehoming_requested} = error ->
+        error
+
+      {:error, reason} = error ->
+        reconcile_tool_failure(
+          context.session_id,
+          context.invocation_id,
+          call,
+          facts,
+          reason,
+          error,
+          context.ownership
+        )
+
+      success ->
+        success
+    end
+  end
+
+  defp run_search(question, parent_call, context) do
+    search = ModelMapping.role!(context.mapping, :search)
+    contract = Roles.fetch!(:search, search["role_contract"])
+
+    with {:ok, capability_validation} <-
+           context.adapter.validate_model(search["model"], search, contract) do
+      state = %{
+        parent_call: parent_call,
+        search: search,
+        contract: contract,
+        capability_validation: capability_validation,
+        context: context
+      }
+
+      resume_search(question, state)
+    end
+  end
+
+  defp resume_search(question, state) do
+    events = Sessions.events_after(state.context.session_id)
+    replay = search_replay(events, state.parent_call["id"])
+
+    base_messages = [
+      %{"role" => "system", "content" => state.contract.prompt},
+      %{"role" => "user", "content" => question}
+    ]
+
+    resume_search_response(List.last(replay.responses), base_messages, replay, state)
+  end
+
+  defp search_replay(events, delegation_id) do
+    delegated =
+      Enum.filter(events, fn event ->
+        event.payload["role"] == "search" and
+          event.payload["delegation_tool_call_id"] == delegation_id
+      end)
+
+    %{
+      events: events,
+      responses: Enum.filter(delegated, &(&1.type == "subagent_response")),
+      starts: Enum.count(delegated, &(&1.type == "subagent_invocation_started")),
+      tokens:
+        delegated
+        |> Enum.filter(&(&1.type == "subagent_invocation_completed"))
+        |> Enum.sum_by(&token_count(&1.payload["usage"]))
+    }
+  end
+
+  defp resume_search_response(nil, messages, replay, state) do
+    run_search_continuation(messages, replay.starts + 1, replay.tokens, state)
+  end
+
+  defp resume_search_response(
+         %{payload: %{"tool_calls" => [], "text" => text}},
+         _messages,
+         _replay,
+         _state
+       ),
+       do: {:ok, text}
+
+  defp resume_search_response(
+         %{payload: %{"invocation_id" => invocation_id, "tool_calls" => calls}},
+         base_messages,
+         replay,
+         state
+       ) do
+    with :ok <- validate_tool_calls(calls),
+         :ok <- validate_role_tools(calls, state.contract),
+         {:ok, _results} <- execute_search_calls(calls, invocation_id, state.context) do
+      events = Sessions.events_after(state.context.session_id)
+      messages = replayed_search_messages(base_messages, replay.responses, events)
+      run_search_continuation(messages, replay.starts + 1, replay.tokens, state)
+    end
+  end
+
+  defp replayed_search_messages(base_messages, responses, events) do
+    Enum.reduce(responses, base_messages, fn response, messages ->
+      payload = response.payload
+
+      assistant =
+        assistant_message(%{
+          "assistant" => payload["assistant"],
+          "text" => payload["text"],
+          "tool_calls" => payload["tool_calls"]
+        })
+
+      tool_messages =
+        Enum.flat_map(
+          payload["tool_calls"],
+          &search_tool_messages(events, payload["invocation_id"], &1)
+        )
+
+      messages ++ [assistant] ++ tool_messages
+    end)
+  end
+
+  defp search_tool_messages(events, invocation_id, call) do
+    case search_tool_message(events, invocation_id, call) do
+      nil -> []
+      message -> [message]
+    end
+  end
+
+  defp search_tool_message(events, invocation_id, call) do
+    events
+    |> Enum.find(fn event ->
+      event.payload["invocation_id"] == invocation_id and
+        event.payload["tool_call_id"] == call["id"] and
+        event.type in ["tool_completed", "tool_failed"]
+    end)
+    |> search_tool_event_message(call)
+  end
+
+  defp search_tool_event_message(nil, _call), do: nil
+
+  defp search_tool_event_message(%{type: "tool_completed", payload: payload}, call) do
+    search_tool_message(call, payload["output"])
+  end
+
+  defp search_tool_event_message(%{type: "tool_failed", payload: payload}, call) do
+    search_tool_message(call, %{"error" => payload["error"]})
+  end
+
+  defp search_tool_message(call, content) do
+    %{
+      "role" => "tool",
+      "tool_call_id" => call["id"],
+      "name" => call["name"],
+      "content" => content
+    }
+  end
+
+  defp run_search_continuation(messages, continuation, tokens, state) do
+    with :ok <- within_budget(continuation, tokens, state.contract.budget),
+         :ok <- rehoming_boundary(),
+         {:ok, invocation_id} <-
+           start_subagent_invocation(
+             state.parent_call,
+             state.search,
+             state.contract,
+             state.capability_validation,
+             continuation,
+             state.context
+           ),
+         :ok <- rehoming_boundary(),
+         {:ok, response} <-
+           Sessions.dispatch_if_owner(state.context.ownership, fn ->
+             state.context.adapter.generate(
+               state.search["model"],
+               messages,
+               Tools.definitions_for_turn(
+                 state.contract.toolset_version,
+                 continuation,
+                 state.contract.budget.max_continuations
+               ),
+               timeout: state.context.budgets[:model_timeout],
+               reasoning: state.search["reasoning"]
+             )
+           end),
+         {:ok, _event} <-
+           persist_subagent_response(
+             state.context.session_id,
+             invocation_id,
+             state.parent_call["id"],
+             response,
+             state.context.ownership
+           ),
+         tokens = tokens + token_count(response.usage),
+         :ok <- within_budget(continuation, tokens, state.contract.budget) do
+      continue_search(
+        response,
+        messages,
+        invocation_id,
+        continuation,
+        tokens,
+        state
+      )
+    end
+  end
+
+  defp continue_search(
+         %{type: :final_answer, text: text},
+         _messages,
+         _invocation_id,
+         _continuation,
+         _tokens,
+         _state
+       ),
+       do: {:ok, text}
+
+  defp continue_search(
+         %{type: :tool_calls, tool_calls: tool_calls} = response,
+         messages,
+         invocation_id,
+         continuation,
+         tokens,
+         state
+       ) do
+    calls = normalize_tool_calls(tool_calls)
+
+    with :ok <- validate_tool_calls(calls),
+         :ok <- validate_role_tools(calls, state.contract),
+         {:ok, results} <- execute_search_calls(calls, invocation_id, state.context) do
+      tool_messages =
+        Enum.map(results, fn result ->
+          %{
+            "role" => "tool",
+            "tool_call_id" => result.tool_call_id,
+            "name" => result.name,
+            "content" => result.output
+          }
+        end)
+
+      assistant =
+        assistant_message(%{
+          "assistant" => Map.get(response, :assistant),
+          "text" => response.text,
+          "tool_calls" => calls
+        })
+
+      next_messages = messages ++ [assistant] ++ tool_messages
+      run_search_continuation(next_messages, continuation + 1, tokens, state)
+    end
+  end
+
+  defp validate_role_tools(calls, contract) do
+    allowed = MapSet.new(Tools.definitions(contract.toolset_version), & &1.name)
+
+    case Enum.find(calls, &(not MapSet.member?(allowed, &1["name"]))) do
+      nil -> :ok
+      call -> {:error, {:tool_denied, call["name"]}}
+    end
+  end
+
+  defp execute_search_calls(calls, invocation_id, context) do
+    Enum.reduce_while(calls, {:ok, []}, fn call, {:ok, results} ->
+      events = Sessions.events_after(context.session_id)
+
+      case execute_tool(
+             context.session_id,
+             context.runner_id,
+             invocation_id,
+             call,
+             events,
+             context.timeout,
+             context.ownership
+           ) do
+        {:ok, result} -> {:cont, {:ok, results ++ [result]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp start_subagent_invocation(
+         parent_call,
+         search,
+         contract,
+         capability_validation,
+         continuation,
+         context
+       ) do
+    invocation_id = Ecto.UUID.generate()
+
+    case Sessions.append_event(
+           context.session_id,
+           "subagent_invocation_started",
+           %{
+             "invocation_id" => invocation_id,
+             "delegation_tool_call_id" => parent_call["id"],
+             "continuation" => continuation,
+             "role" => "search",
+             "provider" => search["provider"],
+             "model" => search["model"],
+             "reasoning" => search["reasoning"],
+             "role_contract" => contract.id,
+             "toolset_version" => contract.toolset_version,
+             "capability_validation" => capability_validation,
+             "model_mapping" => context.mapping
+           },
+           version: 1,
+           parent_id: context.invocation_id,
+           ownership: context.ownership
+         ) do
+      {:ok, _event} -> {:ok, invocation_id}
+      error -> error
+    end
+  end
+
+  defp persist_subagent_response(
+         session_id,
+         invocation_id,
+         delegation_tool_call_id,
+         response,
+         ownership
+       ) do
+    Sessions.append_events(session_id, [
+      {"subagent_invocation_completed",
+       %{
+         "invocation_id" => invocation_id,
+         "delegation_tool_call_id" => delegation_tool_call_id,
+         "role" => "search",
+         "usage" => response.usage || %{}
+       }, [parent_id: invocation_id, ownership: ownership]},
+      {"subagent_response",
+       %{
+         "invocation_id" => invocation_id,
+         "delegation_tool_call_id" => delegation_tool_call_id,
+         "role" => "search",
+         "text" => response.text,
+         "tool_calls" => normalize_tool_calls(response.tool_calls),
+         "assistant" => Map.get(response, :assistant)
+       }, [version: 1, parent_id: invocation_id, ownership: ownership]}
+    ])
   end
 
   defp halt_after_tool_failure(
@@ -851,6 +1630,7 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp legacy_mapping(model),
-    do: ModelMapping.balanced([{"session", %{primary: %{model: model}}}])
+  defp legacy_mapping(model) do
+    ModelMapping.balanced([{"session", %{primary: %{model: model}}}])
+  end
 end

@@ -3,11 +3,11 @@ defmodule Kodo.Agent.RolesTest do
 
   alias Kodo.Agent.Roles
 
-  test "defines complete versioned contracts for the initial roles" do
+  test "defines complete alpha contracts for every role" do
     assert Map.keys(Roles.all()) |> Enum.sort() == [:primary, :review, :search]
 
     for {_role, contract} <- Roles.all() do
-      assert contract.version == 2
+      assert contract.id == "alpha-v1"
       assert is_atom(contract.responsibility)
       assert is_binary(contract.prompt)
       assert contract.prompt != ""
@@ -22,11 +22,13 @@ defmodule Kodo.Agent.RolesTest do
     end
   end
 
-  test "resolves a contract by its persisted version" do
-    assert Roles.fetch!(:primary, 1).prompt ==
-             "You are Kodo's primary coding agent. Inspect evidence, make the smallest correct patch, and verify it."
+  test "resolves only the active prerelease contract" do
+    assert Roles.fetch!(:primary, "alpha-v1") == Roles.fetch!(:primary)
+    assert Roles.fetch!(:primary).prompt =~ "exact public verification command"
+    assert Roles.fetch!(:search).prompt =~ "reserve the final turn"
+    assert Roles.fetch!(:review).prompt =~ "original task is authoritative"
+    assert Roles.fetch!(:review).capabilities.structured_output == :object
 
-    refute Map.has_key?(Roles.fetch!(:primary, 1), :capabilities)
-    assert Roles.fetch!(:primary, 2).capabilities.min_context == 100_000
+    assert_raise KeyError, fn -> Roles.fetch!(:review, "beta-v1") end
   end
 end

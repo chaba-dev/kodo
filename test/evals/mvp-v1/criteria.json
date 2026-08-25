@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "suite": "mvp-v1",
+  "suite_fingerprint": "e73ad35df41b5defd6d390e3b941066a42bf6b1fd2bb06ba712271fa7b0881d9",
+  "standard": "quality-v1",
+  "baseline_result": "results/balanced-profile-v8-2026-08-25.json",
+  "candidate_results": [
+    "results/terra-primary-search-2026-08-25.json",
+    "results/sol-primary-terra-search-2026-08-25.json",
+    "results/sol-primary-search-2026-08-25.json",
+    "results/terra-review-2026-08-25.json",
+    "results/sol-review-2026-08-25.json"
+  ],
+  "regression_thresholds": {
+    "completed_tasks": 30,
+    "harness_failure_rate": 0,
+    "search_relevant_file_recall": 0.85,
+    "search_evidence_citation_recall": 0.55,
+    "search_irrelevant_files": 5,
+    "review_defect_recall": 0.9,
+    "review_location_accuracy": 0.9,
+    "review_severity_accuracy": 0.8,
+    "review_false_positives": 2,
+    "implementation_public_check_pass_rate": 0.9,
+    "implementation_hidden_check_pass_rate": 0.8,
+    "implementation_scope_compliance_rate": 1,
+    "implementation_clean_review_rate": 0.1,
+    "mean_latency_ms": 17000,
+    "p95_latency_ms": 54000,
+    "estimated_cost_usd": 0.047
+  }
+}

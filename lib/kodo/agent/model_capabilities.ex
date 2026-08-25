@@ -27,13 +27,20 @@ defmodule Kodo.Agent.ModelCapabilities do
   defp missing_capabilities(model, role_mapping, required) do
     []
     |> require_capability(required.tools && !ModelHelpers.tools_enabled?(model), "tool_calling")
-    |> require_capability(
-      required.structured_output == :json_schema && !ModelHelpers.json_schema?(model),
-      "json_schema"
-    )
+    |> require_structured_output(model, required.structured_output)
     |> require_capability(context_window(model) < required.min_context, "context_window")
     |> require_modalities(model, required.input_modalities)
     |> require_reasoning(model, role_mapping["reasoning"])
+  end
+
+  defp require_structured_output(missing, _model, false), do: missing
+
+  defp require_structured_output(missing, model, :json_schema) do
+    require_capability(missing, !ModelHelpers.json_schema?(model), "json_schema")
+  end
+
+  defp require_structured_output(missing, model, :object) do
+    require_capability(missing, !object_output?(model), "structured_output")
   end
 
   defp require_capability(missing, true, capability), do: [capability | missing]
@@ -66,10 +73,13 @@ defmodule Kodo.Agent.ModelCapabilities do
       "context_window" => context_window(model),
       "input_modalities" => Enum.map(model.modalities.input, &to_string/1),
       "json_schema" => ModelHelpers.json_schema?(model),
+      "structured_output" => object_output?(model),
       "required_context_window" => required.min_context,
       "tools" => ModelHelpers.tools_enabled?(model)
     }
   end
+
+  defp object_output?(model), do: get_in(model.execution, [:object, :supported]) == true
 
   defp context_window(model), do: (model.limits && model.limits.context) || 0
 

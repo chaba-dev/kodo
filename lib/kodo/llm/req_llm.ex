@@ -35,6 +35,22 @@ defmodule Kodo.LLM.ReqLLM do
     request(model, context, tools, opts)
   end
 
+  @impl true
+  def generate_object(model, messages, schema, opts) do
+    request_opts =
+      [
+        receive_timeout: Keyword.fetch!(opts, :timeout),
+        total_timeout: Keyword.fetch!(opts, :timeout),
+        output_validation: :strict
+      ]
+      |> put_reasoning_effort(opts[:reasoning])
+
+    with {:ok, response} <-
+           ReqLLM.generate_object(model, build_context(messages), schema, request_opts) do
+      {:ok, %{object: Response.object(response), usage: Response.usage(response)}}
+    end
+  end
+
   @doc false
   def request_options(tools, opts) do
     [

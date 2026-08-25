@@ -25,6 +25,7 @@ defmodule Kodo.Test.FakeLLM do
        "context_window" => capabilities.min_context,
        "input_modalities" => Enum.map(capabilities.input_modalities, &to_string/1),
        "json_schema" => capabilities.structured_output == :json_schema,
+       "structured_output" => capabilities.structured_output in [:json_schema, :object],
        "required_context_window" => capabilities.min_context,
        "tools" => capabilities.tools
      }}
@@ -34,6 +35,19 @@ defmodule Kodo.Test.FakeLLM do
   def generate(model, messages, tools, opts) do
     last = List.last(messages)
 
+    force_final_turn? =
+      Enum.any?(messages, &(&1["role"] == "user" and &1["content"] == "force final turn"))
+
+    if force_final_turn? and tools == [] do
+      test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
+      send(test_pid, {:final_turn_tools, tools})
+      final("Finished before the budget expired.")
+    else
+      generate_response(model, messages, tools, opts, last)
+    end
+  end
+
+  defp generate_response(model, messages, tools, opts, last) do
     if last["content"] == "capture contract" do
       test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
       send(test_pid, {:llm_request, model, hd(messages), tools, opts})
@@ -46,6 +60,35 @@ defmodule Kodo.Test.FakeLLM do
     end
   end
 
+  @impl true
+  def generate_object(_model, messages, _schema, _opts) do
+    if test_pid = Application.get_env(:kodo, :fake_llm_review_pid) do
+      send(test_pid, {:review_messages, messages})
+    end
+
+    diff = List.last(messages)["content"]
+
+    object =
+      if String.contains?(diff, "REVIEW_FINDING") do
+        %{
+          "clean" => false,
+          "findings" => [
+            %{
+              "severity" => "high",
+              "path" => "lib/example.ex",
+              "line" => 7,
+              "explanation" => "The diff contains a regression marker.",
+              "suggested_fix" => "Remove the regression marker."
+            }
+          ]
+        }
+      else
+        %{"clean" => true, "findings" => []}
+      end
+
+    {:ok, %{object: object, usage: %{total_tokens: @small_usage_tokens}}}
+  end
+
   defp initial(%{"content" => "ownership barrier"}) do
     test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
     send(test_pid, {:model_dispatch_started, self()})
@@ -56,30 +99,77 @@ defmodule Kodo.Test.FakeLLM do
   end
 
   defp initial(%{"content" => "capture contract"}), do: final("The fix is complete.")
+  defp initial(%{"content" => "final answer"}), do: final("Ready for review.")
+
+  defp initial(%{"content" => "force final turn"}) do
+    tool_call(
+      "force-final-turn-patch",
+      "apply_patch",
+      %{"patch" => "--- a/example.txt\n+++ b/example.txt\n@@ -1 +1 @@\n-before\n+after\n"}
+    )
+  end
+
+  defp initial(%{"content" => "Final-diff review found supported issues." <> _findings}),
+    do: final("Addressed review findings.")
+
+  defp initial(%{"content" => @full_stack_prompt}) do
+    tool_call(
+      "e2e-patch",
+      "apply_patch",
+      %{
+        "patch" => "--- a/greeting.txt\n+++ b/greeting.txt\n@@ -1 +1 @@\n-helo\n+hello\n"
+      }
+    )
+  end
+
+  defp initial(%{"content" => "wait"}) do
+    if test_pid = Application.get_env(:kodo, :fake_llm_test_pid) do
+      send(test_pid, :fake_llm_waiting)
+    end
+
+    receive do
+      :never -> {:error, :unexpected}
+    end
+  end
+
+  defp initial(%{"content" => "provider failure"}), do: {:error, :provider_failure}
+
+  defp initial(%{"content" => "delegate search"}) do
+    tool_call("delegate-search", "delegate_search", %{"question" => "find helper"})
+  end
+
+  defp initial(%{"content" => "delegate unsafe search"}) do
+    tool_call("delegate-unsafe-search", "delegate_search", %{"question" => "mutate code"})
+  end
+
+  defp initial(%{"content" => "find helper"}) do
+    tool_call(
+      "search-read",
+      "read_file",
+      %{"path" => "README.md", "offset" => 0, "limit" => @read_file_limit_bytes}
+    )
+  end
+
+  defp initial(%{"content" => "mutate code"}) do
+    tool_call(
+      "search-mutation",
+      "apply_patch",
+      %{"patch" => "*** Begin Patch\n*** End Patch"}
+    )
+  end
+
+  defp initial(%{"content" => "token budget"}) do
+    {:ok,
+     %{
+       type: :final_answer,
+       text: "Too expensive",
+       tool_calls: [],
+       usage: %{total_tokens: @over_budget_usage_tokens}
+     }}
+  end
 
   defp initial(message) do
     case message do
-      %{"content" => @full_stack_prompt} ->
-        tool_call(
-          "e2e-patch",
-          "apply_patch",
-          %{
-            "patch" => "--- a/greeting.txt\n+++ b/greeting.txt\n@@ -1 +1 @@\n-helo\n+hello\n"
-          }
-        )
-
-      %{"content" => "wait"} ->
-        if test_pid = Application.get_env(:kodo, :fake_llm_test_pid) do
-          send(test_pid, :fake_llm_waiting)
-        end
-
-        receive do
-          :never -> {:error, :unexpected}
-        end
-
-      %{"content" => "provider failure"} ->
-        {:error, :provider_failure}
-
       %{"content" => "duplicate tool ids"} ->
         {:ok,
          %{
@@ -116,15 +206,6 @@ defmodule Kodo.Test.FakeLLM do
            usage: %{total_tokens: @standard_usage_tokens}
          }}
 
-      %{"content" => "token budget"} ->
-        {:ok,
-         %{
-           type: :final_answer,
-           text: "Too expensive",
-           tool_calls: [],
-           usage: %{total_tokens: @over_budget_usage_tokens}
-         }}
-
       _message ->
         {:ok,
          %{
@@ -154,14 +235,34 @@ defmodule Kodo.Test.FakeLLM do
     end
   end
 
-  defp continue_from(%{"role" => "tool", "name" => "read_file", "content" => output}, _messages) do
+  defp continue_from(
+         %{"role" => "tool", "name" => "read_file", "content" => output},
+         messages
+       ) do
     content = output["content"] || output[:content]
 
-    if String.trim(content) == "hello" do
-      tool_call("e2e-diff", "git_diff", %{"paths" => ["greeting.txt"]})
-    else
-      {:error, {:unexpected_file_content, content}}
+    cond do
+      hd(messages)["content"] == Kodo.Agent.Roles.fetch!(:search).prompt ->
+        if test_pid = Application.get_env(:kodo, :fake_llm_search_resume_pid) do
+          send(test_pid, :search_continuation_started)
+
+          receive do
+            :release_search_continuation -> :ok
+          end
+        end
+
+        final("README.md:1 contains the requested helper evidence.")
+
+      String.trim(content) == "hello" ->
+        tool_call("e2e-diff", "git_diff", %{"paths" => ["greeting.txt"]})
+
+      true ->
+        {:error, {:unexpected_file_content, content}}
     end
+  end
+
+  defp continue_from(%{"role" => "tool", "name" => "delegate_search"}, _messages) do
+    final("Used delegated evidence.")
   end
 
   defp continue_from(%{"role" => "tool", "name" => "git_diff"}, _messages) do

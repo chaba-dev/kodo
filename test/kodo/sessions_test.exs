@@ -17,7 +17,7 @@ defmodule Kodo.SessionsTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 4,
+        protocol_version: 5,
         capabilities: []
       })
 
@@ -42,6 +42,7 @@ defmodule Kodo.SessionsTest do
     assert event.payload["approval_policy"] == "standard"
     assert event.payload["status"] == "idle"
     assert event.payload["model_mapping"]["profile"] == "balanced"
+    assert event.payload["model_mapping"]["profile_version"] == "alpha-v1"
 
     assert event.payload["model_mapping"]["roles"]["primary"]["model"] ==
              "openai:gpt-4o-mini"
@@ -76,6 +77,7 @@ defmodule Kodo.SessionsTest do
 
     mapping = hd(Sessions.events_after(session.id)).payload["model_mapping"]
     assert mapping["profile"] == "balanced"
+    assert mapping["profile_version"] == "alpha-v1"
     assert mapping["roles"]["primary"]["sources"]["model"] == "profile"
   end
 
@@ -114,7 +116,7 @@ defmodule Kodo.SessionsTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 4,
+        protocol_version: 5,
         capabilities: []
       })
 
@@ -214,7 +216,7 @@ defmodule Kodo.SessionsTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 4,
+        protocol_version: 5,
         capabilities: []
       })
 
@@ -258,7 +260,7 @@ defmodule Kodo.SessionsTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 4,
+        protocol_version: 5,
         capabilities: []
       })
 

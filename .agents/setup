@@ -9,6 +9,7 @@ packages=(
   libssl-dev
   libwxgtk3.2-dev
   postgresql
+  ripgrep
   unixodbc-dev
 )
 

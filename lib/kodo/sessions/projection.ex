@@ -1,6 +1,8 @@
 defmodule Kodo.Sessions.Projection do
   @moduledoc "Reconstructs all agent-visible session state solely from persisted events."
 
+  alias Kodo.Agent.ModelMapping
+
   @before_first_event_sequence 0
 
   defstruct [
@@ -57,13 +59,16 @@ defmodule Kodo.Sessions.Projection do
     |> reduce(event.type, event.payload)
   end
 
+  defp normalize_model_mapping(nil), do: nil
+  defp normalize_model_mapping(mapping), do: ModelMapping.normalize(mapping)
+
   defp reduce(projection, "session_created", payload) do
     %{
       projection
       | title: payload["title"],
         runner_id: payload["runner_id"],
         model: payload["model"],
-        model_mapping: payload["model_mapping"],
+        model_mapping: normalize_model_mapping(payload["model_mapping"]),
         approval_policy: payload["approval_policy"] || "standard",
         status: payload["status"]
     }

@@ -773,16 +773,49 @@ delivery checklist.
   sessions, not by historical sessions or completed coordinators, while failed
   owners are still recovered within the documented availability bound.
 
-** TODO Milestone 7: Roles and recommended mapping
+** DONE Milestone 7: Roles and recommended mapping
 
 - [X] Versioned primary, search, and review contracts.
 - [X] The versioned ~balanced~ profile.
 - [X] Per-role user and repository overrides.
 - [X] Capability validation and invocation metadata.
-- [ ] Search and final-diff review integration.
-- [ ] Initial 30-task evaluation suite.
-- [ ] Exit criterion: a user can override one role while inheriting all other
+- [X] Search and final-diff review integration.
+- [X] Initial 30-task evaluation suite.
+- [X] Record a complete live baseline for the default mapping. The corrected
+  run completed all 30 tasks and executed hidden checks, with 55% search recall,
+  90% review recall, and 10% hidden implementation success.
+- [X] Compared a partial primary/search model override against the baseline and
+  rejected it because it preserved review and public-check quality, reduced
+  search recall to zero, increased latency, and cost 2.7 times as much. Its
+  hidden-check metric is invalid for the same reason as the first run.
+- [X] Exit criterion: a user can override one role while inheriting all other
   recommendations, and the default mapping has recorded evaluation results.
+  The harness-corrected profile revision 5 run improved search file/evidence
+  recall to 81.7%/70% and public/hidden implementation success to 70%/50%, with
+  no empty answers or harness failures. Trace inspection found unsupported
+  asynchronous command tools in the synchronous evaluator and non-actionable
+  final-review findings for correct changes. Profile revision 6 removes those
+  evaluator tools and tightens the review contract. Keep this milestone open
+  pending evidence for revision 6; 50% hidden implementation success is not yet
+  an acceptable default recommendation. Revision 6 improved search file/evidence
+  recall to 85%/80% and standalone review recall to 100%, but implementation
+  regressed to 60% public and 40% hidden success because review findings remained
+  speculative and sometimes reversed correct changes. Revision 7 removes the
+  consistently unusable patch tool, requires exact verification after edits, and
+  makes the original task authoritative during review. Revision 7 reduced cost
+  and latency but regressed to 50% public and 30% hidden implementation success:
+  correction turns had lost the original task and exact command, and every
+  correction verification was rejected. Revision 8 restores that context and
+  rejects review findings outside the diff or explicitly requiring no change.
+  Its complete run recorded 86.7% search file recall, 90% standalone review
+  recall, 90% public implementation success, 80% hidden implementation success,
+  100% scope compliance, and no harness errors. Accept revision 8 as the default
+  recommendation; review-precision improvements are non-blocking follow-up work.
+  The balanced =alpha-v1= profile preserves that model selection and advances
+  the review contract to accept any schema-validated object path, including
+  ReqLLM's strict-tool fallback. Terra and Sol can now run review, but initial
+  candidates did not preserve the accepted implementation thresholds; Terra is
+  the cheaper and faster follow-up candidate.
 
 ** TODO Milestone 8: Reliability and release candidate
 

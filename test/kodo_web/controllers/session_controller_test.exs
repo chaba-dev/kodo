@@ -35,7 +35,7 @@ defmodule KodoWeb.SessionControllerTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 4,
+        protocol_version: 5,
         capabilities: []
       })
 
@@ -87,12 +87,14 @@ defmodule KodoWeb.SessionControllerTest do
       "runner_responses:#{runner.id}",
       {:runner_tool_response, runner.id,
        %{
-         "protocol_version" => 4,
+         "protocol_version" => 5,
          "request_id" => request["request_id"],
          "status" => "success",
          "response" => %{"result" => "files_changed", "paths" => ["lib/greeting.ex"]}
        }}
     )
+
+    respond_to_review(runner.id)
 
     assert_receive {:session_event,
                     %{type: "session_status_changed", payload: %{"status" => "completed"}}}
@@ -214,12 +216,14 @@ defmodule KodoWeb.SessionControllerTest do
       "runner_responses:#{runner.id}",
       {:runner_tool_response, runner.id,
        %{
-         "protocol_version" => 4,
+         "protocol_version" => 5,
          "request_id" => request["request_id"],
          "status" => "success",
          "response" => %{"result" => "files_changed", "paths" => []}
        }}
     )
+
+    respond_to_review(runner.id)
 
     assert_receive {:session_event,
                     %{type: "session_status_changed", payload: %{"status" => "completed"}}}
@@ -302,5 +306,22 @@ defmodule KodoWeb.SessionControllerTest do
     conn
     |> put_req_header("content-type", "application/json")
     |> post(path, Jason.encode!(params))
+  end
+
+  defp respond_to_review(runner_id) do
+    assert_receive {:tool_request, request}
+    assert request["request"]["tool"] == "git_diff"
+
+    Phoenix.PubSub.broadcast(
+      Kodo.PubSub,
+      "runner_responses:#{runner_id}",
+      {:runner_tool_response, runner_id,
+       %{
+         "protocol_version" => 5,
+         "request_id" => request["request_id"],
+         "status" => "success",
+         "response" => %{"result" => "output", "content" => "clean diff", "truncated" => false}
+       }}
+    )
   end
 end

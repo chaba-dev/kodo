@@ -18,6 +18,9 @@ defmodule Kodo.LLM do
   @callback generate(String.t(), [map()], [tool()], keyword()) ::
               {:ok, result()} | {:error, term()}
 
+  @callback generate_object(String.t(), [map()], map(), keyword()) ::
+              {:ok, %{object: map(), usage: map() | nil}} | {:error, term()}
+
   @callback validate_model(String.t(), map(), map()) :: {:ok, map()} | {:error, term()}
 
   def adapter, do: Application.get_env(:kodo, :llm_adapter, Kodo.LLM.ReqLLM)

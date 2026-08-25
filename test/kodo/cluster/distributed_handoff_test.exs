@@ -66,7 +66,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 4,
+        protocol_version: 5,
         capabilities: []
       })
 
@@ -118,8 +118,8 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
 
     events = Sessions.events_after(session.id)
     assert Enum.count(events, &(&1.type == "approval_requested")) == 2
-    assert Enum.count(events, &(&1.type == "tool_requested")) == 2
-    assert Enum.count(events, &(&1.type == "tool_completed")) == 2
+    assert Enum.count(events, &(&1.type == "tool_requested")) == 4
+    assert Enum.count(events, &(&1.type == "tool_completed")) == 4
 
     assert :ok = :erpc.call(peer_node, Supervisor, :stop, [remote_supervisor])
     :ok = Discovery.subscribe()
@@ -149,7 +149,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 4,
+        protocol_version: 5,
         capabilities: []
       })
 
@@ -188,13 +188,15 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
 
     send(runner_pid, {:complete, request_id})
 
+    assert_receive {:review_completed, _review_request_id}, 5_000
+
     assert_receive {:session_event,
                     %{type: "session_status_changed", payload: %{"status" => "completed"}}},
                    5_000
 
     events = Sessions.events_after(session.id)
-    assert Enum.count(events, &(&1.type == "tool_requested")) == 1
-    assert Enum.count(events, &(&1.type == "tool_completed")) == 1
+    assert Enum.count(events, &(&1.type == "tool_requested")) == 2
+    assert Enum.count(events, &(&1.type == "tool_completed")) == 2
   end
 
   defp assert_competing_claims_are_fenced(source, target, peer_node) do
@@ -207,7 +209,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
         platform: "linux",
         architecture: "x86_64",
         runner_version: "0.1.0",
-        protocol_version: 4,
+        protocol_version: 5,
         capabilities: []
       })
 
@@ -275,10 +277,25 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
       "runner_responses:#{runner.id}",
       {:runner_tool_response, runner.id,
        %{
-         "protocol_version" => 4,
+         "protocol_version" => 5,
          "request_id" => request["request_id"],
          "status" => "success",
          "response" => %{"result" => "files_changed", "paths" => []}
+       }}
+    )
+
+    assert_receive {:tool_request, review_request}, 5_000
+    assert review_request["request"]["tool"] == "git_diff"
+
+    Phoenix.PubSub.broadcast(
+      Kodo.PubSub,
+      "runner_responses:#{runner.id}",
+      {:runner_tool_response, runner.id,
+       %{
+         "protocol_version" => 5,
+         "request_id" => review_request["request_id"],
+         "status" => "success",
+         "response" => %{"result" => "output", "content" => "clean diff", "truncated" => false}
        }}
     )
 

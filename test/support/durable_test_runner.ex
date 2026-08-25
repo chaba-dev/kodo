@@ -19,18 +19,24 @@ defmodule Kodo.Test.DurableTestRunner do
   defp loop(runner_id, owner, executed, requests) do
     receive do
       {:tool_request, %{"request_id" => request_id} = request} ->
-        if request_id in executed do
-          send(owner, {:tool_request_replayed, request_id})
-          loop(runner_id, owner, executed, Map.put(requests, request_id, request))
+        if request["request"]["tool"] == "git_diff" do
+          complete_review(runner_id, request)
+          send(owner, {:review_completed, request_id})
+          loop(runner_id, owner, MapSet.put(executed, request_id), requests)
         else
-          send(owner, {:tool_execution_started, request_id})
+          if request_id in executed do
+            send(owner, {:tool_request_replayed, request_id})
+            loop(runner_id, owner, executed, Map.put(requests, request_id, request))
+          else
+            send(owner, {:tool_execution_started, request_id})
 
-          loop(
-            runner_id,
-            owner,
-            MapSet.put(executed, request_id),
-            Map.put(requests, request_id, request)
-          )
+            loop(
+              runner_id,
+              owner,
+              MapSet.put(executed, request_id),
+              Map.put(requests, request_id, request)
+            )
+          end
         end
 
       {:complete, request_id} ->
@@ -41,7 +47,7 @@ defmodule Kodo.Test.DurableTestRunner do
           "runner_responses:#{runner_id}",
           {:runner_tool_response, runner_id,
            %{
-             "protocol_version" => 4,
+             "protocol_version" => 5,
              "request_id" => request["request_id"],
              "status" => "success",
              "response" => %{"result" => "files_changed", "paths" => []}
@@ -53,5 +59,19 @@ defmodule Kodo.Test.DurableTestRunner do
       {:authority_lease, _lease} ->
         loop(runner_id, owner, executed, requests)
     end
+  end
+
+  defp complete_review(runner_id, request) do
+    Phoenix.PubSub.broadcast(
+      Kodo.PubSub,
+      "runner_responses:#{runner_id}",
+      {:runner_tool_response, runner_id,
+       %{
+         "protocol_version" => 5,
+         "request_id" => request["request_id"],
+         "status" => "success",
+         "response" => %{"result" => "output", "content" => "clean diff", "truncated" => false}
+       }}
+    )
   end
 end

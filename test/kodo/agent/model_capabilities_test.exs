@@ -18,6 +18,33 @@ defmodule Kodo.Agent.ModelCapabilitiesTest do
     end
   end
 
+  test "accepts strict structured-output fallback for GPT-5.6 review models" do
+    for model <- ~w(openai:gpt-5.6-terra openai:gpt-5.6-sol) do
+      assert {:ok, metadata} =
+               ModelCapabilities.validate(
+                 model,
+                 %{"reasoning" => "none"},
+                 Roles.fetch!(:review)
+               )
+
+      refute metadata["json_schema"]
+      assert metadata["structured_output"]
+    end
+  end
+
+  test "can require native JSON Schema explicitly" do
+    contract =
+      Roles.fetch!(:review)
+      |> put_in([:capabilities, :structured_output], :json_schema)
+
+    assert {:error, {:model_capabilities_missing, ["json_schema"]}} =
+             ModelCapabilities.validate(
+               "openai:gpt-5.6-terra",
+               %{"reasoning" => "none"},
+               contract
+             )
+  end
+
   test "reports every missing role capability" do
     model = %LLMDB.Model{
       id: "limited",
@@ -30,7 +57,7 @@ defmodule Kodo.Agent.ModelCapabilitiesTest do
     assert {:error, {:model_capabilities_missing, missing}} =
              ModelCapabilities.validate(model, %{"reasoning" => "none"}, Roles.fetch!(:review))
 
-    assert Enum.sort(missing) == ["context_window", "json_schema", "tool_calling"]
+    assert Enum.sort(missing) == ["context_window", "structured_output", "tool_calling"]
   end
 
   test "requires configured reasoning effort support" do

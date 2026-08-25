@@ -1,0 +1,76 @@
+:suite: mvp-v1
+:standard: quality-v1
+:state: accepted
+:labels: evaluation, benchmark, mvp, agents
+:toc:
+
+= Benchmark suite mvp-v1
+
+[[mvp-v1-summary]]
+== Summary
+
+`mvp-v1` is Kodo's initial role-model evaluation suite. It contains 10 search,
+10 review, and 10 implementation tasks built from purpose-made fixtures. Hidden
+implementation files and checks are materialized only after the evaluated agent
+finishes its implementation attempt.
+
+The suite artifact is link:suite.json[`suite.json`]. Its fingerprint, accepted
+result, benchmark standard, and regression thresholds are recorded in
+link:criteria.json[`criteria.json`]. Shared criterion definitions and
+improvement targets come from `quality-v1` in the
+link:../criteria.json[top-level benchmark catalog].
+
+[[mvp-v1-accepted-baseline]]
+== Accepted baseline
+
+The accepted result is
+link:results/balanced-profile-v8-2026-08-25.json[`balanced-profile-v8-2026-08-25.json`].
+It evaluates `openai:gpt-4o-mini` with no reasoning for the primary, search, and
+review roles. The artifact preserves the exact historical contract iterations
+and toolsets used by that benchmark; those numeric iterations are benchmark
+provenance, not released product versions.
+
+The suite-specific regression floors preserve this accepted result's quality
+while the shared targets identify remaining work. In particular, search
+evidence citation and final-review precision remain below their `quality-v1`
+targets and should improve without regressing implementation correctness,
+scope, harness reliability, cost, or latency.
+
+[[mvp-v1-gpt-5-6-candidates]]
+== GPT-5.6 candidates
+
+Recorded OpenAI API comparisons cover Terra primary/search, Sol primary with
+Terra search, and Sol primary/search while retaining `gpt-4o-mini` for the
+structured review role. Terra achieved complete search file and evidence recall.
+Sol primary reached 100% public and 90% hidden implementation success. Sol did
+not improve search over Terra and increased both cost and latency.
+
+The Sol-primary/Terra-search mapping is the strongest observed quality profile,
+but it costs substantially more and exceeds the suite's p95 latency regression
+threshold. It is therefore evidence for a future quality-oriented profile, not
+a replacement for the accepted balanced baseline. The detailed comparison and
+reasoning-configuration caveat are recorded in
+link:../../../docs/evaluations.md[the evaluation analysis].
+
+The `alpha-v1` review contract allows both models to use ReqLLM's schema-validated strict-tool
+fallback when native JSON Schema metadata is absent. Both completed review
+candidate runs with 100% defect and location recall and no false positives.
+Terra matched Sol's review quality with lower cost and latency, so it is the
+preferred GPT-5.6 review candidate for further repetitions. Neither replaces
+the balanced reviewer because the complete runs did not preserve the accepted
+implementation thresholds. ChatGPT-subscription evaluation additionally
+requires the OpenAI Codex OAuth device authorization and account flow, which is
+not part of this suite iteration.
+
+[[mvp-v1-artifacts]]
+== Artifacts
+
+* link:suite.json[Task suite]
+* link:criteria.json[Regression thresholds and accepted baseline pointer]
+* link:results/[Recorded evaluation results]
+* link:../README.adoc[Benchmark lifecycle and reference-generation guide]
+* link:../../../docs/evaluations.md[Evaluation analysis]
+
+The historical result files include early baselines with a hidden-check
+execution defect. Their documentation identifies invalid metrics; they remain
+available as trace evidence and must not replace the corrected accepted result.

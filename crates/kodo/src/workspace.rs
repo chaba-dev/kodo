@@ -7,10 +7,10 @@ use std::fs::{File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::{io::ErrorKind, io::Read};
+use std::{io::ErrorKind, io::Read, io::Write};
 
 use cap_std::ambient_authority;
-use cap_std::fs::Dir;
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -186,6 +186,100 @@ impl Workspace {
         })
     }
 
+    /// Replace one exact text occurrence through the retained directory capability.
+    pub fn replace_text_if_unique(
+        &self,
+        path: impl AsRef<Path>,
+        old_text: &str,
+        new_text: &str,
+        limit: usize,
+    ) -> Result<bool, WorkspaceError> {
+        let path = validate_relative(path.as_ref())?;
+        let display_path = self.root.join(path);
+        let mut options = CapOpenOptions::new();
+        options.read(true);
+        let mut file =
+            self.root_dir
+                .open_with(path, &options)
+                .map_err(|source| WorkspaceError::Io {
+                    path: display_path.clone(),
+                    source,
+                })?;
+        let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+        std::io::Read::by_ref(&mut file)
+            .take(limit.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|source| WorkspaceError::Io {
+                path: display_path.clone(),
+                source,
+            })?;
+        if bytes.len() > limit {
+            return Err(WorkspaceError::FileTooLarge {
+                path: display_path,
+                limit,
+            });
+        }
+        let content = String::from_utf8(bytes).map_err(|source| WorkspaceError::Io {
+            path: display_path.clone(),
+            source: std::io::Error::new(ErrorKind::InvalidData, source),
+        })?;
+        if content.match_indices(old_text).take(2).count() != 1 {
+            return Ok(false);
+        }
+        let replacement = content.replacen(old_text, new_text, 1);
+        if replacement.len() > limit {
+            return Err(WorkspaceError::FileTooLarge {
+                path: display_path,
+                limit,
+            });
+        }
+
+        let permissions = file
+            .metadata()
+            .map_err(|source| WorkspaceError::Io {
+                path: display_path.clone(),
+                source,
+            })?
+            .permissions();
+        drop(file);
+
+        let file_name = path
+            .file_name()
+            .expect("validated file path has a file name");
+        let temporary_name = format!(
+            ".{}.kodo-{}.tmp",
+            file_name.to_string_lossy(),
+            uuid::Uuid::new_v4()
+        );
+        let temporary_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(temporary_name);
+        let mut temporary_options = CapOpenOptions::new();
+        temporary_options.write(true).create_new(true);
+
+        let result = (|| {
+            let mut temporary = self
+                .root_dir
+                .open_with(&temporary_path, &temporary_options)?;
+            temporary.set_permissions(permissions)?;
+            temporary.write_all(replacement.as_bytes())?;
+            temporary.sync_all()?;
+            drop(temporary);
+            self.root_dir.rename(&temporary_path, &self.root_dir, path)
+        })();
+
+        if let Err(source) = result {
+            let _cleanup_result = self.root_dir.remove_file(&temporary_path);
+            return Err(WorkspaceError::Io {
+                path: display_path,
+                source,
+            });
+        }
+
+        Ok(true)
+    }
+
     pub fn is_file(&self, path: impl AsRef<Path>) -> Result<bool, WorkspaceError> {
         let path = validate_relative(path.as_ref())?;
         self.root_dir
@@ -260,6 +354,7 @@ fn canonicalize(path: &Path) -> Result<PathBuf, WorkspaceError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{Read, Seek, SeekFrom};
 
     use tempfile::TempDir;
 
@@ -354,6 +449,27 @@ mod tests {
             workspace.read_to_string_bounded("large.txt", 4),
             Err(WorkspaceError::FileTooLarge { limit: 4, .. })
         ));
+    }
+
+    #[test]
+    fn replace_text_atomically_swaps_the_file() {
+        let repository = git_repository();
+        let path = repository.path().join("message.txt");
+        fs::write(&path, "before value").unwrap();
+        let mut original_file = fs::File::open(&path).unwrap();
+        let workspace = Workspace::from_root(repository.path()).unwrap();
+
+        assert!(
+            workspace
+                .replace_text_if_unique("message.txt", "before", "after", 1024)
+                .unwrap()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "after value");
+
+        original_file.seek(SeekFrom::Start(0)).unwrap();
+        let mut original_content = String::new();
+        original_file.read_to_string(&mut original_content).unwrap();
+        assert_eq!(original_content, "before value");
     }
 
     fn git_repository() -> TempDir {

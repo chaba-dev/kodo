@@ -69,11 +69,58 @@ defmodule Kodo.Agent.Tools do
     ]
   end
 
+  def definitions("workspace-v2") do
+    definitions("workspace-v1") ++
+      [
+        tool(
+          "delegate_search",
+          "Delegate one focused codebase question to a read-only search agent",
+          %{"question" => @string},
+          ["question"]
+        )
+      ]
+  end
+
+  def definitions("workspace-v3") do
+    Enum.map(definitions("workspace-v2"), fn
+      %{name: "apply_patch"} = definition ->
+        %{
+          definition
+          | description:
+              "Apply a complete git unified diff with diff --git, ---, +++, and @@ hunk headers; replacement text alone is invalid"
+        }
+
+      definition ->
+        definition
+    end)
+  end
+
+  def definitions("workspace-v4") do
+    definitions("workspace-v3") ++
+      [
+        tool(
+          "replace_text",
+          "Replace old_text exactly once in an existing workspace file; fails without changing the file unless there is exactly one match",
+          %{"path" => @string, "old_text" => @string, "new_text" => @string},
+          ["path", "old_text", "new_text"]
+        )
+      ]
+  end
+
+  def definitions("workspace-v5") do
+    Enum.reject(definitions("workspace-v4"), &(&1.name == "apply_patch"))
+  end
+
   def definitions("read-only-v1") do
     Enum.reject(
       definitions("workspace-v1"),
       &(&1.name in ["apply_patch", "start_command", "stop_command"])
     )
+  end
+
+  @doc "Returns no tools on the final model turn so the response budget is reserved for an answer."
+  def definitions_for_turn(version, turn, max_turns) do
+    if turn == max_turns, do: [], else: definitions(version)
   end
 
   def request(name, arguments) when is_binary(name) and is_map(arguments) do
@@ -83,11 +130,11 @@ defmodule Kodo.Agent.Tools do
   def request(_name, _arguments), do: {:error, :invalid_tool_call}
 
   def authorization("read-only", name, _arguments)
-      when name in ["apply_patch", "start_command", "stop_command"],
+      when name in ["apply_patch", "replace_text", "start_command", "stop_command"],
       do: :deny
 
   def authorization("safe", name, _arguments)
-      when name in ["apply_patch", "start_command", "stop_command"],
+      when name in ["apply_patch", "replace_text", "start_command", "stop_command"],
       do: :approval
 
   def authorization("standard", "start_command", %{"command" => command}) do
@@ -128,6 +175,17 @@ defmodule Kodo.Agent.Tools do
     do: exact(args, ["patch"], "apply_patch")
 
   defp translate(
+         "replace_text",
+         %{"path" => path, "old_text" => old_text, "new_text" => new_text} = args
+       )
+       when is_binary(path) and is_binary(old_text) and old_text != "" and is_binary(new_text),
+       do: exact(args, ["new_text", "old_text", "path"], "replace_text")
+
+  defp translate("delegate_search", %{"question" => question} = args)
+       when is_binary(question) and question != "",
+       do: exact(args, ["question"], "delegate_search")
+
+  defp translate(
          "start_command",
          %{"command" => command, "cwd" => cwd, "timeout_ms" => timeout} = args
        )
@@ -147,7 +205,7 @@ defmodule Kodo.Agent.Tools do
   end
 
   defp translate(name, _args) do
-    if Enum.any?(definitions(), &(&1.name == name)) do
+    if Enum.any?(definitions("workspace-v4"), &(&1.name == name)) do
       {:error, :invalid_tool_call}
     else
       {:error, :unknown_tool}
