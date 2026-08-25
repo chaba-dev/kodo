@@ -14,7 +14,9 @@ Results belong in `priv/evals/mvp-v1/results/<mapping>-<date>.json`. Do not reco
 
 ## Balanced baseline — 2026-08-25
 
-The first complete live baseline is recorded in [`balanced-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-2026-08-25.json) for suite fingerprint `9fe83a629c90af1c663f700ec291140d1a04d4cceef37727917a14a3fea36599`. It ran all roles on `openai:gpt-4o-mini` with no reasoning and completed all 30 tasks without harness errors.
+The first live baseline is recorded in [`balanced-2026-08-25.json`](../priv/evals/mvp-v1/results/balanced-2026-08-25.json) for suite fingerprint `9fe83a629c90af1c663f700ec291140d1a04d4cceef37727917a14a3fea36599`. It ran all roles on `openai:gpt-4o-mini` with no reasoning and completed all 30 tasks without reported harness errors.
+
+The old suite invoked hidden checks as `elixir -r lib/example.ex test/public_test.exs test/hidden_test.exs`. Elixir executed the public test script and treated the hidden test path as a command-line argument, so the hidden tests did not run. The recorded hidden-check pass rate is invalid. Public-check, search, review, latency, usage, and cost results remain usable.
 
 | Metric | Result |
 | --- | ---: |
@@ -22,26 +24,36 @@ The first complete live baseline is recorded in [`balanced-2026-08-25.json`](../
 | Search evidence-citation recall | 30% |
 | Review defect and location recall | 80% |
 | Review false positives | 1 |
-| Implementation public and hidden pass rate | 50% |
+| Implementation public-check pass rate | 50% |
+| Implementation hidden-check pass rate | Invalid — hidden tests did not execute |
 | Implementation scope compliance | 100% |
 | Mean / p95 task latency | 8.42s / 18.35s |
 | Total tokens | 152,859 |
 | Provider-estimated cost | $0.021951 |
 | Harness failure rate | 0% |
 
-This is a reproducible baseline, not evidence that the current balanced profile is a useful default. Search recall and implementation success are too low to close the Phase 7 recommendation criterion. Compare a revised profile or role contract against this artifact before changing the recommendation.
+This artifact is historical evidence, not a valid complete baseline and not evidence that the current balanced profile is a useful default. Search recall and public implementation success are too low to close the Phase 7 recommendation criterion.
 
 ## Rejected stronger-model candidate — 2026-08-25
 
 [`gpt5-mini-primary-search-2026-08-25.json`](../priv/evals/mvp-v1/results/gpt5-mini-primary-search-2026-08-25.json) overrides only the primary and search roles with `openai:gpt-5-mini`; the review role inherits the balanced recommendation. This directly exercises partial role override inheritance against the same suite fingerprint.
 
+This run has the same hidden-check defect as the balanced artifact. Its hidden implementation metric is invalid; its public implementation, search, review, latency, usage, and cost results remain usable.
+
 | Metric | Balanced baseline | GPT-5 mini candidate |
 | --- | ---: | ---: |
 | Search relevant-file recall | 30% | 0% |
 | Review defect and location recall | 80% | 80% |
-| Implementation public and hidden pass rate | 50% | 50% |
+| Implementation public-check pass rate | 50% | 50% |
+| Implementation hidden-check pass rate | Invalid | Invalid |
 | Mean task latency | 8.42s | 10.92s |
 | Provider-estimated cost | $0.021951 | $0.059196 |
 | Harness failure rate | 0% | 0% |
 
-Reject this candidate: it is dominated by the balanced baseline on quality, latency, and cost. Its search traces consistently consumed the four-continuation budget on tool calls without producing a final answer. The implementation traces also confirm that model substitution alone does not resolve repeated invalid unified patches. Revise the versioned search and patch-use contracts before evaluating another model mapping.
+Reject this candidate based on the still-valid comparison: it reduced search recall to zero while preserving review recall and public implementation success, and increased latency and cost. Its search traces consistently consumed the four-continuation budget on tool calls without producing a final answer. The implementation traces also confirm that model substitution alone does not resolve repeated invalid unified patches.
+
+## Corrected suite
+
+The hidden commands now explicitly require the public test file before executing the hidden test script. The corrected suite fingerprint is `e73ad35df41b5defd6d390e3b941066a42bf6b1fd2bb06ba712271fa7b0881d9`.
+
+A fresh 30-task run against this fingerprint is required before Phase 7 can close. Do not compare corrected implementation metrics directly with the invalid hidden-check metrics from the older fingerprint.
