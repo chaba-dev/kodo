@@ -565,9 +565,20 @@ fn format_event(event: &Event) -> String {
             } else if matches!(name, "start_command" | "poll_command" | "stop_command") {
                 format!("[verification: {name}] {}", command_summary(output))
             } else {
-                format!("[tool_completed] {name}")
+                format!("[tool_completed] {name}\n{}", tool_summary(output))
             }
         }
+        "tool_failed" => format!(
+            "[tool_failed] {}: {}",
+            payload
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("tool"),
+            payload
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+        ),
         "session_failed" => format!(
             "[failed] {}",
             payload
@@ -667,6 +678,20 @@ fn command_summary(output: &Value) -> String {
     }
 }
 
+fn tool_summary(output: &Value) -> String {
+    let rendered =
+        find_string(output, &["content", "output"]).unwrap_or_else(|| output.to_string());
+    if output
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        format!("{rendered}\n[output truncated]")
+    } else {
+        rendered
+    }
+}
+
 fn collect_content(value: &Value, chunks: &mut Vec<String>) {
     match value {
         Value::Object(object) => {
@@ -750,6 +775,30 @@ mod tests {
         let rendered = format_event(&command);
         assert!(rendered.contains("exited (0)"));
         assert!(rendered.contains("2 tests passed"));
+
+        let truncated = Event {
+            sequence: 3,
+            kind: "tool_completed".into(),
+            payload: json!({
+                "name": "read_file",
+                "output": {"content": "partial", "truncated": true}
+            }),
+        };
+        let rendered = format_event(&truncated);
+        assert!(rendered.contains("partial"));
+        assert!(rendered.contains("[output truncated]"));
+
+        let patch_failure = Event {
+            sequence: 4,
+            kind: "tool_failed".into(),
+            payload: json!({
+                "name": "apply_patch",
+                "error": "patch failed: context did not match"
+            }),
+        };
+        let rendered = format_event(&patch_failure);
+        assert!(rendered.contains("[tool_failed] apply_patch"));
+        assert!(rendered.contains("patch failed: context did not match"));
     }
 
     #[test]

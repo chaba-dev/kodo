@@ -284,6 +284,20 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert :ok = ActiveSession.cancel(pid)
   end
 
+  test "persists a provider timeout as a terminal session failure", %{session: session} do
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
+
+    assert :ok = Sessions.start_turn(session.id, "provider timeout")
+
+    assert_receive {:session_event,
+                    %{type: "session_failed", payload: %{"reason" => ":provider_timeout"}}}
+
+    assert_receive {:session_event,
+                    %{type: "session_status_changed", payload: %{"status" => "failed"}}}
+
+    assert Sessions.get_session!(session.id).status == "failed"
+  end
+
   test "concurrent cancellation retries reconcile from durable status", %{
     session: session,
     scope: scope

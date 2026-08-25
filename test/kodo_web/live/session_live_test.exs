@@ -211,6 +211,30 @@ defmodule KodoWeb.SessionLiveTest do
 
     assert has_element?(view, "#diff-truncated-warning")
     assert has_element?(view, "#changed-file-count", "1+")
+    assert has_element?(view, "#tool-#{tool_call_id}", "[output truncated]")
+  end
+
+  test "shows patch failures in the tool timeline", %{conn: conn, session: session} do
+    tool_call_id = Ecto.UUID.generate()
+
+    {:ok, _requested} =
+      Sessions.append_event(session.id, "tool_requested", %{
+        "tool_call_id" => tool_call_id,
+        "request_id" => Ecto.UUID.generate(),
+        "name" => "apply_patch",
+        "arguments" => %{"patch" => "invalid patch"}
+      })
+
+    {:ok, _failed} =
+      Sessions.append_event(session.id, "tool_failed", %{
+        "tool_call_id" => tool_call_id,
+        "name" => "apply_patch",
+        "error" => "patch failed: context did not match"
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+    assert has_element?(view, "#tool-#{tool_call_id}", "patch failed: context did not match")
   end
 
   test "survives malformed durable git diff output", %{conn: conn, session: session} do

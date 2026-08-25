@@ -133,6 +133,7 @@ defmodule Kodo.Test.FakeLLM do
   end
 
   defp initial(%{"content" => "provider failure"}), do: {:error, :provider_failure}
+  defp initial(%{"content" => "provider timeout"}), do: {:error, :provider_timeout}
 
   defp initial(%{"content" => "delegate search"}) do
     tool_call("delegate-search", "delegate_search", %{"question" => "find helper"})
