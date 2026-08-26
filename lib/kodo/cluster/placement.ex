@@ -21,9 +21,9 @@ defmodule Kodo.Cluster.Placement do
   @rehoming_capabilities [@rehoming_capability | @required_capabilities]
   @capacity_statuses ["idle", "running", "awaiting_approval"]
 
-  @stale_after_seconds Keyword.fetch!(
-                         Application.compile_env!(:kodo, Kodo.Cluster.InstanceManager),
-                         :ownership_stale_after_seconds
+  @stale_after_seconds Application.compile_env!(
+                         :kodo,
+                         [Kodo.Cluster.InstanceManager, :ownership_stale_after_seconds]
                        )
 
   @doc "Creates an expiring rollback target and retains the authenticated request as audit history."

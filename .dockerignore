@@ -1,0 +1,16 @@
+.git
+.github
+.agents
+.amp
+.direnv
+.jj
+.nix
+_build
+cover
+deps
+docs
+target
+tmp
+assets/node_modules
+erl_crash.dump
+npm-debug.log
