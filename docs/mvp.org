@@ -817,7 +817,7 @@ delivery checklist.
   candidates did not preserve the accepted implementation thresholds; Terra is
   the cheaper and faster follow-up candidate.
 
-** TODO Milestone 8: Reliability and release candidate
+** DONE Milestone 8: Reliability and release candidate
 
 - [X] Runner reconnect and temporary-disconnection behavior.
 - [X] Phoenix session-process restart recovery.
@@ -827,7 +827,7 @@ delivery checklist.
 - [X] Hermetic full-stack coverage on every test run and an intentionally
   triggered live-provider smoke test for the core workflow.
 - [X] Installation and provider-configuration documentation.
-- [ ] Exit criterion: the acceptance scenario passes repeatedly across
+- [X] Exit criterion: the acceptance scenario passes repeatedly across
   supported Linux and macOS environments.
 
 * Acceptance scenario
