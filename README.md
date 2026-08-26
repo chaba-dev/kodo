@@ -12,6 +12,7 @@ Kodo currently ships from source. Linux and macOS require:
 - Erlang/OTP 28 and Elixir 1.20;
 - stable Rust (the Nix shell pins Rust 1.96);
 - PostgreSQL 17;
+- Docker with the Compose plugin;
 - Git, `ripgrep`, and `jq`.
 
 Nix users can enter the complete development shell with `nix develop`.
