@@ -241,12 +241,11 @@ jobs:
             exit 1
           fi
 
-  release:
-    name: Create GitHub release
+  notes:
+    name: Prepare release notes
     needs: [plan, build-cli, build-installers, cli-gate]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    environment: RELEASE
     steps:
       - name: Checkout tagged release
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -258,14 +257,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.plan.outputs.tag }}
         run: test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$GITHUB_SHA"
-      - name: Download release artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: artifacts-*
-          path: artifacts
-          merge-multiple: true
-      - name: Remove internal manifests
-        run: rm -f artifacts/*-dist-manifest.json
       - name: Generate release notes
         run: |
           .github/scripts/install-release-tool.sh git-cliff
@@ -282,6 +273,50 @@ jobs:
           else
             echo 'This is the first tagged release.' >> RELEASE_BODY.md
           fi
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-notes
+          path: RELEASE_BODY.md
+
+  release:
+    name: Create GitHub release
+    needs: [plan, build-cli, build-installers, cli-gate, notes]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: RELEASE
+    steps:
+      - name: Checkout tagged release
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify release tag target
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$GITHUB_SHA"
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Download release notes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-notes
+
+      - name: Validate publication inputs
+        run: |
+          rm -f artifacts/*-dist-manifest.json
+          test -s RELEASE_BODY.md
+          find artifacts -maxdepth 1 -type f -print -quit | grep -q .
+
       - name: Create release app token
         id: release-token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2

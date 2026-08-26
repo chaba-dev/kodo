@@ -45,7 +45,8 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.available == 'true'
     runs-on: ubuntu-latest
-    environment: RELEASE
+    outputs:
+      release_tag: ${{ steps.version.outputs.release_tag }}
     steps:
       - name: Checkout main with complete history
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -83,12 +84,14 @@ jobs:
             [ "$ahead" -eq 0 ] && echo "skip=true" || echo "skip=false"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Install verified git-cliff
+        if: steps.changes.outputs.skip != 'true'
+        run: .github/scripts/install-release-tool.sh git-cliff
+
       - name: Compute conventional version bump
         if: steps.changes.outputs.skip != 'true' && steps.changes.outputs.latest_tag != ''
         id: bumped-version
-        run: |
-          .github/scripts/install-release-tool.sh git-cliff
-          echo "content=$(git-cliff --config cliff.toml --bumped-version)" >> "$GITHUB_OUTPUT"
+        run: echo "content=$(git-cliff --config cliff.toml --bumped-version)" >> "$GITHUB_OUTPUT"
 
       - name: Select release version
         if: steps.changes.outputs.skip != 'true'
@@ -150,29 +153,6 @@ jobs:
           git-cliff --config cliff.toml --unreleased --tag "$RELEASE_TAG"
           --strip header --output RELEASE_NOTES.md
 
-      - name: Create release app token
-        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
-        id: release-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-
-      - name: Update release branch
-        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
-        env:
-          RELEASE_TOKEN: ${{ steps.release-token.outputs.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
-        run: |
-          release_remote="https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          expected_sha=$(git ls-remote "$release_remote" refs/heads/release/next | awk '{print $1}')
-          git checkout -B release/next
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add CHANGELOG.md Cargo.lock Cargo.toml mix.exs
-          git commit -m "chore(release): $RELEASE_TAG"
-          git push --force-with-lease="refs/heads/release/next:${expected_sha}" "$release_remote" HEAD:refs/heads/release/next
-
       - name: Build release PR description
         if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
         env:
@@ -201,15 +181,78 @@ jobs:
           $(cat RELEASE_NOTES.md)
           EOF
 
-      - name: Create or update release PR
+      - name: Stage release update
         if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
+        run: |
+          mkdir release-update
+          cp CHANGELOG.md Cargo.lock Cargo.toml mix.exs /tmp/release-pr-body.md release-update/
+
+      - name: Upload release update
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-pr-update
+          path: release-update
+
+  publish:
+    name: Publish release PR update
+    needs: prepare
+    if: needs.prepare.outputs.release_tag != ''
+    runs-on: ubuntu-latest
+    environment: RELEASE
+    steps:
+      - name: Checkout main with complete history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download prepared release update
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-pr-update
+          path: release-update
+
+      - name: Apply and validate release update
+        run: |
+          expected='CHANGELOG.md Cargo.lock Cargo.toml mix.exs release-pr-body.md'
+          actual=$(find release-update -maxdepth 1 -type f -printf '%f\n' | sort | tr '\n' ' ' | sed 's/ $//')
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Unexpected release update contents: $actual"
+            exit 1
+          fi
+          cp release-update/CHANGELOG.md release-update/Cargo.lock release-update/Cargo.toml release-update/mix.exs .
+
+      - name: Create release app token
+        id: release-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Update release branch
+        env:
+          RELEASE_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          release_remote="https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          expected_sha=$(git ls-remote "$release_remote" refs/heads/release/next | awk '{print $1}')
+          git checkout -B release/next
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add CHANGELOG.md Cargo.lock Cargo.toml mix.exs
+          git commit -m "chore(release): $RELEASE_TAG"
+          git push --force-with-lease="refs/heads/release/next:${expected_sha}" "$release_remote" HEAD:refs/heads/release/next
+
+      - name: Create or update release PR
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
         run: |
           pr_number=$(gh pr list --base "${{ github.event.repository.default_branch }}" --head release/next --state open --json number --jq '.[0].number // empty')
           if [ -z "$pr_number" ]; then
-            gh pr create --base "${{ github.event.repository.default_branch }}" --head release/next --title "chore(release): $RELEASE_TAG" --body-file /tmp/release-pr-body.md
+            gh pr create --base "${{ github.event.repository.default_branch }}" --head release/next --title "chore(release): $RELEASE_TAG" --body-file release-update/release-pr-body.md
           else
-            gh pr edit "$pr_number" --title "chore(release): $RELEASE_TAG" --body-file /tmp/release-pr-body.md
+            gh pr edit "$pr_number" --title "chore(release): $RELEASE_TAG" --body-file release-update/release-pr-body.md
           fi
