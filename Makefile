@@ -55,3 +55,7 @@ db:
 .PHONY: console
 console:
 	iex -S mix
+
+.PHONY: changelog
+changelog:
+	git cliff --output CHANGELOG.md

@@ -5,9 +5,14 @@ Rust workspace runner. The MVP supports a shared CLI and LiveView session,
 approval policies, resumable command execution, final-diff review, and durable
 replay after a client or server restart.
 
-## Install from source
+## Install
 
-Kodo currently ships from source. Linux and macOS require:
+Tagged releases publish the `kodo` CLI for Linux x86-64, Linux ARM64, and
+Apple Silicon macOS, with a shell installer and checksums. The Phoenix server
+is published as `ghcr.io/chaba-dev/kodo` for Linux x86-64 and ARM64. See the
+[release guide](docs/releasing.md) for the artifact and image lifecycle.
+
+Building from source on Linux or macOS requires:
 
 - Erlang/OTP 28 and Elixir 1.20;
 - stable Rust (the Nix shell pins Rust 1.96);

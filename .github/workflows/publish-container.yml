@@ -1,0 +1,115 @@
+---
+name: Publish container
+
+"on":
+  release:
+    types: [published]
+
+permissions:
+  attestations: write
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: publish-container
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish GHCR image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Validate release
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          git fetch --no-tags origin "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          git merge-base --is-ancestor HEAD "refs/remotes/origin/${DEFAULT_BRANCH}" || {
+            echo "::error::Release is not reachable from $DEFAULT_BRANCH"; exit 1;
+          }
+          mix_version=$(sed -nE 's/^[[:space:]]*version:[[:space:]]*"([^"]+)",?[[:space:]]*$/\1/p' mix.exs)
+          cargo_version=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' Cargo.toml)
+          if [ -z "$mix_version" ] || [ "$mix_version" != "$cargo_version" ] || [ "$RELEASE_TAG" != "v$mix_version" ]; then
+            echo "::error::Release tag, mix.exs, and Cargo.toml versions must match"
+            exit 1
+          fi
+          if [ "$RELEASE_PRERELEASE" != "false" ]; then
+            echo "::error::The automated release flow currently publishes stable SemVer only"
+            exit 1
+          fi
+
+      - name: Determine floating aliases
+        id: aliases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          current=${RELEASE_TAG#v}
+          current_major=${current%%.*}
+          remainder=${current#*.}
+          current_minor=${remainder%%.*}
+          stable=("$current")
+          major=("$current")
+          minor=("$current")
+          while IFS= read -r tag; do
+            version=${tag#v}
+            if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              stable+=("$version")
+              [[ "$version" == "$current_major".* ]] && major+=("$version")
+              [[ "$version" == "$current_major.$current_minor".* ]] && minor+=("$version")
+            fi
+          done < <(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+          [ "$current" = "$(printf '%s\n' "${stable[@]}" | sort -V | tail -1)" ] && latest=true || latest=false
+          [ "$current" = "$(printf '%s\n' "${major[@]}" | sort -V | tail -1)" ] && major_alias=true || major_alias=false
+          [ "$current" = "$(printf '%s\n' "${minor[@]}" | sort -V | tail -1)" ] && minor_alias=true || minor_alias=false
+          printf 'latest=%s\nmajor=%s\nminor=%s\n' "$latest" "$major_alias" "$minor_alias" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }},enable=${{ steps.aliases.outputs.minor == 'true' }}
+            type=semver,pattern={{major}},value=${{ github.event.release.tag_name }},enable=${{ steps.aliases.outputs.major == 'true' }}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ steps.aliases.outputs.latest == 'true' }}
+      - name: Build and publish image
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true

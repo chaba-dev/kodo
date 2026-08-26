@@ -1,0 +1,220 @@
+---
+name: Prepare release PR
+
+"on":
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-pr-main
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Check release credentials
+    runs-on: ubuntu-latest
+    environment: RELEASE
+    outputs:
+      available: ${{ steps.credentials.outputs.available }}
+    steps:
+      - name: Check release app credentials
+        id: credentials
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$RELEASE_APP_ID" ] && [ -n "$RELEASE_APP_PRIVATE_KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "::error::Configure RELEASE_APP_ID and RELEASE_APP_PRIVATE_KEY"
+            exit 1
+          else
+            echo "::notice::Release PR creation is disabled until release credentials are configured"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  prepare:
+    name: Prepare release PR
+    needs: preflight
+    if: needs.preflight.outputs.available == 'true'
+    runs-on: ubuntu-latest
+    environment: RELEASE
+    steps:
+      - name: Checkout main with complete history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Find unreleased changes
+        id: changes
+        run: |
+          if git log -1 --pretty=%s | grep -Eq '^chore\(release\): v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest_tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          head_sha=$(git rev-parse HEAD)
+          head_short_sha=$(git rev-parse --short HEAD)
+          if [ -n "$latest_tag" ]; then
+            ahead=$(git rev-list --count "$latest_tag"..HEAD)
+            compare_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${latest_tag}...${head_sha}"
+            compare_label="${latest_tag}...${head_short_sha}"
+          else
+            ahead=$(git rev-list --count HEAD)
+            compare_url=""
+            compare_label=""
+          fi
+
+          {
+            echo "latest_tag=$latest_tag"
+            echo "ahead=$ahead"
+            echo "compare_url=$compare_url"
+            echo "compare_label=$compare_label"
+            [ "$ahead" -eq 0 ] && echo "skip=true" || echo "skip=false"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute conventional version bump
+        if: steps.changes.outputs.skip != 'true' && steps.changes.outputs.latest_tag != ''
+        id: bumped-version
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --bumped-version
+
+      - name: Select release version
+        if: steps.changes.outputs.skip != 'true'
+        id: version
+        env:
+          BUMPED_VERSION: ${{ steps.bumped-version.outputs.content }}
+          LATEST_TAG: ${{ steps.changes.outputs.latest_tag }}
+        run: |
+          mix_version=$(sed -nE 's/^[[:space:]]*version:[[:space:]]*"([^"]+)",?[[:space:]]*$/\1/p' mix.exs)
+          cargo_version=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' Cargo.toml)
+          if [ -z "$mix_version" ] || [ "$mix_version" != "$cargo_version" ]; then
+            echo "::error::mix.exs and Cargo.toml must contain the same project version"
+            exit 1
+          fi
+
+          if [ -z "$LATEST_TAG" ]; then
+            version=$mix_version
+          else
+            version=$(printf '%s' "$BUMPED_VERSION" | tr -d '[:space:]')
+            version=${version#v}
+          fi
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Calculated release version is not stable SemVer: $version"
+            exit 1
+          fi
+
+          release_tag="v$version"
+          [ "$release_tag" = "$LATEST_TAG" ] && echo "skip=true" >> "$GITHUB_OUTPUT" || echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Rust
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96"
+
+      - name: Update project versions
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sed -i.bak -E "s/^([[:space:]]*version:[[:space:]]*)\"[^\"]+\"/\1\"${VERSION}\"/" mix.exs
+          sed -i.bak -E "s/^(version[[:space:]]*=[[:space:]]*)\"[^\"]+\"/\1\"${VERSION}\"/" Cargo.toml
+          rm -f mix.exs.bak Cargo.toml.bak
+          cargo check --workspace
+
+      - name: Generate changelog
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --tag ${{ steps.version.outputs.release_tag }}
+        env:
+          OUTPUT: CHANGELOG.md
+
+      - name: Generate release notes preview
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --unreleased --tag ${{ steps.version.outputs.release_tag }} --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
+      - name: Create release app token
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
+        id: release-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Update release branch
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
+        env:
+          RELEASE_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          release_remote="https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          expected_sha=$(git ls-remote "$release_remote" refs/heads/release/next | awk '{print $1}')
+          git checkout -B release/next
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add CHANGELOG.md Cargo.lock Cargo.toml mix.exs
+          git commit -m "chore(release): $RELEASE_TAG"
+          git push --force-with-lease="refs/heads/release/next:${expected_sha}" "$release_remote" HEAD:refs/heads/release/next
+
+      - name: Build release PR description
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
+        env:
+          AHEAD: ${{ steps.changes.outputs.ahead }}
+          COMPARE_LABEL: ${{ steps.changes.outputs.compare_label }}
+          COMPARE_URL: ${{ steps.changes.outputs.compare_url }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          if [ -n "$COMPARE_URL" ]; then
+            diff_line="- Diff: [\`$COMPARE_LABEL\`]($COMPARE_URL)"
+          else
+            diff_line="- Diff: unavailable until the first v* tag exists"
+          fi
+          cat > /tmp/release-pr-body.md <<EOF
+          <!-- auto-release-pr -->
+          ## Release
+
+          This PR prepares \`$RELEASE_TAG\`.
+
+          - Commits since last tag: $AHEAD
+          $diff_line
+          - Source branch: \`release/next\`
+
+          ## Notes Preview
+
+          $(cat RELEASE_NOTES.md)
+          EOF
+
+      - name: Create or update release PR
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          pr_number=$(gh pr list --base "${{ github.event.repository.default_branch }}" --head release/next --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr_number" ]; then
+            gh pr create --base "${{ github.event.repository.default_branch }}" --head release/next --title "chore(release): $RELEASE_TAG" --body-file /tmp/release-pr-body.md
+          else
+            gh pr edit "$pr_number" --title "chore(release): $RELEASE_TAG" --body-file /tmp/release-pr-body.md
+          fi
