@@ -80,10 +80,7 @@ jobs:
           echo "version=$mix_version" >> "$GITHUB_OUTPUT"
 
       - name: Install dist
-        run: >-
-          curl --proto '=https' --tlsv1.2 -LsSf
-          https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh
-          | sh
+        run: .github/scripts/install-release-tool.sh dist
 
       - name: Cache dist executable
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -138,7 +135,7 @@ jobs:
           cache-provider: ${{ matrix.cache_provider }}
 
       - name: Install dist
-        run: ${{ matrix.install_dist.run }}
+        run: .github/scripts/install-release-tool.sh dist
 
       - name: Install platform dependencies
         run: ${{ matrix.packages_install }}
@@ -270,12 +267,9 @@ jobs:
       - name: Remove internal manifests
         run: rm -f artifacts/*-dist-manifest.json
       - name: Generate release notes
-        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4
-        with:
-          config: cliff.toml
-          args: --latest --strip header
-        env:
-          OUTPUT: RELEASE_NOTES.md
+        run: |
+          .github/scripts/install-release-tool.sh git-cliff
+          git-cliff --config cliff.toml --latest --strip header --output RELEASE_NOTES.md
       - name: Add tag comparison
         env:
           RELEASE_TAG: ${{ needs.plan.outputs.tag }}

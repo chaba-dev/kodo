@@ -86,10 +86,9 @@ jobs:
       - name: Compute conventional version bump
         if: steps.changes.outputs.skip != 'true' && steps.changes.outputs.latest_tag != ''
         id: bumped-version
-        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4
-        with:
-          config: cliff.toml
-          args: --bumped-version
+        run: |
+          .github/scripts/install-release-tool.sh git-cliff
+          echo "content=$(git-cliff --config cliff.toml --bumped-version)" >> "$GITHUB_OUTPUT"
 
       - name: Select release version
         if: steps.changes.outputs.skip != 'true'
@@ -139,21 +138,17 @@ jobs:
 
       - name: Generate changelog
         if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
-        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4
-        with:
-          config: cliff.toml
-          args: --tag ${{ steps.version.outputs.release_tag }}
         env:
-          OUTPUT: CHANGELOG.md
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: git-cliff --config cliff.toml --tag "$RELEASE_TAG" --output CHANGELOG.md
 
       - name: Generate release notes preview
         if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
-        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4
-        with:
-          config: cliff.toml
-          args: --unreleased --tag ${{ steps.version.outputs.release_tag }} --strip header
         env:
-          OUTPUT: RELEASE_NOTES.md
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: >-
+          git-cliff --config cliff.toml --unreleased --tag "$RELEASE_TAG"
+          --strip header --output RELEASE_NOTES.md
 
       - name: Create release app token
         if: steps.version.outputs.skip != 'true' && steps.version.outputs.release_tag != ''
