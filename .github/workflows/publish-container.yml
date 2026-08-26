@@ -57,6 +57,85 @@ jobs:
             exit 1
           fi
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Require write-once release identities
+        id: immutable
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=${RELEASE_TAG#v}
+          exact_tag="$IMAGE:$version"
+          sha_tag="$IMAGE:sha-$GITHUB_SHA"
+
+          inspect_digest() {
+            docker buildx imagetools inspect "$1" 2>/dev/null |
+              sed -n 's/^Digest:[[:space:]]*//p' | head -n 1
+          }
+
+          exact_digest=$(inspect_digest "$exact_tag" || true)
+          sha_digest=$(inspect_digest "$sha_tag" || true)
+          if [ -z "$exact_digest" ] && [ -z "$sha_digest" ]; then
+            build=true
+            digest=""
+          elif [ -n "$exact_digest" ] && [ "$exact_digest" = "$sha_digest" ]; then
+            build=false
+            digest=$exact_digest
+            echo "Both immutable tags already identify $digest; reusing it"
+          else
+            echo "::error::Immutable release tags are partial or disagree"
+            printf 'Exact: %s\nSHA:   %s\n' "${exact_digest:-missing}" "${sha_digest:-missing}"
+            exit 1
+          fi
+
+          {
+            echo "build=$build"
+            echo "digest=$digest"
+            echo "exact_tag=$exact_tag"
+            echo "sha_tag=$sha_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish image
+        id: publish
+        if: steps.immutable.outputs.build == 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.immutable.outputs.exact_tag }}
+            ${{ steps.immutable.outputs.sha_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.event.release.tag_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Select immutable image digest
+        id: image
+        env:
+          BUILT_DIGEST: ${{ steps.publish.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.immutable.outputs.digest }}
+        run: |
+          digest=${BUILT_DIGEST:-$EXISTING_DIGEST}
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Missing or invalid immutable image digest: $digest"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       - name: Determine floating aliases
         id: aliases
         env:
@@ -83,42 +162,34 @@ jobs:
           [ "$current" = "$(printf '%s\n' "${minor[@]}" | sort -V | tail -1)" ] && minor_alias=true || minor_alias=false
           printf 'latest=%s\nmajor=%s\nminor=%s\n' "$latest" "$major_alias" "$minor_alias" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Generate image metadata
-        id: metadata
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          flavor: latest=false
-          tags: |
-            type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }},enable=${{ steps.aliases.outputs.minor == 'true' }}
-            type=semver,pattern={{major}},value=${{ github.event.release.tag_name }},enable=${{ steps.aliases.outputs.major == 'true' }}
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable=${{ steps.aliases.outputs.latest == 'true' }}
-      - name: Build and publish image
-        id: publish
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Update floating aliases
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          LATEST: ${{ steps.aliases.outputs.latest }}
+          MAJOR: ${{ steps.aliases.outputs.major }}
+          MINOR: ${{ steps.aliases.outputs.minor }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=${RELEASE_TAG#v}
+          major=${version%%.*}
+          remainder=${version#*.}
+          minor=${remainder%%.*}
+          source="$IMAGE@$DIGEST"
+
+          if [ "$MINOR" = true ]; then
+            docker buildx imagetools create --tag "$IMAGE:$major.$minor" "$source"
+          fi
+          if [ "$MAJOR" = true ]; then
+            docker buildx imagetools create --tag "$IMAGE:$major" "$source"
+          fi
+          if [ "$LATEST" = true ]; then
+            docker buildx imagetools create --tag "$IMAGE:latest" "$source"
+          fi
+
       - name: Attest image provenance
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.publish.outputs.digest }}
+          subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true

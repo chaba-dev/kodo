@@ -53,6 +53,11 @@ Every push to `main` refreshes one PR from `release/next`:
    applicable stable release advances the major, minor, and `latest` aliases.
    GitHub OIDC records a provenance attestation for the image manifest.
 
+Exact-version and full commit-SHA image tags are write-once. A publication
+rerun reuses and re-attests their existing digest; it fails if either tag is
+missing or if they disagree. Only the floating aliases may move. The Dockerfile
+also pins its multi-architecture builder and runtime base image manifests.
+
 Final artifacts are deliberately rebuilt from the tag; release-PR artifacts
 are evidence for review, not publication inputs.
 
