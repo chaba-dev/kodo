@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+export PHX_SERVER=true
+exec "$(dirname "$0")/kodo" start

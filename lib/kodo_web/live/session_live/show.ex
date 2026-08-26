@@ -348,7 +348,11 @@ defmodule KodoWeb.SessionLive.Show do
 
   defp runner_ids(sessions), do: sessions |> Enum.map(& &1.runner_id) |> MapSet.new()
 
-  defp tool_output(%{"output" => output}), do: format_output(output)
+  defp tool_output(%{"output" => output}) do
+    suffix = if truncated_output?(output), do: "\n[output truncated]", else: ""
+    format_output(output) <> suffix
+  end
+
   defp tool_output(%{"error" => error}), do: error
   defp tool_output(_tool), do: ""
 
@@ -359,6 +363,9 @@ defmodule KodoWeb.SessionLive.Show do
   defp format_output(%{"content" => content}) when is_binary(content), do: content
   defp format_output(output) when is_binary(output), do: output
   defp format_output(output), do: Jason.encode!(output, pretty: true)
+
+  defp truncated_output?(%{"truncated" => true}), do: true
+  defp truncated_output?(_output), do: false
 
   defp repository_name(%{name: name}) when is_binary(name) and name != "", do: name
   defp repository_name(%{workspace_root: root}), do: Path.basename(root)

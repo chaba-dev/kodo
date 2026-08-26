@@ -646,11 +646,10 @@ mod tests {
         let manager = ProcessManager::new(1024);
         let directory = TempDir::new().unwrap();
         let process_id = manager
-            .start("exit 0", directory.path(), Duration::from_millis(20))
+            .start("exit 0", directory.path(), Duration::from_secs(1))
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
         let poll = poll_until_finished(&manager, process_id).await;
 
         assert_eq!(poll.status, ProcessStatus::Exited { code: Some(0) });

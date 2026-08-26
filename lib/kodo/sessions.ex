@@ -33,12 +33,9 @@ defmodule Kodo.Sessions do
   @timeline_tool_types ["tool_requested", "tool_started", "tool_completed", "tool_failed"]
   @default_timeline_page_size 50
 
-  @ownership_stale_after_seconds Keyword.fetch!(
-                                   Application.compile_env!(
-                                     :kodo,
-                                     Kodo.Cluster.InstanceManager
-                                   ),
-                                   :ownership_stale_after_seconds
+  @ownership_stale_after_seconds Application.compile_env!(
+                                   :kodo,
+                                   [Kodo.Cluster.InstanceManager, :ownership_stale_after_seconds]
                                  )
 
   def get_session(id) do

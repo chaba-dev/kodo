@@ -1,0 +1,89 @@
+---
+name: release candidate acceptance
+
+"on":
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  MIX_ENV: test
+  OTP_VERSION: "28.5"
+  ELIXIR_VERSION: "1.20"
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: kodo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d kodo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+      - name: Repeat acceptance scenario
+        run: |
+          for run in 1 2 3; do
+            echo "Linux acceptance run ${run}/3"
+            mix test test/e2e/hermetic_full_stack_test.exs
+          done
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Start PostgreSQL
+        run: |
+          brew install postgresql@17 ripgrep
+          brew services start postgresql@17
+          echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
+          for attempt in {1..30}; do
+            "$(brew --prefix postgresql@17)/bin/pg_isready" && break
+            sleep 1
+          done
+          "$(brew --prefix postgresql@17)/bin/psql" postgres <<'SQL'
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN
+              CREATE ROLE postgres LOGIN SUPERUSER PASSWORD 'postgres';
+            ELSE
+              ALTER ROLE postgres PASSWORD 'postgres';
+            END IF;
+          END
+          $$;
+          SQL
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+      - name: Repeat acceptance scenario
+        run: |
+          for run in 1 2 3; do
+            echo "macOS acceptance run ${run}/3"
+            mix test test/e2e/hermetic_full_stack_test.exs
+          done

@@ -30,6 +30,13 @@ defmodule Kodo.LLM.ReqLLMTest do
     assert function_exported?(adapter, :generate, 4)
   end
 
+  test "applies the model budget to provider receive and total timeouts" do
+    options = Adapter.request_options([], timeout: 12_345, reasoning: "none")
+
+    assert options[:receive_timeout] == 12_345
+    assert options[:total_timeout] == 12_345
+  end
+
   test "rejects catalog models whose provider cannot be dispatched" do
     assert {:error, {:model_not_available, _reason}} =
              Adapter.validate_model(
