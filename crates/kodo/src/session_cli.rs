@@ -558,9 +558,10 @@ fn format_event(event: &Event) -> String {
             let output = payload.get("output").unwrap_or(&Value::Null);
             if name == "git_diff" {
                 format!(
-                    "[git_diff]\n{}",
+                    "[git_diff]\n{}{}",
                     find_string(output, &["diff", "content", "output"])
-                        .unwrap_or_else(|| output.to_string())
+                        .unwrap_or_else(|| output.to_string()),
+                    truncation_suffix(output)
                 )
             } else if matches!(name, "start_command" | "poll_command" | "stop_command") {
                 format!("[verification: {name}] {}", command_summary(output))
@@ -679,16 +680,18 @@ fn command_summary(output: &Value) -> String {
 }
 
 fn tool_summary(output: &Value) -> String {
-    let rendered =
-        find_string(output, &["content", "output"]).unwrap_or_else(|| output.to_string());
-    if output
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        format!("{rendered}\n[output truncated]")
+    let rendered = output
+        .get("content")
+        .and_then(Value::as_str)
+        .map_or_else(|| output.to_string(), ToOwned::to_owned);
+    format!("{rendered}{}", truncation_suffix(output))
+}
+
+fn truncation_suffix(output: &Value) -> &'static str {
+    if output.get("truncated").and_then(Value::as_bool) == Some(true) {
+        "\n[output truncated]"
     } else {
-        rendered
+        ""
     }
 }
 
@@ -788,8 +791,41 @@ mod tests {
         assert!(rendered.contains("partial"));
         assert!(rendered.contains("[output truncated]"));
 
-        let patch_failure = Event {
+        let truncated_diff = Event {
             sequence: 4,
+            kind: "tool_completed".into(),
+            payload: json!({
+                "name": "git_diff",
+                "output": {"content": "partial diff", "truncated": true}
+            }),
+        };
+        let rendered = format_event(&truncated_diff);
+        assert!(rendered.contains("partial diff"));
+        assert!(rendered.contains("[output truncated]"));
+
+        let search = Event {
+            sequence: 5,
+            kind: "tool_completed".into(),
+            payload: json!({
+                "name": "search_code",
+                "output": {
+                    "result": "matches",
+                    "matches": [
+                        {"path": "lib/first.ex", "line": 1, "content": "first match"},
+                        {"path": "lib/second.ex", "line": 2, "content": "second match"}
+                    ],
+                    "truncated": false
+                }
+            }),
+        };
+        let rendered = format_event(&search);
+        assert!(rendered.contains("lib/first.ex"));
+        assert!(rendered.contains("first match"));
+        assert!(rendered.contains("lib/second.ex"));
+        assert!(rendered.contains("second match"));
+
+        let patch_failure = Event {
+            sequence: 6,
             kind: "tool_failed".into(),
             payload: json!({
                 "name": "apply_patch",
