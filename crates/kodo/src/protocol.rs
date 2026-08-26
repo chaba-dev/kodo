@@ -1,4 +1,4 @@
-//! Versioned wire contract between the local daemon and its eventual Phoenix transport.
+//! Versioned wire contract between the local runner and the Phoenix control plane.
 //!
 //! Tagged request/result variants keep dispatch explicit. Request IDs support replay, while command
 //! output sequence numbers let clients resume polling without acknowledging destructive reads.

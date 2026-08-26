@@ -8,7 +8,7 @@ dev-console:
 
 .PHONY: dev-agent
 dev-agent:
-	cargo run -p kodo -- daemon --workspace . --control-plane http://127.0.0.1:4451
+	cargo run -p kodo -- --headless --workspace . --control-plane http://127.0.0.1:4451
 
 .PHONY: test
 test: ex-test rs-test

@@ -45,7 +45,7 @@ defmodule Kodo.Test.FullStackCase do
         :exit_status,
         :stderr_to_stdout,
         args: [
-          "daemon",
+          "--headless",
           "--workspace",
           workspace,
           "--control-plane",

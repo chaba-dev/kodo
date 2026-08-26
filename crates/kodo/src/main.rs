@@ -2,16 +2,33 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use kodo::control_plane;
-use kodo::daemon;
-use kodo::runner::Runner;
 use kodo::session_cli::{self, Options, ResumeOptions, StartOptions};
 use kodo::workspace::Workspace;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Kodo local coding-agent runner")]
 struct Cli {
+    /// Connect this workspace's runner without starting an interactive client.
+    #[arg(long)]
+    headless: bool,
+    /// Workspace hosted by a headless runner.
+    #[arg(long, default_value = ".")]
+    workspace: PathBuf,
+    #[arg(
+        long,
+        env = "KODO_CONTROL_PLANE",
+        default_value = "http://localhost:4451"
+    )]
+    control_plane: String,
+    #[arg(
+        long,
+        env = "KODO_TOKEN",
+        hide_env_values = true,
+        allow_hyphen_values = true
+    )]
+    token: Option<String>,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -64,22 +81,6 @@ enum Commands {
         #[arg(long, default_value = ".")]
         workspace: PathBuf,
     },
-    /// Serve newline-delimited JSON tool requests over standard input and output.
-    Daemon {
-        /// A path inside the Git worktree to register.
-        #[arg(long, default_value = ".")]
-        workspace: PathBuf,
-        /// Register with a loopback Phoenix control plane and serve over its WebSocket.
-        #[arg(long)]
-        control_plane: Option<String>,
-        #[arg(
-            long,
-            env = "KODO_TOKEN",
-            hide_env_values = true,
-            allow_hyphen_values = true
-        )]
-        token: Option<String>,
-    },
 }
 
 #[tokio::main]
@@ -95,8 +96,22 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    match Cli::parse().command {
-        Commands::Start {
+    let cli = Cli::parse();
+    if cli.headless {
+        if cli.command.is_some() {
+            return Err("--headless cannot be combined with an interactive command".into());
+        }
+        let token = cli
+            .token
+            .filter(|token| !token.trim().is_empty())
+            .ok_or("KODO_TOKEN is required (or pass --token) with --headless")?;
+        let workspace = Workspace::discover(cli.workspace)?;
+        control_plane::serve_headless(&cli.control_plane, &workspace, &token).await?;
+        return Ok(());
+    }
+
+    match cli.command {
+        Some(Commands::Start {
             task,
             title,
             model,
@@ -104,7 +119,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             control_plane,
             token,
             workspace,
-        } => {
+        }) => {
             session_cli::start(StartOptions {
                 common: Options {
                     control_plane,
@@ -118,13 +133,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             })
             .await?;
         }
-        Commands::Resume {
+        Some(Commands::Resume {
             session_id,
             message,
             control_plane,
             token,
             workspace,
-        } => {
+        }) => {
             session_cli::resume(ResumeOptions {
                 common: Options {
                     control_plane,
@@ -136,20 +151,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             })
             .await?;
         }
-        Commands::Daemon {
-            workspace,
-            control_plane: control_plane_url,
-            token,
-        } => {
-            let workspace = Workspace::discover(workspace)?;
-            if let Some(url) = control_plane_url {
-                let token = token.ok_or("KODO_TOKEN is required with --control-plane")?;
-                control_plane::serve(&url, &workspace, &token).await?;
-            } else {
-                let _runner_lock = workspace.lock_runner()?;
-                let runner = Runner::new(workspace);
-                daemon::serve_stdio(&runner).await?;
-            }
+        None => {
+            return Err(
+                "the interactive TUI is not implemented yet; use start, resume, or --headless"
+                    .into(),
+            );
         }
     }
     Ok(())

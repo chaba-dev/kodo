@@ -1,14 +1,9 @@
-//! Concurrent newline-delimited JSON transport for the local runner.
-//!
-//! Dispatch is bounded and request IDs are idempotent: retries share one response slot, preventing
-//! duplicate mutations while allowing completed responses to be replayed.
+//! Bounded, idempotent tool dispatch for the connected workspace runner.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
@@ -18,8 +13,6 @@ use crate::protocol::{
 };
 use crate::runner::Runner;
 
-// Stdio framing and connection scheduling exist before any Phoenix policy is available.
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 #[derive(Clone)]
@@ -66,7 +59,8 @@ impl Dispatcher {
         }
     }
 
-    pub(crate) async fn dispatch(&self, request: RequestEnvelope) -> String {
+    #[cfg(test)]
+    async fn dispatch_unmanaged(&self, request: RequestEnvelope) -> String {
         if request.protocol_version != PROTOCOL_VERSION {
             return unsupported_protocol_response(request.request_id, request.protocol_version);
         }
@@ -285,137 +279,6 @@ fn authority_error_response(request_id: Uuid, error: crate::authority::Authority
     })
 }
 
-pub async fn serve_stdio(runner: &Runner) -> Result<(), std::io::Error> {
-    serve(
-        runner,
-        tokio::io::BufReader::new(tokio::io::stdin()),
-        tokio::io::stdout(),
-    )
-    .await
-}
-
-pub async fn serve(
-    runner: &Runner,
-    mut input: impl AsyncBufRead + Unpin,
-    mut output: impl AsyncWrite + Unpin,
-) -> Result<(), std::io::Error> {
-    let dispatcher = Dispatcher::new(runner.clone());
-    let mut line = Vec::new();
-    let mut requests = FuturesUnordered::new();
-    let mut input_closed = false;
-    loop {
-        if input_closed && requests.is_empty() {
-            return Ok(());
-        }
-
-        tokio::select! {
-            line_result = read_request_line(&mut input, &mut line),
-                if !input_closed && requests.len() < MAX_IN_FLIGHT_REQUESTS => {
-                let result = line_result?;
-                if matches!(result, RequestLine::Eof) {
-                    // Stop accepting input but flush every already accepted request before exit.
-                    input_closed = true;
-                    continue;
-                }
-                let request_line = std::mem::take(&mut line);
-                let dispatcher = dispatcher.clone();
-                requests.push(async move {
-                    match result {
-                        RequestLine::Complete => match String::from_utf8(request_line) {
-                            Ok(request_line) => handle_line(&dispatcher, &request_line).await,
-                            Err(_) => invalid_utf8_response(),
-                        },
-                        RequestLine::TooLarge => oversized_request_response(),
-                        RequestLine::Eof => unreachable!(),
-                    }
-                });
-            }
-            Some(response) = requests.next(), if !requests.is_empty() => {
-                output.write_all(response.as_bytes()).await?;
-                output.write_all(b"\n").await?;
-                output.flush().await?;
-            }
-        }
-    }
-}
-
-async fn handle_line(dispatcher: &Dispatcher, line: &str) -> String {
-    if line.len() > MAX_REQUEST_BYTES {
-        return oversized_request_response();
-    }
-
-    let response = match serde_json::from_str::<RequestEnvelope>(line) {
-        Ok(request) => return dispatcher.dispatch(request).await,
-        Err(error) => ResponseEnvelope::Error {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: None,
-            error: format!("invalid request: {error}"),
-        },
-    };
-
-    serialize_response(response)
-}
-
-enum RequestLine {
-    Eof,
-    Complete,
-    TooLarge,
-}
-
-async fn read_request_line(
-    input: &mut (impl AsyncBufRead + Unpin),
-    line: &mut Vec<u8>,
-) -> Result<RequestLine, std::io::Error> {
-    let mut too_large = false;
-    loop {
-        let buffer = input.fill_buf().await?;
-        if buffer.is_empty() {
-            return Ok(if line.is_empty() {
-                RequestLine::Eof
-            } else if too_large {
-                RequestLine::TooLarge
-            } else {
-                RequestLine::Complete
-            });
-        }
-
-        let newline = buffer.iter().position(|byte| *byte == b'\n');
-        let consumed = newline.map_or(buffer.len(), |position| position + 1);
-        let content = &buffer[..newline.unwrap_or(buffer.len())];
-        if !too_large && line.len() + content.len() <= MAX_REQUEST_BYTES {
-            line.extend_from_slice(content);
-        } else {
-            // Discard through the newline to preserve framing without retaining attacker input.
-            too_large = true;
-        }
-        input.consume(consumed);
-
-        if newline.is_some() {
-            return Ok(if too_large {
-                RequestLine::TooLarge
-            } else {
-                RequestLine::Complete
-            });
-        }
-    }
-}
-
-fn oversized_request_response() -> String {
-    serialize_response(ResponseEnvelope::Error {
-        protocol_version: PROTOCOL_VERSION,
-        request_id: None,
-        error: format!("request exceeds {MAX_REQUEST_BYTES} byte transport limit"),
-    })
-}
-
-fn invalid_utf8_response() -> String {
-    serialize_response(ResponseEnvelope::Error {
-        protocol_version: PROTOCOL_VERSION,
-        request_id: None,
-        error: "request is not valid UTF-8".into(),
-    })
-}
-
 fn serialize_response(response: ResponseEnvelope) -> String {
     serde_json::to_string(&response).expect("response envelope must serialize")
 }
@@ -435,51 +298,19 @@ mod tests {
     use crate::workspace::Workspace;
 
     #[tokio::test]
-    async fn serves_typed_requests_and_preserves_correlation_id() {
-        let repository = git_repository();
-        let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
-        let request_id = Uuid::new_v4();
-        let request = serde_json::to_string(&RequestEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            request_id,
-            authority: None,
-            request: ToolRequest::GitStatus,
-        })
-        .unwrap();
-        let mut input = request.into_bytes();
-        input.push(b'\n');
-        let mut output = Vec::new();
-
-        serve(&runner, input.as_slice(), &mut output).await.unwrap();
-
-        assert_eq!(
-            serde_json::from_slice::<ResponseEnvelope>(&output).unwrap(),
-            ResponseEnvelope::Success {
-                protocol_version: PROTOCOL_VERSION,
-                request_id,
-                response: ToolResult::Output {
-                    content: String::new(),
-                    truncated: false,
-                },
-            }
-        );
-    }
-
-    #[tokio::test]
     async fn rejects_unknown_protocol_versions() {
         let repository = git_repository();
         let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
         let dispatcher = Dispatcher::new(runner);
         let request_id = Uuid::new_v4();
-        let request = serde_json::to_string(&RequestEnvelope {
+        let request = RequestEnvelope {
             protocol_version: 2,
             request_id,
             authority: None,
             request: ToolRequest::GitStatus,
-        })
-        .unwrap();
+        };
 
-        let response = handle_line(&dispatcher, &request).await;
+        let response = dispatcher.dispatch_unmanaged(request).await;
         let response: ResponseEnvelope = serde_json::from_str(&response).unwrap();
 
         assert!(matches!(
@@ -514,36 +345,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_requests_larger_than_the_transport_limit() {
-        let repository = git_repository();
-        let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
-        let dispatcher = Dispatcher::new(runner);
-        let request = serde_json::to_string(&RequestEnvelope {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: Uuid::new_v4(),
-            authority: None,
-            request: ToolRequest::ApplyPatch {
-                patch: "x".repeat(1_100_000),
-            },
-        })
-        .unwrap();
-
-        let response = handle_line(&dispatcher, &request).await;
-        let ResponseEnvelope::Error { error, .. } =
-            serde_json::from_str::<ResponseEnvelope>(&response).unwrap()
-        else {
-            panic!("expected oversized request error");
-        };
-
-        assert!(error.contains("request exceeds"));
-    }
-
-    #[tokio::test]
     async fn retrying_a_request_id_replays_the_original_response() {
         let repository = git_repository();
         let runner = Runner::new(Workspace::from_root(repository.path()).unwrap());
         let dispatcher = Dispatcher::new(runner);
-        let request = serde_json::to_string(&RequestEnvelope {
+        let request = RequestEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id: Uuid::new_v4(),
             authority: None,
@@ -552,11 +358,10 @@ mod tests {
                 cwd: String::new(),
                 timeout_ms: 1_000,
             },
-        })
-        .unwrap();
+        };
 
-        let first = handle_line(&dispatcher, &request).await;
-        let retry = handle_line(&dispatcher, &request).await;
+        let first = dispatcher.dispatch_unmanaged(request.clone()).await;
+        let retry = dispatcher.dispatch_unmanaged(request).await;
 
         assert_eq!(retry, first);
     }
@@ -584,8 +389,8 @@ mod tests {
             },
         };
 
-        let response = dispatcher.dispatch(request.clone()).await;
-        let retry = dispatcher.dispatch(request).await;
+        let response = dispatcher.dispatch_unmanaged(request.clone()).await;
+        let retry = dispatcher.dispatch_unmanaged(request).await;
         let ResponseEnvelope::Error { error, .. } =
             serde_json::from_str::<ResponseEnvelope>(&response).unwrap()
         else {
@@ -624,7 +429,7 @@ mod tests {
         let first = {
             let dispatcher = dispatcher.clone();
             let request = request.clone();
-            tokio::spawn(async move { dispatcher.dispatch(request).await })
+            tokio::spawn(async move { dispatcher.dispatch_unmanaged(request).await })
         };
         loop {
             if dispatcher
@@ -640,7 +445,7 @@ mod tests {
         }
         first.abort();
 
-        let retry = dispatcher.dispatch(request).await;
+        let retry = dispatcher.dispatch_unmanaged(request).await;
         let response = serde_json::from_str::<ResponseEnvelope>(&retry).unwrap();
 
         assert!(matches!(response, ResponseEnvelope::Success { .. }));
@@ -883,13 +688,13 @@ mod tests {
             },
         };
 
-        let first = dispatcher.dispatch(request.clone()).await;
+        let first = dispatcher.dispatch_unmanaged(request.clone()).await;
         let ResponseEnvelope::Success { .. } = serde_json::from_str(&first).unwrap() else {
             panic!("expected the initial mutation to succeed");
         };
         dispatch(&dispatcher, ToolRequest::GitStatus).await;
 
-        let retry = dispatcher.dispatch(request).await;
+        let retry = dispatcher.dispatch_unmanaged(request).await;
         let ResponseEnvelope::Error { error, .. } = serde_json::from_str(&retry).unwrap() else {
             panic!("expected an expired replay error");
         };
@@ -993,7 +798,7 @@ mod tests {
 
     async fn dispatch(dispatcher: &Dispatcher, request: ToolRequest) -> ToolResult {
         let response = dispatcher
-            .dispatch(RequestEnvelope {
+            .dispatch_unmanaged(RequestEnvelope {
                 protocol_version: PROTOCOL_VERSION,
                 request_id: Uuid::new_v4(),
                 authority: None,
