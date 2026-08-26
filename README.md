@@ -11,6 +11,7 @@ Tagged releases publish the `kodo` CLI for Linux x86-64, Linux ARM64, and
 Apple Silicon macOS, with a shell installer and checksums. The Phoenix server
 is published as `ghcr.io/chaba-dev/kodo` for Linux x86-64 and ARM64. See the
 [release guide](docs/releasing.md) for the artifact and image lifecycle.
+The GNU/Linux CLI archives require glibc 2.34 or newer.
 
 Building from source on Linux or macOS requires:
 

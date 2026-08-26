@@ -72,6 +72,10 @@ main changes
 | Linux ARM64 | `aarch64-unknown-linux-gnu` | `.tar.xz` |
 | macOS Apple Silicon | `aarch64-apple-darwin` | `.tar.xz` |
 
+Linux artifacts are built natively on Ubuntu 22.04 runners and require glibc
+2.34 or newer. This is the MVP portability floor; use a source build on older
+distributions.
+
 Windows is not a release target because the confined process runner currently
 uses Unix process groups and signals.
 
