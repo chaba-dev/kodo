@@ -1,0 +1,53 @@
+#+TITLE: RFD 0004 implementation checklist
+
+Implements [[file:README.adoc][RFD 4: Introduce a full-screen terminal interface]].
+
+* Phase 0: Simplify the runner contract
+
+- [X] Remove the public ~daemon~ command and stdin tool protocol, rename the
+  internal connected dispatcher, and expose runner-only operation as
+  ~kodo --headless~ with connection and first-seen session status.
+
+* Phase 1: Establish the reusable application core
+
+- [ ] Resolve the remaining interaction, diff-view, minimum-size, model
+  boundary, and transport questions through RFD discussion.
+- [ ] Extract an application core that owns authenticated actions, durable
+  replay, projection, retries, request identifiers, and runner lifetime.
+- [ ] Define a deterministic Elm-style model/message/update/effect loop with
+  I/O performed by a dispatcher and results returned as typed messages.
+- [ ] Keep Kodo domain messages and effects independent of Ratatui and Crossterm
+  so an Iced frontend can reuse behavior without sharing widget abstractions.
+- [ ] Prove existing start, resume, approval, cancellation, reconnect, and
+  output behavior is preserved while transitional commands still exist.
+
+* Phase 2: Prove the terminal foundation
+
+- [ ] Prototype terminal initialization, alternate-screen restoration,
+  resize, suspend/resume, Unicode width, and supported release platforms.
+
+* Phase 3: Build the interactive workflows
+
+- [ ] Implement the adaptive session header, timeline, contextual approval or
+  diff view, composer, help overlay, and stale-state treatment.
+- [ ] Implement discoverable keyboard navigation and unambiguous confirmation
+  for approval, denial, cancellation, and process exit without misrepresenting
+  the hosted runner's lifetime.
+- [ ] Bound in-memory timeline and command output while preserving durable
+  cursor recovery and access to older session history.
+
+* Phase 4: Harden the TUI and headless mode
+
+- [ ] Add deterministic renderer and state-transition tests for representative
+  sizes, focus, redraw, reconnect, duplicate prevention, and terminal cleanup.
+- [ ] Exercise supported Linux and macOS terminals, palettes, ~NO_COLOR~,
+  resizing, suspend/resume, SSH latency, Unicode output, and headless status.
+- [ ] Measure polling latency and control-plane load before proposing any new
+  realtime user-client transport.
+
+* Phase 5: Make the TUI the default
+
+- [ ] Make ~kodo~ start the Ratatui/Crossterm interface and host the current
+  workspace runner after feature parity is proven.
+- [ ] Remove the transitional ~start~ and ~resume~ commands after their
+  workflows and failure behavior are covered by the TUI.
