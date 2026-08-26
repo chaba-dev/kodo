@@ -96,7 +96,7 @@ than relying on the model's description of its work.
                          typed tool protocol
                                    |
                       +------------v--------------+
-                      | Local Rust runner daemon  |
+                      | Local Rust runner         |
                       |                           |
                       | - files and patches       |
                       | - shell and processes     |
@@ -119,9 +119,12 @@ replicated Phoenix deployment is supported.
 
 ** Rust runner and CLI
 
-The Rust application may initially ship as one binary with separate execution
-modes, for example ~kodo daemon~ and ~kodo chat~. Running ~kodo~ should connect
-to the existing daemon or start it when necessary.
+Kodo ships as one binary. The current transitional interface uses ~kodo start~
+and ~kodo resume~ to host the workspace runner and interact with a session.
+Running ~kodo --headless~ hosts the runner without an interactive client and
+reports which sessions send it work. RFD 4 proposes making the full-screen TUI
+the default ~kodo~ behavior once it reaches parity with the transitional
+commands. There is no separate daemon or standard-input tool protocol.
 
 The runner is responsible for:
 
@@ -682,7 +685,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 
 ** DONE Milestone 1: Local tool runner
 
-- [X] Rust daemon and workspace registration.
+- [X] Rust runner and workspace registration.
 - [X] Authenticated WebSocket connection to Phoenix.
 - [X] Phoenix-owned runner limits negotiated through the versioned channel join contract.
 - [X] Read, search, patch, process, and repository-inspection tools.

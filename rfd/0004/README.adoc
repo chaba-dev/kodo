@@ -1,0 +1,238 @@
+:authors: Darwin D Wu <darwin67@users.noreply.github.com>
+:state: prediscussion
+:discussion:
+:labels: software, cli, tui, user-interface, accessibility
+:toc:
+
+= RFD 4 Introduce a full-screen terminal interface
+
+== Goal
+
+Make active Kodo sessions easier to follow and control from a terminal by
+adding a full-screen terminal user interface. The TUI should keep the timeline,
+current activity, approval requests, composer, and session state visible
+without requiring users to reconstruct the current state from interleaved
+scrollback.
+
+Running `kodo` should start this interface and host the current workspace's
+runner. Running `kodo --headless` should host that runner without any session
+interaction. Both modes are presentations of the same binary and runner core,
+not separate agents or sources of session state.
+
+== Current experience
+
+`kodo start` and `kodo resume` host the selected workspace runner, poll the
+authenticated session API from a durable sequence cursor, print each event,
+prompt for approvals, and cancel the active turn on interruption. This design
+is small and resilient, but long sessions mix messages, tool activity, command
+output, approval prompts, and status transitions into one stream.
+
+Kodo also previously exposed a `daemon` subcommand with a newline-delimited
+JSON standard-input protocol and an authenticated control-plane mode. The stdin
+contract duplicates a transport boundary that production sessions do not use.
+The authenticated runner connection remains necessary, but it belongs to the
+single Kodo application rather than a separately named daemon product.
+
+The browser already provides structured navigation and a diff view, but a
+developer working primarily in a terminal should not need a browser merely to
+see which tool is active, review recent output, compose a follow-up, or resolve
+an approval.
+
+== Proposed direction
+
+Kodo should have two top-level modes:
+
+* `kodo` starts the full-screen interactive TUI and hosts the current
+  workspace's runner.
+* `kodo --headless` connects the current workspace's runner to the control
+  plane without prompts, approvals, a composer, or other interaction. It emits
+  concise status output naming its runner connection and each session that
+  sends it work so an operator can see what the local process is handling.
+
+The old `daemon` command and standard-input tool protocol are removed. The
+authenticated runner WebSocket, typed tool protocol, authority leases,
+idempotent dispatch, and bounded execution remain internal parts of the one
+Kodo binary. Existing `start` and `resume` commands may remain during the TUI
+implementation, but are transitional and can be removed after the TUI covers
+their workflows.
+
+The initial TUI may browse and resume sessions available to the authenticated
+user, but it hosts exactly one local workspace runner. It must clearly
+distinguish sessions that can use that runner from sessions associated with
+another workspace.
+
+The interactive process hosts the workspace runner, so closing it is not
+equivalent to closing a browser tab: an active turn may still need its runner.
+The TUI must not describe process exit as a harmless detach. Exiting without
+cancelling requires an explicit warning that the runner disconnects. A user who
+needs a non-interactive long-lived runner launches `kodo --headless` instead;
+Kodo does not daemonize itself or create a hidden background service.
+
+The terminal should use an alternate screen so the interface does not pollute
+normal scrollback. Every exit path, including errors, cancellation, terminal
+resize, and panic handling where practical, must restore the terminal's prior
+mode. Suspending and resuming the process must not leave raw mode enabled or
+lose durable progress.
+
+== Application architecture
+
+The current CLI combines transport, durable replay, projection, rendering,
+terminal input, and runner lifetime in one module. Before adding the TUI, Kodo
+should separate an application core from terminal presentation. The core owns:
+
+* authenticated create, fetch, message, approval, and cancellation requests;
+* durable cursor advancement, pagination, retries, and deduplication;
+* the current session projection and typed timeline items;
+* workspace-runner readiness, status, and lifetime; and
+* actions whose outcomes are confirmed by authoritative session state.
+
+The interactive application follows an Elm-style architecture:
+
+* A `Model` holds the current session projection, selected views, drafts,
+  connection state, pending confirmations, and in-flight operation state.
+* Typed `Message` values represent user intent, terminal events, runner status,
+  durable session updates, and completed asynchronous operations.
+* A deterministic update function consumes one `Message`, updates the `Model`,
+  and returns explicit effects to dispatch. It performs no network, filesystem,
+  clock, or terminal I/O directly.
+* A small runtime dispatches effects to the authenticated session client or
+  runner, then feeds their results back as messages.
+* The Ratatui view renders only the current model. Crossterm input is translated
+  into application messages at the adapter boundary.
+
+Messages and model types that express Kodo behavior must not contain Ratatui or
+Crossterm types. Terminal-only focus, dimensions, and visual state may live in
+a terminal presentation model, but session actions and effects remain UI
+agnostic. This boundary allows a future `iced` desktop application to reuse the
+domain model, update rules, effects, and client runtime while supplying its own
+event adapter and view. Kodo should not attempt to share widget trees or invent
+a framework abstraction common to Ratatui and Iced.
+
+The first implementation should continue using the existing authenticated HTTP
+session API and durable sequence cursor. Polling every short interval is not in
+itself a reason to create a CLI-specific WebSocket protocol. A push transport
+may be considered separately if measurement shows polling materially harms
+latency or control-plane load; reconnection must still resume from the durable
+cursor because push notifications are not authoritative.
+
+== Initial interface
+
+The initial layout has four responsibilities rather than a fixed pane count:
+
+* A header shows session title, durable status, workspace, model profile, runner
+  connectivity, and whether displayed state may be stale.
+* A scrollable timeline renders user and agent messages, tool requests,
+  bounded command output, failures, and verification results in sequence.
+* A contextual area gives pending approvals and the final changed-file or diff
+  summary enough space to make a decision without obscuring the timeline.
+* A composer accepts a follow-up message when authoritative session state
+  permits one and preserves an unfinished draft during redraws and temporary
+  disconnection.
+
+The layout adapts to terminal size. A narrow terminal may replace simultaneous
+panes with tabs or overlays, but pending approval and stale connection state
+must remain conspicuous. Below a documented minimum size, Kodo displays a clear
+resize message or falls back safely rather than rendering corrupt controls.
+
+Keyboard interaction should follow familiar terminal conventions and be
+discoverable in an in-product help overlay. Arrow keys and conventional
+alternatives navigate content; `Tab` moves focus; `Enter` performs the focused
+action; `Esc` closes transient views. Destructive or consequential actions such
+as denial and cancellation require an explicit confirmation and cannot share a
+single ambiguous key with ordinary navigation.
+
+`Ctrl-C` must have predictable semantics. When a turn is active, it opens an
+explicit cancellation flow rather than silently exiting and leaving the user
+unsure whether execution continues. Cancelling the turn and exiting the
+runner-hosting process are distinct actions, and the interface explains their
+consequences.
+
+== Rendering and terminal compatibility
+
+The implementation uses `ratatui` with `crossterm`. A small prototype first
+confirms terminal restoration, input handling, Unicode width, and
+release-platform support. Kodo should use established widgets and styles rather
+than introducing a local terminal abstraction before the application boundary
+is proven.
+
+Rendering is state-driven. Network and runner tasks send bounded typed updates
+to the UI loop; they do not draw directly. The UI redraws after state changes,
+input, resize, or a bounded animation tick and must not redraw continuously.
+Command output and timeline history remain bounded in memory, with older
+content reloadable from the durable sequence API when practical.
+
+Color conveys emphasis but never the only meaning. The TUI respects `NO_COLOR`,
+works with common light and dark terminal palettes, and provides textual status
+labels. Focus, selected rows, approvals, failures, and stale state remain
+distinguishable without color. Unicode decoration has an ASCII-safe fallback,
+and all interaction remains keyboard accessible.
+
+== Consistency and failure behavior
+
+PostgreSQL session events and projections remain authoritative. Optimistic UI
+may indicate that an action was sent, but approval, cancellation, or message
+submission is not shown as complete until the server confirms it. Repeated
+message submission reuses a stable client request identifier so a response lost
+after commit cannot create a duplicate turn.
+
+During a control-plane interruption, the TUI keeps the last rendered state,
+labels it stale, preserves the composer draft, and disables actions that depend
+on fresh state. It retries with bounded backoff and resumes from the last
+durable cursor. Runner failure remains distinct from frontend disconnection and
+is reported with a recoverable next step where one exists.
+
+An unexpected renderer failure must not corrupt the session. Kodo restores the
+terminal, reports the error in plain text, and leaves already committed session
+events available to `kodo resume` or the browser.
+
+== Non-goals
+
+The first TUI does not include:
+
+* editing repository files or embedding a terminal emulator;
+* replacing the browser's complete session index or administration pages;
+* mouse-only interactions;
+* offline execution or a second local copy of session state;
+* a new runner protocol or TUI-specific control-plane API; or
+* a hidden background daemon or restoration of the stdin runner protocol.
+
+== Rollout and acceptance
+
+Implementation should begin with the model-message-update-effect boundary and
+regression tests proving approval, cancellation, reconnect, durable replay, and
+runner behavior remain intact. A renderer prototype then validates terminal
+lifecycle before the full interaction model is built.
+
+Automated tests use a deterministic terminal backend to cover layout at
+representative sizes, focus and key transitions, approval confirmation,
+cancel-versus-exit behavior, stale state, reconnection, bounded history, and
+terminal restoration after success and failure. Snapshot tests may cover
+stable layout regions but must not replace state-transition assertions.
+
+Manual release checks cover supported Linux and macOS terminals, light and dark
+palettes, `NO_COLOR`, narrow windows, resize, suspend/resume, SSH latency, and
+long Unicode-rich command output. Headless checks verify non-interactive
+connection, bounded status output, and first-seen session reporting. The TUI is
+ready to replace the transitional commands only after the full-screen path
+demonstrates reliable terminal restoration and complete start/resume parity.
+
+== Open questions
+
+Discussion should resolve these points before publication:
+
+* Which timeline items need expansion, collapse, filtering, or search in the
+  first release?
+* Should diff review be an initial pane, or should the TUI initially hand off
+  full diff inspection to the user's pager or browser?
+* What minimum terminal dimensions and terminal capability checks are
+  supportable across release platforms?
+* Is polling responsive enough after state-driven rendering is implemented, or
+  does a measured problem justify a shared realtime user-client transport?
+* How much terminal-specific selection and focus state belongs beside the
+  reusable domain model without making a future Iced adapter mirror TUI-only
+  concepts?
+
+== Implementation
+
+Progress against this proposal is tracked in the
+link:IMPLEMENTATION.org[RFD 4 implementation checklist].

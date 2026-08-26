@@ -2,7 +2,7 @@
 
 mod authority;
 pub mod control_plane;
-pub mod daemon;
+mod dispatcher;
 pub mod process;
 pub mod protocol;
 pub mod runner;

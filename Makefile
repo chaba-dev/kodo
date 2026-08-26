@@ -8,7 +8,7 @@ dev-console:
 
 .PHONY: dev-agent
 dev-agent:
-	cargo run -p kodo -- daemon --workspace . --control-plane http://127.0.0.1:4451
+	cargo run -p kodo -- --headless --workspace . --control-plane http://127.0.0.1:4451
 
 .PHONY: test
 test: ex-test rs-test
@@ -23,6 +23,11 @@ rs-test:
 
 .PHONY: lint
 lint: ex-lint rs-lint
+
+.PHONY: check-rfds
+check-rfds:
+	@./scripts/check-rfd-status.sh
+	@./scripts/check-rfd-status-test.sh
 
 .PHONY: ex-lint
 ex-lint:

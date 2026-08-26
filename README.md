@@ -88,6 +88,21 @@ shows the exact command for approval-gated process requests, defaults approval
 prompts to denial, and sends an agent cancellation when interrupted with
 Ctrl-C. `KODO_CONTROL_PLANE` defaults to `http://localhost:4451`.
 
+## Host a headless workspace runner
+
+Run Kodo without an interactive session client when the control plane should be
+able to send work to the current workspace independently:
+
+```sh
+kodo --headless
+```
+
+Headless mode prints its runner connection and the identifier of each session
+that sends it work. It never prompts for messages or approvals. Kodo no longer
+exposes a separate `daemon` command or a newline-delimited standard-input tool
+protocol; both interactive and headless operation use the authenticated runner
+connection in the same binary.
+
 Tool output is bounded. Both clients label partial results with
 `[output truncated]`; request a narrower read, search, or diff before drawing a
 conclusion. Failed patches are recorded as `tool_failed` events with Git's error

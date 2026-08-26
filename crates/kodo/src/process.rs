@@ -1,6 +1,6 @@
 //! Supervised shell-command lifecycle and replayable, bounded output retention.
 //!
-//! Each command receives a dedicated process group so stop, timeout, normal shell exit, and daemon
+//! Each command receives a dedicated process group so stop, timeout, normal shell exit, and runner
 //! teardown all clean up descendants rather than only the immediate shell process.
 
 use std::collections::{HashMap, VecDeque};

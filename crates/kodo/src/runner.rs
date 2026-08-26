@@ -1,6 +1,6 @@
 //! Typed local tools built around a single registered [`Workspace`].
 //!
-//! Every result is bounded before crossing the daemon protocol. Filesystem mutations are
+//! Every result is bounded before crossing the runner protocol. Filesystem mutations are
 //! serialized, while read-only blocking work is concurrency-limited off the async runtime.
 
 use std::io::{Read, Write};

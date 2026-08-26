@@ -1,5 +1,6 @@
 //! Authenticated Phoenix Channels transport for a loopback control plane.
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use tokio::time::{Instant, interval_at, sleep};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite};
 use url::{Host, Url};
 
-use crate::daemon::{Dispatcher, MAX_IN_FLIGHT_REQUESTS};
+use crate::dispatcher::{Dispatcher, MAX_IN_FLIGHT_REQUESTS};
 use crate::protocol::{AuthorityLease, ExecutionLimits, PROTOCOL_VERSION, RequestEnvelope};
 use crate::runner::Runner;
 use crate::workspace::Workspace;
@@ -54,7 +55,7 @@ pub enum ControlPlaneError {
     Transport(String),
     #[error("control-plane supplied invalid runner limits: {0}")]
     Configuration(String),
-    #[error("runner limits changed; restart the daemon to begin a new policy epoch")]
+    #[error("runner limits changed; restart Kodo to begin a new policy epoch")]
     PolicyChanged,
 }
 
@@ -62,6 +63,20 @@ pub enum ControlPlaneError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerReady {
     pub runner_id: String,
+}
+
+#[derive(Default)]
+struct HeadlessStatus {
+    reported_sessions: HashSet<uuid::Uuid>,
+}
+
+impl HeadlessStatus {
+    fn observe(&mut self, request: &RequestEnvelope) -> Option<uuid::Uuid> {
+        request
+            .authority
+            .map(|lease| lease.session_id)
+            .filter(|session_id| self.reported_sessions.insert(*session_id))
+    }
 }
 
 #[derive(Serialize)]
@@ -149,23 +164,23 @@ fn required_string(value: Value, field: &str) -> Result<String, ControlPlaneErro
         .ok_or_else(|| ControlPlaneError::Transport(format!("Phoenix {field} must be a string")))
 }
 
-/// Register the workspace and maintain its authenticated loopback control-plane connection.
-pub async fn serve(
+/// Register a headless workspace runner and report the sessions that send it work.
+pub async fn serve_headless(
     base: &str,
     workspace: &Workspace,
     agent_token: &str,
 ) -> Result<(), ControlPlaneError> {
-    serve_inner(base, workspace, agent_token, None).await
+    serve_inner(base, workspace, agent_token, None, true).await
 }
 
-/// Serve like [`serve`], notifying an in-process client once sessions can target this runner.
+/// Serve alongside an interactive client, notifying it once sessions can target this runner.
 pub async fn serve_with_ready(
     base: &str,
     workspace: &Workspace,
     agent_token: &str,
     ready: oneshot::Sender<RunnerReady>,
 ) -> Result<(), ControlPlaneError> {
-    serve_inner(base, workspace, agent_token, Some(ready)).await
+    serve_inner(base, workspace, agent_token, Some(ready), false).await
 }
 
 async fn serve_inner(
@@ -173,6 +188,7 @@ async fn serve_inner(
     workspace: &Workspace,
     agent_token: &str,
     mut ready: Option<oneshot::Sender<RunnerReady>>,
+    report_sessions: bool,
 ) -> Result<(), ControlPlaneError> {
     let base = validate_base_url(base)?;
     let _runner_lock = workspace
@@ -189,6 +205,7 @@ async fn serve_inner(
     // commands, request elections, or cached mutation responses from the current policy epoch.
     let mut registration = None;
     let mut runtime: Option<(ExecutionLimits, Dispatcher)> = None;
+    let mut headless_status = report_sessions.then(HeadlessStatus::default);
     let mut backoff = INITIAL_RECONNECT_DELAY;
     loop {
         if registration.is_none() {
@@ -243,7 +260,15 @@ async fn serve_inner(
                 runner_id: registered.runner_id.clone(),
             });
         }
-        if let Err(error) = channel_loop(socket, registered, dispatcher).await {
+        if report_sessions {
+            eprintln!(
+                "kodo: headless runner {} connected for {}",
+                registered.runner_id, root
+            );
+        }
+        if let Err(error) =
+            channel_loop(socket, registered, dispatcher, headless_status.as_mut()).await
+        {
             eprintln!("kodo: control-plane connection lost: {error}");
         }
         backoff = INITIAL_RECONNECT_DELAY;
@@ -474,6 +499,7 @@ async fn channel_loop<S>(
     mut socket: tokio_tungstenite::WebSocketStream<S>,
     registration: &Registration,
     dispatcher: Dispatcher,
+    mut headless_status: Option<&mut HeadlessStatus>,
 ) -> Result<(), ControlPlaneError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -494,6 +520,12 @@ where
                     else if frame.topic == registration.topic && frame.event == "tool_request" {
                         // The protocol request ID, not the Phoenix ref, provides idempotent replay.
                         let request: RequestEnvelope = serde_json::from_value(frame.payload).map_err(|e| ControlPlaneError::Transport(format!("invalid tool request: {e}")))?;
+                        if let Some(session_id) = headless_status
+                            .as_deref_mut()
+                            .and_then(|status| status.observe(&request))
+                        {
+                            eprintln!("kodo: handling session {session_id}");
+                        }
                         let dispatcher = dispatcher.clone();
                         let reference = frame.reference;
                         requests.push(async move { (reference, dispatcher.dispatch_connected(request).await) });
@@ -533,6 +565,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_status_reports_a_session_once_across_connections() {
+        let session_id = uuid::Uuid::new_v4();
+        let request = RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: uuid::Uuid::new_v4(),
+            authority: Some(AuthorityLease {
+                session_id,
+                ownership_epoch: 1,
+                ttl_ms: 1_000,
+            }),
+            request: crate::protocol::ToolRequest::GitStatus,
+        };
+        let mut status = HeadlessStatus::default();
+
+        // channel_loop receives this same process-owned status after every reconnect.
+        assert_eq!(status.observe(&request), Some(session_id));
+        assert_eq!(status.observe(&request), None);
+    }
 
     #[test]
     fn only_loopback_http_urls_are_accepted() {
