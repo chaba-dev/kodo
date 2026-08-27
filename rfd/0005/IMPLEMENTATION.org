@@ -58,9 +58,12 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   desktop, tablet, and narrow-mobile browser checks for the sketched layouts.
 - [ ] Preserve the OpenAI environment key only as an explicitly enabled,
   deployment-managed migration fallback after user-owned resolution.
-- [ ] Decide and test first-run model routing after a provider is connected,
-  including confirmation of provider-compatible role presets, distinct
-  Platform and subscription billing, and preservation of existing sessions.
+- [ ] Keep provider connection separate from routing changes; when no usable
+  mapping exists, present one provider-compatible role preset with explicit
+  billing paths and apply it only after "Use recommended models" confirmation.
+- [ ] Test that connecting another provider leaves a usable mapping unchanged,
+  confirmed presets affect only defaults and new sessions, and disconnecting a
+  required integration never silently reroutes existing sessions.
 - [ ] Test encryption round trips and redaction, ownership isolation, concurrent
   users with different OpenAI keys, key replacement during a session, missing
   integration behavior, and migration fallback precedence.

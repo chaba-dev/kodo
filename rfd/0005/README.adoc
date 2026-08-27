@@ -61,6 +61,19 @@ credential again immediately before each provider request. Key replacement,
 token refresh, disconnection, or revocation therefore takes effect without
 rewriting session history.
 
+Connecting a provider and changing model routing are separate actions. If the
+current role mapping remains usable, connecting another provider does not
+prompt for or apply a routing change. If a user has no usable mapping, Kodo
+presents one recommended provider-compatible preset and shows its primary,
+search, and review models with their Platform, subscription, or aggregator
+billing paths. The preset is applied only after the user chooses "Use
+recommended models".
+
+Confirmed presets affect new sessions and user defaults; existing session
+mappings are never rewritten. Disconnecting an integration marks dependent
+mappings unavailable and links to model settings rather than silently routing
+requests through a differently billed provider.
+
 == Provider support
 
 === API-key providers
@@ -427,21 +440,11 @@ Operational documentation covers initial encryption-key provisioning, backup
 handling, rotation, provider revocation, device-flow failures, refresh failure
 rates, and safe rollback while legacy environment fallback exists.
 
-== Questions to resolve
+== Question to resolve
 
-The following questions do not reopen the settled ownership, encryption,
-request-local credential, or no-runner-secret boundaries. Each has a named
-decision point before the affected phase can ship.
-
-=== First-run model routing
-
-Connecting a provider does not by itself decide which models should serve the
-primary, search, and review roles. Before Phase 1 completes, Kodo must decide
-whether onboarding asks the user to confirm a provider-compatible preset or
-automatically selects one for new sessions. Existing session mappings must
-never be rewritten. The chosen flow must distinguish `openai` Platform models
-from `openai_codex` subscription models and explain their different billing
-paths.
+The remaining question does not reopen the settled ownership, encryption,
+request-local credential, no-runner-secret, or model-routing boundaries. It
+must be answered before the affected providers ship.
 
 === Credential validation and possible cost
 
