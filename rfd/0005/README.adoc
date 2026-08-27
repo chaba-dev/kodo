@@ -120,23 +120,27 @@ and are not written to logs or telemetry.
 The OpenAI Codex source publishes the device flow. The downstream
 `chatgpt.com/backend-api/codex` inference contract is nevertheless less formal
 than the OpenAI Platform API. Kodo labels this integration "ChatGPT
-Subscription (Beta)", identifies itself honestly in supported client headers,
-and does not silently replace it with an OpenAI API key if authorization or
-subscription quota fails.
+Subscription (Beta)", identifies its request origin as Kodo in supported
+headers, and does not silently replace it with an OpenAI API key if
+authorization or subscription quota fails. Kodo records the exact upstream
+public OAuth client identity, scopes, endpoints, and headers on which the
+working flow depends and does not describe that compatibility as formal OpenAI
+support without separate confirmation.
 
 ChatGPT Subscription is disabled by default behind a deployment-level feature
 flag. An operator may explicitly enable the Beta only after accepting its
 private-interface support boundary and running the compatibility check for
 device authorization, a tool-calling turn, structured output used by review and
-search roles, refresh-token rotation, restart recovery, and Kodo's client
-identity. Kodo never impersonates another client. An explicit provider response
-that rejects Kodo's identity or third-party use marks the integration
-unsupported rather than retrying or falling back to Platform billing.
+search roles, refresh-token rotation, restart recovery, and the documented
+client contract. A provider rejection or contract change is a compatibility
+regression to fix; the deployment flag provides an emergency disable mechanism
+while affected integrations report an actionable unavailable state. Kodo does
+not retry through another client identity or fall back to Platform billing.
 
 Enabling ChatGPT Subscription by default requires a later decision backed by
-published provider support or direct provider confirmation. Ordinary transient,
-quota, and authorization errors do not change the deployment feature flag and
-remain scoped to the affected integration.
+operational experience with the compatibility and support burden. Ordinary
+transient, quota, and authorization errors do not change the deployment feature
+flag and remain scoped to the affected integration.
 
 Anthropic subscription OAuth is outside this RFD. Anthropic permits API keys
 and supported cloud-provider credentials for third-party applications but
@@ -536,13 +540,15 @@ provider details inside the integration boundary.
 Each phase is independently reviewable and deployable. Detailed progress is
 tracked in link:IMPLEMENTATION.org[RFD 5 implementation checklist].
 
-=== Phase 0: Verify the Codex contract
+=== Phase 0: Implement and verify the Codex contract
 
-Run a bounded live spike against the current ReqLLM `openai_codex` provider.
-Confirm device authorization mechanics from OpenAI's Codex source, Kodo's
-honest client identity, required model capabilities, token refresh, and restart
-recovery. Record the supported request shape and a disable criterion before
-building the production OAuth UI.
+Trace and reproduce the working Codex device flow in a bounded Kodo live spike
+against the current ReqLLM `openai_codex` provider. Record the upstream public
+OAuth client identity, scopes, device and token endpoints, PKCE and polling
+rules, account identification, Kodo originator headers, required model
+capabilities, token refresh, and restart recovery. Phase 0 defines the
+production contract and regression diagnostics; it is not a gate for omitting
+the required ChatGPT/Codex integration.
 
 === Phase 1: Build encrypted integration storage
 
@@ -564,8 +570,10 @@ in one session without sharing credentials or billing paths.
 
 Add durable user-scoped authorization attempts, asynchronous polling, encrypted
 OAuth persistence, refresh leases, rotated-token updates, reauthorization, and
-the ChatGPT Subscription billing identity. Gate availability on Phase 0's
-compatibility criteria and retain the Beta label.
+the ChatGPT Subscription billing identity. Require Phase 0's compatibility
+suite to pass, retain the Beta label, and treat later failures as regressions
+that leave the emergency deployment flag available while Kodo fixes the
+contract.
 
 === Phase 4: Harden operations
 

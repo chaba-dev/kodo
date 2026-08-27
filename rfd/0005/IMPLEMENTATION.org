@@ -2,24 +2,26 @@
 
 Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations]].
 
-* Phase 0: Verify the OpenAI Codex contract
+* Phase 0: Implement and verify the OpenAI Codex contract
 
 - [ ] Trace the current OpenAI Codex device authorization and refresh flow from
-  OpenAI's published Codex source and record endpoints, polling behavior,
-  expiry, token rotation, and account identification used by the spike.
-- [ ] Verify ReqLLM's ~openai_codex~ provider with an honest Kodo originator for
-  a text response, Kodo tool calls, structured output, and every reasoning
-  effort required by current role mappings.
+  OpenAI's published Codex source and record the public OAuth client identity,
+  scopes, device and token endpoints, PKCE behavior, polling rules, expiry,
+  token rotation, account identification, and client headers.
+- [ ] Reproduce the complete device flow in a bounded Kodo live spike and
+  verify ReqLLM's ~openai_codex~ provider with a Kodo originator for a text
+  response, Kodo tool calls, structured output, and every reasoning effort
+  required by current role mappings.
 - [ ] Verify refresh-token rotation, control-plane restart recovery, quota
   errors, revocation, and required reauthorization without using a shared OAuth
   file.
-- [ ] Document compatibility criteria, the Beta support boundary, and the
-  provider response that disables ChatGPT subscription integration rather than
-  impersonating another client.
+- [ ] Document the exact working contract, regression diagnostics, upstream
+  public-client dependency, and Beta support boundary without claiming formal
+  OpenAI support unless separately confirmed.
 - [ ] Gate ChatGPT Subscription UI and requests behind a deployment-level
   feature flag that defaults to disabled, document operator opt-in and the
-  private-interface support boundary, and require a later decision before
-  changing the default.
+  private-interface support boundary, retain it as an emergency disable
+  mechanism, and require a later decision before changing the default.
 
 * Phase 1: Build encrypted integration storage and OpenAI API keys
 
@@ -129,8 +131,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   pause, replacement during refresh, permanently lost rotated-token responses,
   restart recovery, revocation, and secret redaction.
 - [ ] Run the Phase 0 live compatibility suite against the production path and
-  keep the feature disabled if any required Codex capability or identity check
-  fails.
+  do not declare ChatGPT/Codex implementation complete while a required
+  capability fails; classify later contract failures as regressions and never
+  fall back to Platform billing.
 
 * Phase 4: Harden operations
 
