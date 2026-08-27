@@ -211,27 +211,44 @@ database lease. The task holds decrypted credentials only for the operation's
 duration. A task or node failure leaves durable credential state unchanged and
 the expired lease available for takeover.
 
-Kodo does not start a `DynamicSupervisor` child or keep an in-memory timer for
-each integration. Such processes would duplicate across replicas, lose their
-schedule during restarts, and still require database coordination. If proactive
-refresh becomes necessary, a single supervised sweeper or durable job system
-may discover due integrations, but it must invoke the same lease-protected
-refresh operation and keep the database as the source of truth.
+Callers coordinate directly through the database; Kodo does not add a refresh
+coordinator `GenServer`, a `DynamicSupervisor` child, or an in-memory timer per
+integration. A process-local coordinator would not prevent another replica
+from refreshing, while a cluster-wide process would require leader election
+and still need durable fencing during failover. If proactive refresh becomes
+necessary, a single supervised sweeper or durable job system may discover due
+integrations, but it must invoke the same lease-protected refresh operation and
+keep the database as the source of truth.
 
-Only one control-plane replica may refresh an integration at a time. Kodo uses
-a short database-backed refresh lease so it does not hold a database
-transaction or row lock across an external HTTP request. Other callers wait for
-a bounded interval and reload the integration; an expired lease can be taken
-over. The lease owner updates the integration only if its lease and credential
-generation still match, preventing a delayed response from overwriting a newer
-authorization or refresh.
+Kodo admits one lease holder for an integration at a time. It uses a short
+database-backed refresh lease, calculated from database time, so it does not
+hold a database transaction or row lock across an external HTTP request. The
+lease duration exceeds the hard refresh-request timeout plus a safety margin.
+Other callers wait for a bounded interval and reload the integration; an
+expired lease can be taken over, although a paused former holder can briefly
+overlap the replacement after resuming.
+
+Every attempt captures the credential generation it read. A successful
+response may atomically replace the encrypted payload and advance that
+generation even if its lease expired while the task or node was paused, but
+only if no refresh, replacement, reconnection, or disconnection has already
+advanced it. The first successful response wins; later responses reload the
+stored result. Failure-derived state changes use the same generation fencing.
 
 An `invalid_grant` or equivalent terminal response marks the integration as
-requiring authorization and discards unusable access for request purposes.
-Transient provider or network failures preserve the credential, release or
-expire the lease, and return a retryable provider-unavailable error. Refresh
-tokens are never retried concurrently because providers may rotate and
-invalidate them on first use.
+requiring authorization and discards unusable access for request purposes only
+after its generation check succeeds. A stale-lease or takeover attempt that
+receives `invalid_grant` first reloads and waits for a bounded interval so a
+late successful response can advance the generation; it must not overwrite
+that success with a terminal state. Transient provider or network failures
+preserve the credential, release or expire the lease, and return a retryable
+provider-unavailable error.
+
+This protocol minimizes concurrent refresh but cannot make an external token
+endpoint exactly once. If the provider rotates a refresh token and Kodo
+permanently loses the successful response, the only safe recovery may be user
+reauthorization. Kodo documents and tests this boundary rather than silently
+retrying an ambiguously consumed token.
 
 == User interface and authorization
 

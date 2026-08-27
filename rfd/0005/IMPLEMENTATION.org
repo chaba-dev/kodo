@@ -101,19 +101,26 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   credential generations in the encrypted integration payload without logging
   device or token material.
 - [ ] Run just-in-time refreshes as bounded tasks under
-  ~Kodo.ControlPlaneTaskSupervisor~; do not create a long-lived supervised
-  process or in-memory refresh timer per integration.
-- [ ] Implement database-backed refresh leases, bounded waiter behavior,
-  compare-and-update protection, atomic refresh-token rotation, lease takeover,
-  and terminal ~invalid_grant~ reauthorization.
+  ~Kodo.ControlPlaneTaskSupervisor~; coordinate callers directly through the
+  database rather than adding a refresh coordinator ~GenServer~, long-lived
+  supervised process, or in-memory refresh timer per integration.
+- [ ] Implement database-time refresh leases whose duration exceeds the hard
+  HTTP timeout plus a safety margin, bounded waiter behavior, lease takeover,
+  and credential-generation compare-and-update protection for every success
+  and failure-derived state change.
+- [ ] Let the first generation-matching successful response atomically persist
+  rotated tokens even after lease expiry, and make a stale or takeover
+  ~invalid_grant~ reload and wait for a possible generation advance before
+  requiring reauthorization.
 - [ ] Add the "ChatGPT Subscription (Beta)" connection flow, billing
   explanation, progress state, cancellation, quota errors, disconnect, and
   reauthorization to the authenticated integrations page.
 - [ ] Route ~openai_codex~ models only through the user's ChatGPT integration
   and prohibit silent fallback to OpenAI API billing.
 - [ ] Test authorization ownership and expiry, polling backoff, two-node refresh
-  contention, delayed refresh responses, rotated refresh tokens, restart
-  recovery, revocation, and secret redaction.
+  contention, late success after lease expiry, takeover ~invalid_grant~, node
+  pause, replacement during refresh, permanently lost rotated-token responses,
+  restart recovery, revocation, and secret redaction.
 - [ ] Run the Phase 0 live compatibility suite against the production path and
   keep the feature disabled if any required Codex capability or identity check
   fails.
