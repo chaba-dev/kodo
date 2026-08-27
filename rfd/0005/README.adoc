@@ -39,6 +39,12 @@ session owner selects the credential. ReqLLM receives that credential through
 request-local options so concurrent users never share mutable process or
 application configuration.
 
+Kodo is not yet live, so this proposal does not preserve a runtime migration
+fallback to deployment environment keys. Once user-owned integrations land, a
+missing user credential fails closed and links to integration settings. The
+production adapter never looks up `OPENAI_API_KEY` or another provider key from
+the process environment.
+
 The initial provider identities are distinct even when they share a vendor:
 
 * `openai` uses an OpenAI Platform API key and Platform billing.
@@ -410,19 +416,17 @@ interface. Status updates use a live region, the countdown is not the only
 expiry cue, and cancelling returns the provider card to a stable disconnected
 state.
 
-== Migration and compatibility
+== Pre-release cutover
 
-The rollout temporarily preserves existing environment-key behavior as a
-deployment fallback so current installations and live-provider CI do not stop
-working when the schema first ships. Resolution during this interval is:
+Kodo has no production users or stored provider integrations to migrate. The
+integration schema, request-local credential boundary, missing-integration UX,
+and removal of ReqLLM's environment-key path therefore land in the same phase.
+There is no deployment fallback, automatic import, or implicit owner for an
+existing environment key.
 
-. the session owner's active provider integration; then
-. the matching legacy deployment environment key, if fallback is enabled.
-
-Kodo never copies a deployment key into a user's integration because there is
-no safe implicit owner. The fallback is visibly deployment-managed and cannot
-be viewed or edited in user settings. It is removed after integration
-onboarding and provider-specific live tests are established.
+Development and opt-in live-provider tests create an explicit test-user
+integration or pass a typed test credential through the same Kodo-owned
+boundary. They do not add environment lookup to the production adapter.
 
 At the end of this RFD, no LLM API key or OAuth token is required at boot. A
 credential-encryption key remains required because encrypted database secrets
@@ -452,7 +456,7 @@ Kodo applies the following boundaries:
 
 Operational documentation covers initial encryption-key provisioning, backup
 handling, rotation, provider revocation, device-flow failures, refresh failure
-rates, and safe rollback while legacy environment fallback exists.
+rates, and safe rollback across integration schema and encryption-key changes.
 
 == Question to resolve
 
@@ -475,7 +479,8 @@ invalid states and disclose any billed Test action before it runs.
 
 Environment keys are simple but preserve one billing identity for every user,
 require operator involvement, and cannot support user-scoped OAuth refresh.
-They remain only as a migration bridge.
+Because Kodo is not yet live, retaining them as a migration bridge adds billing
+ambiguity without preserving production compatibility.
 
 === Write credentials to runner environments
 
@@ -513,11 +518,12 @@ building the production OAuth UI.
 === Phase 1: Build encrypted integration storage
 
 Add the user-owned integration schema, authenticated encryption and key
-versioning, scoped context operations, safe inspection, and migration-time
-environment fallback. Add the shared responsive settings shell, improve the
-existing Account presentation without changing its behavior, and ship the
-authenticated integration page with OpenAI Platform API-key connection first.
-This establishes the full path from UI through request-local ReqLLM options.
+versioning, scoped context operations, safe inspection, explicit live-test
+credentials, and fail-closed request-time resolution. Add the shared responsive
+settings shell, improve the existing Account presentation without changing its
+behavior, and ship the authenticated integration page with OpenAI Platform
+API-key connection first. This establishes the full path from UI through
+request-local ReqLLM options without a provider-key environment fallback.
 
 === Phase 2: Add Anthropic and OpenRouter
 
@@ -532,12 +538,11 @@ OAuth persistence, refresh leases, rotated-token updates, reauthorization, and
 the ChatGPT Subscription billing identity. Gate availability on Phase 0's
 compatibility criteria and retain the Beta label.
 
-=== Phase 4: Remove boot-time LLM credentials and harden operations
+=== Phase 4: Harden operations
 
-Complete onboarding and missing-integration UX, remove runtime dependence on
-provider environment keys, update CI to create explicit test integrations,
-exercise multi-node refresh and key rotation, and publish operator guidance.
-The encryption key remains the only integration-related boot secret.
+Complete operational hardening, exercise multi-node refresh and key rotation,
+and publish operator guidance. The encryption key remains the only
+integration-related boot secret.
 
 == Implementation
 

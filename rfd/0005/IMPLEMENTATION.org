@@ -38,6 +38,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Resolve credentials from the session owner and each role model's provider
   before recording an invocation, with actionable missing, invalid, and
   disconnected integration errors.
+- [ ] Remove provider-key environment lookup from the production adapter and
+  make missing user integrations fail closed; give development and opt-in
+  live-provider checks explicit test-user integrations or typed test
+  credentials through the same Kodo-owned boundary.
 - [ ] Build a shared responsive settings shell with Account and Integrations
   navigation, a framed desktop/tablet workspace, compact persistent rail,
   deep-linkable detail pane, clear return action, accessible narrow-screen
@@ -56,8 +60,6 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Add LiveView selector tests for the settings shell, section navigation,
   provider cards, contextual forms, and device-flow states, plus representative
   desktop, tablet, and narrow-mobile browser checks for the sketched layouts.
-- [ ] Preserve the OpenAI environment key only as an explicitly enabled,
-  deployment-managed migration fallback after user-owned resolution.
 - [ ] Keep provider connection separate from routing changes; when no usable
   mapping exists, present one provider-compatible role preset with explicit
   billing paths and apply it only after "Use recommended models" confirmation.
@@ -66,7 +68,7 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   required integration never silently reroutes existing sessions.
 - [ ] Test encryption round trips and redaction, ownership isolation, concurrent
   users with different OpenAI keys, key replacement during a session, missing
-  integration behavior, and migration fallback precedence.
+  integration behavior, and the absence of environment-key fallback.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 
@@ -116,16 +118,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   keep the feature disabled if any required Codex capability or identity check
   fails.
 
-* Phase 4: Remove boot-time LLM credentials and harden operations
+* Phase 4: Harden operations
 
 - [ ] Add onboarding and session/model-settings feedback that links users to
   every missing provider integration required by their selected role mapping.
-- [ ] Remove provider API keys from required runtime configuration and remove
-  user request fallback to ~OPENAI_API_KEY~, ~ANTHROPIC_API_KEY~, and
-  ~OPENROUTER_API_KEY~.
-- [ ] Update live-provider CI and development setup to create explicit test-user
-  integrations without exposing credentials in fixtures, logs, or command
-  output.
 - [ ] Add bounded-cardinality telemetry and credential-free security audit logs
   for connection changes, validation, refresh outcomes, and reauthorization.
 - [ ] Implement and test bounded-batch encryption-key rotation with a documented
