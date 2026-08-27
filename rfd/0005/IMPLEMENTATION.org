@@ -1,0 +1,124 @@
+#+TITLE: RFD 0005 implementation checklist
+
+Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations]].
+
+* Phase 0: Verify the OpenAI Codex contract
+
+- [ ] Trace the current OpenAI Codex device authorization and refresh flow from
+  OpenAI's published Codex source and record endpoints, polling behavior,
+  expiry, token rotation, and account identification used by the spike.
+- [ ] Verify ReqLLM's ~openai_codex~ provider with an honest Kodo originator for
+  a text response, Kodo tool calls, structured output, and every reasoning
+  effort required by current role mappings.
+- [ ] Verify refresh-token rotation, control-plane restart recovery, quota
+  errors, revocation, and required reauthorization without using a shared OAuth
+  file.
+- [ ] Document compatibility criteria, the Beta support boundary, and the
+  provider response that disables ChatGPT subscription integration rather than
+  impersonating another client.
+
+* Phase 1: Build encrypted integration storage and OpenAI API keys
+
+- [ ] Generate migrations for user-owned provider integrations, unique active
+  user/provider identity, non-secret status metadata, credential generation,
+  and encryption-key version.
+- [ ] Add authenticated encryption with unique nonces, versioned keys, safe
+  redaction, and production configuration that distinguishes the Kodo
+  credential-encryption key from all LLM provider credentials.
+- [ ] Implement scope-first integration context operations for listing,
+  connecting, replacing, validating, and disconnecting credentials without
+  accepting browser-supplied ownership.
+- [ ] Add ~Kodo.LLM~ credential values and translate them into request-local
+  ReqLLM options without mutating process environment, application config, or
+  shared credential files.
+- [ ] Resolve credentials from the session owner and each role model's provider
+  before recording an invocation, with actionable missing, invalid, and
+  disconnected integration errors.
+- [ ] Build a shared responsive settings shell with Account and Integrations
+  navigation, a framed desktop/tablet workspace, compact persistent rail,
+  deep-linkable detail pane, clear return action, accessible narrow-screen
+  section navigation, and consistent page headings and action placement that
+  preserve the RFD interface sketches' hierarchy.
+- [ ] Show only implemented user-owned settings; do not add a Personal/Workspace
+  switch or placeholder categories before Kodo defines workspace-owned
+  configuration and authorization.
+- [ ] Restyle the existing account email and password forms as distinct,
+  balanced settings surfaces without changing generated authentication,
+  confirmation, or sudo-mode behavior.
+- [ ] Add ~/integrations~ to the existing authenticated LiveView session and
+  browser pipeline, require sudo mode for credential changes, and implement the
+  OpenAI Platform API-key provider card, contextual form, connection status,
+  loading state, and accessible feedback.
+- [ ] Add LiveView selector tests for the settings shell, section navigation,
+  provider cards, contextual forms, and device-flow states, plus representative
+  desktop, tablet, and narrow-mobile browser checks for the sketched layouts.
+- [ ] Preserve the OpenAI environment key only as an explicitly enabled,
+  deployment-managed migration fallback after user-owned resolution.
+- [ ] Test encryption round trips and redaction, ownership isolation, concurrent
+  users with different OpenAI keys, key replacement during a session, missing
+  integration behavior, and migration fallback precedence.
+
+* Phase 2: Add Anthropic and OpenRouter API keys
+
+- [ ] Add Anthropic API-key connection, fixed endpoint configuration,
+  provider-specific non-destructive validation, and safe error classification.
+- [ ] Add OpenRouter API-key connection, fixed endpoint configuration,
+  provider-specific non-destructive validation, and explicit OpenRouter billing
+  identity for routed models.
+- [ ] Extend integration settings and model-selection feedback to distinguish
+  OpenAI API, Anthropic, and OpenRouter providers without displaying saved
+  credentials.
+- [ ] Test a role mapping that uses different connected providers for primary,
+  search, and review, including absence or revocation of one required
+  integration during a turn.
+- [ ] Add opt-in live-provider checks for OpenAI API, Anthropic, and OpenRouter
+  while keeping ordinary tests independent of external provider access.
+
+* Phase 3: Add ChatGPT subscription device authorization beta
+
+- [ ] Generate persistence for expiring, user-scoped, single-use device
+  authorization attempts with encrypted sensitive fields, refresh lease state,
+  and bounded cleanup.
+- [ ] Implement device-code creation, interval-aware asynchronous polling,
+  cancellation, expiry, terminal errors, and authorization-code exchange using
+  Req rather than embedded browser scripts.
+- [ ] Store access tokens, refresh tokens, account identifiers, expiries, and
+  credential generations in the encrypted integration payload without logging
+  device or token material.
+- [ ] Implement database-backed refresh leases, bounded waiter behavior,
+  compare-and-update protection, atomic refresh-token rotation, lease takeover,
+  and terminal ~invalid_grant~ reauthorization.
+- [ ] Add the "ChatGPT Subscription (Beta)" connection flow, billing
+  explanation, progress state, cancellation, quota errors, disconnect, and
+  reauthorization to the authenticated integrations page.
+- [ ] Route ~openai_codex~ models only through the user's ChatGPT integration
+  and prohibit silent fallback to OpenAI API billing.
+- [ ] Test authorization ownership and expiry, polling backoff, two-node refresh
+  contention, delayed refresh responses, rotated refresh tokens, restart
+  recovery, revocation, and secret redaction.
+- [ ] Run the Phase 0 live compatibility suite against the production path and
+  keep the feature disabled if any required Codex capability or identity check
+  fails.
+
+* Phase 4: Remove boot-time LLM credentials and harden operations
+
+- [ ] Add onboarding and session/model-settings feedback that links users to
+  every missing provider integration required by their selected role mapping.
+- [ ] Remove provider API keys from required runtime configuration and remove
+  user request fallback to ~OPENAI_API_KEY~, ~ANTHROPIC_API_KEY~, and
+  ~OPENROUTER_API_KEY~.
+- [ ] Update live-provider CI and development setup to create explicit test-user
+  integrations without exposing credentials in fixtures, logs, or command
+  output.
+- [ ] Add bounded-cardinality telemetry and credential-free security audit logs
+  for connection changes, validation, refresh outcomes, and reauthorization.
+- [ ] Implement and test bounded-batch encryption-key rotation with a documented
+  previous-key migration window and rollback procedure.
+- [ ] Verify provider credentials never reach runner registration, runner
+  WebSockets, tool subprocesses, session events, browser responses, exception
+  inspection, or telemetry metadata.
+- [ ] Document encryption-key provisioning, backup handling, credential and
+  provider revocation, key rotation, device-flow troubleshooting, refresh
+  failure alerts, and rollback from each rollout phase.
+- [ ] Run ~mix precommit~ and the opt-in provider compatibility checks before
+  declaring the RFD implemented.

@@ -1,0 +1,497 @@
+:authors: Darwin D Wu <darwin67@users.noreply.github.com>
+:state: discussion
+:discussion: https://github.com/chaba-dev/kodo/pull/25
+:labels: software, integrations, llm, oauth, security
+:toc:
+
+= RFD 5 Store user-owned LLM provider integrations
+
+== Goal
+
+Let each Kodo user connect the LLM providers used by their agent sessions
+without requiring an operator to supply an OpenAI API key when the control
+plane boots. The first provider set includes OpenAI Platform API keys,
+Anthropic API keys, OpenRouter API keys, and OpenAI Codex access through a
+linked ChatGPT subscription.
+
+Provider credentials remain in the control plane. Runners continue to receive
+only Kodo credentials and tool requests; they never receive LLM API keys,
+access tokens, or refresh tokens.
+
+== Current state
+
+Kodo delegates provider authentication to ReqLLM. With no request-local
+credential, ReqLLM reads `OPENAI_API_KEY` from the control-plane environment.
+This creates one deployment-wide provider identity, makes credential changes an
+operational restart concern, and prevents users from choosing separately billed
+provider accounts.
+
+The existing execution boundary is otherwise suitable. Agent inference runs in
+the Phoenix control plane, sessions have a durable owning user, and model role
+mappings identify the provider used for each request. The Rust runner executes
+workspace tools and does not call LLM providers directly.
+
+== Decision
+
+Kodo will persist user-owned provider integrations and resolve one for every
+model request. The model specification selects the provider; the authenticated
+session owner selects the credential. ReqLLM receives that credential through
+request-local options so concurrent users never share mutable process or
+application configuration.
+
+The initial provider identities are distinct even when they share a vendor:
+
+* `openai` uses an OpenAI Platform API key and Platform billing.
+* `openai_codex` uses a ChatGPT subscription OAuth credential and the Codex
+  responses service.
+* `anthropic` uses an Anthropic Console API key.
+* `openrouter` uses an OpenRouter API key.
+
+One active integration is allowed per user and provider identity in the first
+release. Treating `openai` and `openai_codex` separately lets a user connect
+both and makes billing and model routing explicit. Supporting several accounts
+for one provider may be added later with an explicit integration selection in
+model settings; the first release does not add that complexity.
+
+Model role mappings continue to own model selection. They do not contain
+credentials. A mapping may use different providers for primary, search, and
+review roles, in which case the session owner must have every required
+integration. Kodo checks this when starting a turn and resolves the current
+credential again immediately before each provider request. Key replacement,
+token refresh, disconnection, or revocation therefore takes effect without
+rewriting session history.
+
+== Provider support
+
+=== API-key providers
+
+OpenAI, Anthropic, and OpenRouter use the same integration lifecycle: connect,
+validate, replace, test, and disconnect. Provider endpoints are fixed by Kodo;
+the initial UI does not accept arbitrary base URLs or HTTP headers. This avoids
+turning provider configuration into a server-side request forgery or
+credential-exfiltration path.
+
+Validation is non-destructive and provider-specific. A transient validation
+failure does not expose the credential or silently fall back to another user's
+or deployment's key. Kodo records a bounded status and safe error code, while
+the detailed provider error is redacted before logging or display. A saved
+credential is never rendered back to the browser; the UI shows only provider,
+status, validation time, and a non-secret fingerprint where useful.
+
+OpenRouter is a provider in its own right rather than a transparent fallback
+for direct provider integrations. Models routed through OpenRouter use the
+OpenRouter integration and billing even when the underlying model was produced
+by OpenAI or Anthropic.
+
+=== ChatGPT subscription
+
+ChatGPT subscription support uses OpenAI Codex device authorization. The user
+starts the flow in Kodo, receives an OpenAI verification URL and one-time code,
+and approves the request in a browser. Kodo polls at OpenAI's instructed
+interval, exchanges the resulting authorization code and PKCE verifier, and
+stores the returned access token, refresh token, account identifier, and expiry
+as encrypted credentials.
+
+Authorization attempts are user-scoped, single-use, and expire after the
+provider deadline. Polling continues only while an attempt is active, respects
+provider backoff, and stops on completion, cancellation, expiry, or a terminal
+provider error. Attempt identifiers and one-time codes are treated as secrets
+and are not written to logs or telemetry.
+
+The OpenAI Codex source publishes the device flow, and Amp and other hosted
+agents demonstrate subscription-backed use. The downstream
+`chatgpt.com/backend-api/codex` inference contract is nevertheless less formal
+than the OpenAI Platform API. Kodo labels this integration "ChatGPT
+Subscription (Beta)", identifies itself honestly in supported client headers,
+and does not silently replace it with an OpenAI API key if authorization or
+subscription quota fails.
+
+Before general availability, a live compatibility check must confirm device
+authorization, a tool-calling turn, structured output used by review and search
+roles, refresh-token rotation, restart recovery, and Kodo's client identity.
+If OpenAI rejects Kodo's identity or restricts this use, the integration remains
+disabled rather than impersonating Codex, Amp, Pi, or another client.
+
+Anthropic subscription OAuth is outside this RFD. Anthropic permits API keys
+and supported cloud-provider credentials for third-party applications but
+currently prohibits third parties from collecting or intermediating Claude
+subscription credentials. Kodo will not offer Claude subscription login unless
+Anthropic publishes a contract that permits this use.
+
+== Persistence and encryption
+
+Provider integrations store non-secret indexing and operational metadata
+separately from one versioned encrypted credential payload. The durable record
+contains at least:
+
+* a generated identifier, owning user, provider identity, and authentication
+  type;
+* encrypted credentials and the encryption-key version;
+* connection status, provider account identifier when available, and token
+  expiry;
+* validation and refresh timestamps plus a bounded safe error code; and
+* normal insertion and update timestamps.
+
+The database enforces ownership references and uniqueness of the active user
+and provider pair. Context functions take the authenticated scope as their
+first argument and apply the owning user in the query. Changesets never cast a
+`user_id` supplied by a browser.
+
+Credentials use authenticated encryption with a unique nonce per write. Kodo
+requires a deployment-level credential-encryption key, supplied independently
+of all LLM providers, and records a key version so ciphertext can be rotated.
+Production refuses to persist or decrypt integrations when this key is absent
+or malformed. Database encryption does not remove the need to protect the
+control-plane process; it protects database copies, backups, and read-only
+database access from directly revealing provider credentials.
+
+The credential payload is opaque to Ecto query code and never appears in
+session events, model mappings, changeset errors, exception inspection,
+telemetry metadata, or client responses. Deleting an integration removes its
+credential payload. Backup retention and provider-side revocation remain
+operational concerns and are documented with the deployment procedure.
+
+== Request-time resolution
+
+The provider-independent LLM boundary accepts a Kodo credential value in its
+generation options. The ReqLLM adapter translates an API-key credential to
+`:api_key` and a Codex credential to request-local OAuth options. No request
+uses `System.put_env/2`, `Application.put_env/3`, ReqLLM's global key store, or a
+shared OAuth file.
+
+Credential resolution occurs before Kodo persists a model invocation as
+started. A missing, disconnected, or reauthorization-required integration
+returns a domain error naming the provider and required user action without
+including credential material. The session can accept a later turn after the
+user reconnects the provider. Provider errors must not trigger fallback to a
+differently billed integration unless model settings explicitly define such a
+fallback in a future proposal.
+
+Model validation remains credential-independent. Provider capability checks
+may resolve model metadata without making a billed request, while connection
+validation and inference use the session owner's integration.
+
+== Refresh and multi-node coordination
+
+API keys do not refresh. Codex access tokens refresh shortly before expiry,
+using the stored refresh token and OpenAI's token endpoint. A successful
+refresh atomically replaces the access token, rotated refresh token, account
+identifier, and expiry in one encrypted payload.
+
+Only one control-plane replica may refresh an integration at a time. Kodo uses
+a short database-backed refresh lease so it does not hold a database
+transaction or row lock across an external HTTP request. Other callers wait for
+a bounded interval and reload the integration; an expired lease can be taken
+over. The lease owner updates the integration only if its lease and credential
+generation still match, preventing a delayed response from overwriting a newer
+authorization or refresh.
+
+An `invalid_grant` or equivalent terminal response marks the integration as
+requiring authorization and discards unusable access for request purposes.
+Transient provider or network failures preserve the credential, release or
+expire the lease, and return a retryable provider-unavailable error. Refresh
+tokens are never retried concurrently because providers may rotate and
+invalidate them on first use.
+
+== User interface and authorization
+
+Integration management lives at `/integrations` inside the existing
+`:require_authenticated_user` LiveView session and browser pipeline. The route
+requires login because every integration is user-owned and its status controls
+that user's model requests. Connecting, replacing, and disconnecting a
+credential require sudo mode because they change access to a separately billed
+external account.
+
+The page provides distinct actions for OpenAI API, ChatGPT Subscription,
+Anthropic, and OpenRouter. It explains the billing identity before connection,
+shows progress and expiry for device authorization, and provides actionable
+states for missing credentials, invalid keys, quota exhaustion, and required
+reauthorization. It never embeds raw scripts; device-flow progress uses normal
+LiveView events and asynchronous server work.
+
+Session creation and model settings identify integrations by provider and
+billing path. If a selected role lacks a connection, the UI links to the
+integration page rather than instructing the operator to restart Kodo with an
+environment variable.
+
+== Settings information architecture and visual direction
+
+The integration work establishes a shared settings experience rather than
+adding another isolated generated form. Account and integration pages keep
+their existing `/users/settings` and `/integrations` paths, but render inside
+one settings shell with consistent navigation, page headings, content width,
+and action placement.
+
+The visual direction takes cues from Amp's tablet interface: a quiet neutral
+canvas, clear sectional navigation, subtle separators, rounded surfaces,
+generous spacing, restrained accent color, and controls sized for touch. Kodo
+uses those principles for settings rather than copying Amp's conversation,
+project, or composer chrome.
+
+At desktop and tablet widths, settings appear as one framed workspace within
+the authenticated application: a compact persistent rail lists Account and
+Integrations, a subtle divider separates navigation from content, and the
+selected page occupies a balanced detail pane. The frame may use a rounded
+outer surface at larger widths but remains a normal deep-linkable page, not a
+transient modal whose state disappears on refresh. A clear back or close action
+returns to the user's prior application context.
+
+Kodo does not add Personal/Workspace switching, Billing, Usage, Secrets, or
+other placeholder destinations merely because they appear in the reference.
+Only implemented settings are visible. If Kodo later gains workspace-owned
+configuration, its ownership, authorization, and navigation require a separate
+decision rather than overloading user-owned integrations.
+
+On narrow phones the frame becomes edge-to-edge and the rail becomes horizontal
+section navigation above the page; it must not create a second off-canvas menu
+inside the existing application navigation. The content pane uses one column
+without shrinking desktop cards into unreadable two-column forms. Focus order,
+selected-state contrast, keyboard navigation, scroll containment, and touch
+target size remain equivalent across layouts.
+
+The Account page groups email and password changes into separately titled
+surfaces with concise security context. Its generated authentication behavior,
+sudo-mode checks, form semantics, and confirmation flow do not change. The
+Integrations page uses one provider card per billing identity. Each card gives
+provider purpose, authentication method, billing path, connection status, and
+one clear primary action before exposing secondary actions such as test,
+replace, reconnect, or disconnect.
+
+Connection forms open within the provider's page context rather than placing
+four permanent secret inputs on the screen. Device authorization emphasizes
+the OpenAI-owned verification destination, the one-time code, remaining time,
+and a cancellable progress state. Success and failure feedback stays attached
+to the affected provider card and is also announced accessibly; transient
+loading must not shift unrelated cards or discard entered credentials.
+
+== Interface sketches
+
+These sketches communicate hierarchy and responsive behavior, not exact copy,
+dimensions, colors, or component styling.
+
+=== Desktop and tablet
+
+[source,text]
+----
++--------------------------------------------------------------------------+
+|  <- Sessions     Settings                                     darwin67   |
++------------------+-------------------------------------------------------+
+|                  |                                                       |
+|  SETTINGS        |  Provider integrations                                |
+|                  |  Connect each billing identity used by your agents.   |
+|  Account         |                                                       |
+| > Integrations   |  +-------------------------------------------------+  |
+|                  |  | ChatGPT Subscription (Beta)          CONNECTED  |  |
+|                  |  | OpenAI Codex - ChatGPT plan billing             |  |
+|                  |  | Last checked 2 min ago       [Test] [Reconnect] |  |
+|                  |  +-------------------------------------------------+  |
+|                  |                                                       |
+|                  |  +-------------------------------------------------+  |
+|                  |  | OpenAI API                      NOT CONNECTED   |  |
+|                  |  | Platform API usage and billing                  |  |
+|                  |  |                                      [Connect]  |  |
+|                  |  +-------------------------------------------------+  |
+|                  |                                                       |
+|                  |  +----------------------+  +----------------------+   |
+|                  |  | Anthropic API        |  | OpenRouter           |   |
+|                  |  | NOT CONNECTED        |  | CONNECTED            |   |
+|                  |  |          [Connect]   |  | [Test] [Replace]     |   |
+|                  |  +----------------------+  +----------------------+   |
+|                  |                                                       |
++------------------+-------------------------------------------------------+
+----
+
+The detail pane may use a two-column card row only when both cards remain
+readable and actions do not wrap ambiguously. ChatGPT and OpenAI API remain
+separate cards because their authentication, endpoint, model namespace, and
+billing identity differ.
+
+=== Narrow mobile
+
+[source,text]
+----
++--------------------------------------+
+|  <- Settings                         |
++--------------------------------------+
+|  [ Account ] [ Integrations ]        |
++--------------------------------------+
+|                                      |
+|  Provider integrations               |
+|  Connect providers used by agents.   |
+|                                      |
+|  +--------------------------------+  |
+|  | ChatGPT Subscription (Beta)    |  |
+|  | CONNECTED                      |  |
+|  | ChatGPT plan billing           |  |
+|  |                                |  |
+|  | [Test]             [Reconnect] |  |
+|  +--------------------------------+  |
+|                                      |
+|  +--------------------------------+  |
+|  | OpenAI API - NOT CONNECTED     |  |
+|  | Platform API billing           |  |
+|  |                      [Connect] |  |
+|  +--------------------------------+  |
+|                                      |
+|  +--------------------------------+  |
+|  | Anthropic API                  |  |
+|  | NOT CONNECTED        [Connect] |  |
+|  +--------------------------------+  |
+|                                      |
+|  +--------------------------------+  |
+|  | OpenRouter                     |  |
+|  | CONNECTED            [Manage]  |  |
+|  +--------------------------------+  |
+|                                      |
++--------------------------------------+
+----
+
+Cards become a single sequence on mobile. Section navigation remains visible
+without horizontally scrolling provider content, and secondary actions may
+collapse behind one labelled Manage action when width is constrained.
+
+=== ChatGPT device authorization
+
+[source,text]
+----
++-----------------------------------------------------------+
+| ChatGPT Subscription (Beta)                               |
+|                                                           |
+| 1. Open the OpenAI verification page:                     |
+|                                                           |
+|        https://auth.openai.com/codex/device               |
+|                                                           |
+| 2. Enter this one-time code:                              |
+|                                                           |
+|                    ABCD-EFGH                    [Copy]    |
+|                                                           |
+| Waiting for OpenAI authorization...          12:41 left   |
+| [==============================>................]         |
+|                                                           |
+| [Cancel]                                                  |
++-----------------------------------------------------------+
+----
+
+The code is rendered as selectable text with a copy action in the real
+interface. Status updates use a live region, the countdown is not the only
+expiry cue, and cancelling returns the provider card to a stable disconnected
+state.
+
+== Migration and compatibility
+
+The rollout temporarily preserves existing environment-key behavior as a
+deployment fallback so current installations and live-provider CI do not stop
+working when the schema first ships. Resolution during this interval is:
+
+. the session owner's active provider integration; then
+. the matching legacy deployment environment key, if fallback is enabled.
+
+Kodo never copies a deployment key into a user's integration because there is
+no safe implicit owner. The fallback is visibly deployment-managed and cannot
+be viewed or edited in user settings. It is removed after integration
+onboarding and provider-specific live tests are established.
+
+At the end of this RFD, no LLM API key or OAuth token is required at boot. A
+credential-encryption key remains required because encrypted database secrets
+need a root of trust outside the database. Installations with no connected
+provider can boot and serve account and integration pages, but cannot start a
+model turn until the user connects every provider required by the selected
+role mapping.
+
+== Security and operations
+
+Kodo applies the following boundaries:
+
+* Provider secrets remain in the Phoenix control plane and are never sent to
+  runners, browsers after submission, or Amp orbs used as Kodo runners.
+* Provider endpoints and authorization endpoints are allowlisted in code.
+* Logs and exceptions redact API keys, bearer tokens, refresh tokens, device
+  codes, authorization codes, and encrypted payloads.
+* Metrics use bounded provider, authentication-type, operation, and outcome
+  labels; user, account, integration, and token identifiers stay out of metric
+  labels.
+* Connection changes and terminal refresh failures produce security-relevant
+  audit logs without credential material.
+* Encryption-key rotation re-encrypts credentials in bounded batches and keeps
+  the previous decryption key only for the documented migration window.
+* Disconnecting instructs the user how to revoke the credential at the
+  provider when Kodo cannot revoke it directly.
+
+Operational documentation covers initial encryption-key provisioning, backup
+handling, rotation, provider revocation, device-flow failures, refresh failure
+rates, and safe rollback while legacy environment fallback exists.
+
+== Alternatives considered
+
+=== Continue deployment environment keys
+
+Environment keys are simple but preserve one billing identity for every user,
+require operator involvement, and cannot support user-scoped OAuth refresh.
+They remain only as a migration bridge.
+
+=== Write credentials to runner environments
+
+This would let provider clients run near workspaces but expands the secret
+boundary to every runner and subprocess. Kodo already performs inference in the
+control plane, so this adds risk without a corresponding capability.
+
+=== Use ReqLLM global keys or OAuth files
+
+ReqLLM supports process-wide keys and file-backed OAuth refresh for local
+applications. Those stores cannot safely distinguish concurrent Kodo users or
+coordinate refresh across control-plane replicas. Kodo therefore owns the
+database lifecycle and passes only request-local credentials to ReqLLM.
+
+=== Store provider-specific secret columns
+
+Separate API-key, access-token, and refresh-token columns make accidental
+selection and logging easier and require schema changes for every credential
+shape. A versioned encrypted payload with queryable non-secret metadata keeps
+provider details inside the integration boundary.
+
+== Phased delivery
+
+Each phase is independently reviewable and deployable. Detailed progress is
+tracked in link:IMPLEMENTATION.org[RFD 5 implementation checklist].
+
+=== Phase 0: Verify the Codex contract
+
+Run a bounded live spike against the current ReqLLM `openai_codex` provider.
+Confirm device authorization mechanics from OpenAI's Codex source, Kodo's
+honest client identity, required model capabilities, token refresh, and restart
+recovery. Record the supported request shape and a disable criterion before
+building the production OAuth UI.
+
+=== Phase 1: Build encrypted integration storage
+
+Add the user-owned integration schema, authenticated encryption and key
+versioning, scoped context operations, safe inspection, and migration-time
+environment fallback. Add the shared responsive settings shell, improve the
+existing Account presentation without changing its behavior, and ship the
+authenticated integration page with OpenAI Platform API-key connection first.
+This establishes the full path from UI through request-local ReqLLM options.
+
+=== Phase 2: Add Anthropic and OpenRouter
+
+Reuse the API-key lifecycle for Anthropic and OpenRouter, add provider-specific
+validation and errors, and verify model-role mappings can use several providers
+in one session without sharing credentials or billing paths.
+
+=== Phase 3: Add ChatGPT device authorization beta
+
+Add durable user-scoped authorization attempts, asynchronous polling, encrypted
+OAuth persistence, refresh leases, rotated-token updates, reauthorization, and
+the ChatGPT Subscription billing identity. Gate availability on Phase 0's
+compatibility criteria and retain the Beta label.
+
+=== Phase 4: Remove boot-time LLM credentials and harden operations
+
+Complete onboarding and missing-integration UX, remove runtime dependence on
+provider environment keys, update CI to create explicit test integrations,
+exercise multi-node refresh and key rotation, and publish operator guidance.
+The encryption key remains the only integration-related boot secret.
+
+== Implementation
+
+Progress against this proposal is tracked in the
+link:IMPLEMENTATION.org[RFD 5 implementation checklist].
