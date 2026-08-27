@@ -18,10 +18,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Document the exact working contract, regression diagnostics, upstream
   public-client dependency, and Beta support boundary without claiming formal
   OpenAI support unless separately confirmed.
-- [ ] Gate ChatGPT Subscription UI and requests behind a deployment-level
-  feature flag that defaults to disabled, document operator opt-in and the
-  private-interface support boundary, retain it as an emergency disable
-  mechanism, and require a later decision before changing the default.
+- [ ] Ship ChatGPT Subscription as a Beta without a deployment feature flag
+  once its implementation and required compatibility suite pass; surface later
+  contract regressions as actionable integration-unavailable errors.
 
 * Phase 1: Build encrypted integration storage and OpenAI API keys
 

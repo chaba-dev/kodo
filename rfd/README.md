@@ -11,7 +11,7 @@ should be read.
 | [2: Extend Kodo to mobile and tablet clients](0002/README.adoc) | Start with a responsive PWA, handle disconnection gracefully, and preserve a path to native clients |
 | [3: Define behavioral evaluation and release benchmarking](0003/README.adoc) | Separate role quality from multi-turn behavior, calibrate observable scoring, and benchmark frozen release candidates |
 | [4: Introduce a full-screen terminal interface](0004/README.adoc) | Make Ratatui the default client, retain non-interactive runner hosting, and preserve reusable application semantics |
-| [5: Store user-owned LLM provider integrations](0005/README.adoc) | Encrypt provider credentials, resolve them per model request, and support OpenAI, Anthropic, OpenRouter, and an opt-in ChatGPT/Codex Beta without boot-time LLM credentials |
+| [5: Store user-owned LLM provider integrations](0005/README.adoc) | Encrypt provider credentials, resolve them per model request, and support OpenAI, Anthropic, OpenRouter, and a ChatGPT/Codex Beta without boot-time LLM credentials |
 
 ## Source format
 
