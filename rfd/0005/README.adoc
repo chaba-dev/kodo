@@ -53,11 +53,11 @@ The initial provider identities are distinct even when they share a vendor:
 * `anthropic` uses an Anthropic Console API key.
 * `openrouter` uses an OpenRouter API key.
 
-One active integration is allowed per user and provider identity in the first
-release. Treating `openai` and `openai_codex` separately lets a user connect
-both and makes billing and model routing explicit. Supporting several accounts
-for one provider may be added later with an explicit integration selection in
-model settings; the first release does not add that complexity.
+One durable integration row is allowed per user and provider identity in the
+first release. Treating `openai` and `openai_codex` separately lets a user
+connect both and makes billing and model routing explicit. Supporting several
+accounts for one provider may be added later with an explicit integration
+selection in model settings; the first release does not add that complexity.
 
 Model role mappings continue to own model selection. They do not contain
 credentials. A mapping may use different providers for primary, search, and
@@ -75,6 +75,14 @@ search, and review models with their Platform, subscription, or aggregator
 billing paths. The preset is applied only after the user chooses "Use
 recommended models".
 
+A mapping is usable when every role resolves to an allowed provider whose
+integration contains a credential, has connection state `connected`, and does
+not have validation state `invalid`. Saved-but-`unverified` credentials and
+credentials whose latest validation is `unavailable` remain usable. Provider
+outages, quota exhaustion, missing model entitlement, and Codex contract
+regressions are request outcomes; they do not mutate credential validity or
+make another billing path eligible.
+
 Confirmed presets affect new sessions and user defaults; existing session
 mappings are never rewritten. Disconnecting an integration marks dependent
 mappings unavailable and links to model settings rather than silently routing
@@ -91,11 +99,11 @@ turning provider configuration into a server-side request forgery or
 credential-exfiltration path.
 
 Validation is non-destructive and provider-specific. A transient validation
-failure does not expose the credential or silently fall back to another user's
-or deployment's key. Kodo records a bounded status and safe error code, while
-the detailed provider error is redacted before logging or display. A saved
-credential is never rendered back to the browser; the UI shows only provider,
-status, validation time, and a non-secret fingerprint where useful.
+failure does not expose or invalidate the credential. Kodo records a bounded
+status and safe error code, while the detailed provider error is redacted
+before logging or display. A saved credential is never rendered back to the
+browser; the UI shows only provider, status, validation time, and a non-secret
+fingerprint where useful.
 
 OpenRouter is a provider in its own right rather than a transparent fallback
 for direct provider integrations. Models routed through OpenRouter use the
@@ -156,10 +164,26 @@ contains at least:
 * validation and refresh timestamps plus a bounded safe error code; and
 * normal insertion and update timestamps.
 
-The database enforces ownership references and uniqueness of the active user
-and provider pair. Context functions take the authenticated scope as their
-first argument and apply the owning user in the query. Changesets never cast a
+The database enforces ownership references and uniqueness of the user and
+provider pair. Context functions take the authenticated scope as their first
+argument and apply the owning user in the query. Changesets never cast a
 `user_id` supplied by a browser.
+
+Connection and validation are separate state axes. Connection is one of
+`disconnected`, `connected`, or `reauthorization_required`. Validation is one
+of `unverified`, `valid`, `invalid`, or `unavailable`. Connecting, replacing,
+or reauthorizing stores a credential, sets connection to `connected`, resets
+validation to `unverified`, and advances the credential generation.
+Disconnecting clears the encrypted payload, sets connection to `disconnected`,
+and advances the generation while preserving the integration row.
+
+An authentication probe sets validation to `valid` only on success or to
+`invalid` only on a confirmed authentication failure. Network errors, rate
+limits, and provider outages produce `unavailable` without clearing the
+credential or blocking inference. Quota and model-entitlement errors remain
+request outcomes. Every asynchronous validation or provider-derived status
+update compares the credential generation it read so it cannot overwrite a
+replacement, reconnection, or disconnection.
 
 Credentials use authenticated encryption with a unique nonce per write. API
 keys, access and refresh tokens, and provider account or workspace identifiers
@@ -184,9 +208,10 @@ from directly revealing provider credentials.
 
 The credential payload is opaque to Ecto query code and never appears in
 session events, model mappings, changeset errors, exception inspection,
-telemetry metadata, or client responses. Deleting an integration removes its
-credential payload. Backup retention and provider-side revocation remain
-operational concerns and are documented with the deployment procedure.
+telemetry metadata, or client responses. Disconnecting an integration removes
+its credential payload from the durable database row. Backup retention and
+provider-side revocation remain operational concerns and are documented with
+the deployment procedure.
 
 == Request-time resolution
 
@@ -197,10 +222,11 @@ uses `System.put_env/2`, `Application.put_env/3`, ReqLLM's global key store, or 
 shared OAuth file.
 
 Credential resolution occurs before Kodo persists a model invocation as
-started. A missing, disconnected, or reauthorization-required integration
-returns a domain error naming the provider and required user action without
-including credential material. The session can accept a later turn after the
-user reconnects the provider. Provider errors must not trigger fallback to a
+started. A missing integration, a `disconnected` or
+`reauthorization_required` connection, or an `invalid` validation returns a
+domain error naming the provider and required user action without including
+credential material. The session can accept a later turn after the user
+reconnects the provider. Provider errors must not trigger fallback to a
 differently billed integration unless model settings explicitly define such a
 fallback in a future proposal.
 

@@ -24,9 +24,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 
 * Phase 1: Build encrypted integration storage and OpenAI API keys
 
-- [ ] Generate migrations for user-owned provider integrations, unique active
-  user/provider identity, non-secret status metadata, credential generation,
-  and encryption-key version.
+- [ ] Generate migrations for one durable integration per user/provider pair,
+  separate connection and validation states, non-secret status metadata,
+  credential generation, and encryption-key version.
 - [ ] Add authenticated encryption with unique nonces, versioned keys, and AEAD
   associated data binding integration ID, user ID, provider, authentication
   type, and payload format version; keep provider account and workspace
@@ -37,13 +37,15 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   closed on missing keys or payload authentication failures.
 - [ ] Implement scope-first integration context operations for listing,
   connecting, replacing, validating, and disconnecting credentials without
-  accepting browser-supplied ownership.
+  accepting browser-supplied ownership; disconnect clears the encrypted payload
+  but preserves the row, and every credential change advances its generation.
 - [ ] Add ~Kodo.LLM~ credential values and translate them into request-local
   ReqLLM options without mutating process environment, application config, or
   shared credential files.
 - [ ] Resolve credentials from the session owner and each role model's provider
-  before recording an invocation, with actionable missing, invalid, and
-  disconnected integration errors.
+  before recording an invocation, with actionable missing, invalid,
+  disconnected, and reauthorization-required integration errors; allow
+  ~unverified~ and validation-~unavailable~ credentials.
 - [ ] Remove provider-key environment lookup from the production adapter and
   make missing user integrations fail closed; give development and opt-in
   live-provider checks explicit test-user integrations or typed test
@@ -76,7 +78,8 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   users with different OpenAI keys, key replacement during a session, missing
   integration behavior, ciphertext swaps between users and providers,
   tampering, wrong and missing keys, unknown payload versions, nonce
-  uniqueness, and the absence of environment-key fallback.
+  uniqueness, lifecycle transitions, generation-fenced asynchronous updates,
+  and the absence of environment-key fallback.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 
@@ -87,7 +90,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   identity for routed models.
 - [ ] Document whether validation for each API-key provider is unbilled or an
   explicit potentially billed Test action, and represent saved-but-unverified
-  credentials separately from valid and invalid credentials.
+  credentials separately from valid, invalid, and validation-unavailable
+  credentials; do not classify quota, entitlement, or provider outages as
+  credential invalidity.
 - [ ] Extend integration settings and model-selection feedback to distinguish
   OpenAI API, Anthropic, and OpenRouter providers without displaying saved
   credentials.
