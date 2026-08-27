@@ -198,6 +198,20 @@ using the stored refresh token and OpenAI's token endpoint. A successful
 refresh atomically replaces the access token, rotated refresh token, account
 identifier, and expiry in one encrypted payload.
 
+Refresh is just-in-time, bounded work rather than a long-lived process per
+integration. A request that encounters a near-expiry token starts the external
+HTTP operation under Kodo's existing task supervisor after acquiring the
+database lease. The task holds decrypted credentials only for the operation's
+duration. A task or node failure leaves durable credential state unchanged and
+the expired lease available for takeover.
+
+Kodo does not start a `DynamicSupervisor` child or keep an in-memory timer for
+each integration. Such processes would duplicate across replicas, lose their
+schedule during restarts, and still require database coordination. If proactive
+refresh becomes necessary, a single supervised sweeper or durable job system
+may discover due integrations, but it must invoke the same lease-protected
+refresh operation and keep the database as the source of truth.
+
 Only one control-plane replica may refresh an integration at a time. Kodo uses
 a short database-backed refresh lease so it does not hold a database
 transaction or row lock across an external HTTP request. Other callers wait for

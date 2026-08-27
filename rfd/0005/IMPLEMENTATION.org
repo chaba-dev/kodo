@@ -98,6 +98,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Store access tokens, refresh tokens, account identifiers, expiries, and
   credential generations in the encrypted integration payload without logging
   device or token material.
+- [ ] Run just-in-time refreshes as bounded tasks under
+  ~Kodo.ControlPlaneTaskSupervisor~; do not create a long-lived supervised
+  process or in-memory refresh timer per integration.
 - [ ] Implement database-backed refresh leases, bounded waiter behavior,
   compare-and-update protection, atomic refresh-token rotation, lease takeover,
   and terminal ~invalid_grant~ reauthorization.
