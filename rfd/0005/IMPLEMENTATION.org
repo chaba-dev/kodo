@@ -41,11 +41,20 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   but preserves the row, and every credential change advances its generation.
 - [ ] Add ~Kodo.LLM~ credential values and translate them into request-local
   ReqLLM options without mutating process environment, application config, or
-  shared credential files.
-- [ ] Resolve credentials from the session owner and each role model's provider
-  before recording an invocation, with actionable missing, invalid,
-  disconnected, and reauthorization-required integration errors; allow
-  ~unverified~ and validation-~unavailable~ credentials.
+  shared credential files; include the canonical provider identity in every
+  typed credential.
+- [ ] Resolve each model through ~ReqLLM.model/1~, allow only ~openai~,
+  ~openai_codex~, ~anthropic~, and ~openrouter~, and fetch the session owner's
+  integration using the resulting ~LLMDB.Model.provider~; replace model-string
+  splitting with that resolved provider when storing derived display data.
+- [ ] Require exact equality between resolved model and credential providers
+  before recording an invocation or making an HTTP request, with actionable
+  missing, invalid, disconnected, reauthorization-required, malformed-model,
+  unsupported-provider, and mismatch errors; allow ~unverified~ and
+  validation-~unavailable~ credentials.
+- [ ] Persist credential-free invocation provenance containing canonical
+  provider, authentication type, and Platform, subscription, or aggregator
+  billing path.
 - [ ] Remove provider-key environment lookup from the production adapter and
   make missing user integrations fail closed; give development and opt-in
   live-provider checks explicit test-user integrations or typed test
@@ -73,13 +82,16 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   billing paths and apply it only after "Use recommended models" confirmation.
 - [ ] Test that connecting another provider leaves a usable mapping unchanged,
   confirmed presets affect only defaults and new sessions, and disconnecting a
-  required integration never silently reroutes existing sessions.
+  required integration derives an unavailable mapping without rewriting or
+  silently rerouting existing sessions.
 - [ ] Test encryption round trips and redaction, ownership isolation, concurrent
   users with different OpenAI keys, key replacement during a session, missing
   integration behavior, ciphertext swaps between users and providers,
   tampering, wrong and missing keys, unknown payload versions, nonce
   uniqueness, lifecycle transitions, generation-fenced asynchronous updates,
-  and the absence of environment-key fallback.
+  catalog aliases, inline model specs, OpenRouter underlying vendors, malformed
+  models, credential/provider mismatches, billing provenance, and the absence
+  of environment-key fallback.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 

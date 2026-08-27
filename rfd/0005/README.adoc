@@ -84,9 +84,11 @@ regressions are request outcomes; they do not mutate credential validity or
 make another billing path eligible.
 
 Confirmed presets affect new sessions and user defaults; existing session
-mappings are never rewritten. Disconnecting an integration marks dependent
-mappings unavailable and links to model settings rather than silently routing
-requests through a differently billed provider.
+mappings are never rewritten. Mapping availability is derived from the current
+model resolution and integration state rather than persisted into each mapping.
+Disconnecting an integration therefore makes dependent mappings unavailable
+and links to model settings without rewriting them or silently routing requests
+through a differently billed provider.
 
 == Provider support
 
@@ -215,11 +217,24 @@ the deployment procedure.
 
 == Request-time resolution
 
-The provider-independent LLM boundary accepts a Kodo credential value in its
-generation options. The ReqLLM adapter translates an API-key credential to
-`:api_key` and a Codex credential to request-local OAuth options. No request
-uses `System.put_env/2`, `Application.put_env/3`, ReqLLM's global key store, or a
-shared OAuth file.
+Kodo resolves each model specification through `ReqLLM.model/1` before looking
+up a credential. The `provider` on the resulting `LLMDB.Model` is canonical;
+provider text derived from a stored model string is display data and cannot
+select a credential. This RFD allows only `openai`, `openai_codex`, `anthropic`,
+and `openrouter`. Unknown, malformed, and unsupported models fail before a
+provider request.
+
+The provider-independent LLM boundary accepts the resolved model and a typed
+Kodo credential value containing its provider identity. It fetches the
+integration by the canonical provider and requires exact equality between the
+resolved model provider and credential provider before recording an invocation
+or making an HTTP request. This check applies equally to catalog aliases,
+inline model specifications, and OpenRouter models whose underlying model
+vendor is OpenAI or Anthropic.
+
+The ReqLLM adapter translates an API-key credential to `:api_key` and a Codex
+credential to request-local OAuth options. No request uses `System.put_env/2`,
+`Application.put_env/3`, ReqLLM's global key store, or a shared OAuth file.
 
 Credential resolution occurs before Kodo persists a model invocation as
 started. A missing integration, a `disconnected` or
@@ -229,6 +244,12 @@ credential material. The session can accept a later turn after the user
 reconnects the provider. Provider errors must not trigger fallback to a
 differently billed integration unless model settings explicitly define such a
 fallback in a future proposal.
+
+Each started invocation records non-secret billing provenance from this
+resolved boundary: canonical provider, authentication type, and billing path
+(`platform`, `subscription`, or `aggregator`). It never records credential
+material. This provenance remains stable even if the integration or mapping is
+later replaced.
 
 Model validation remains credential-independent. Provider capability checks
 may resolve model metadata without making a billed request, while connection
