@@ -98,8 +98,7 @@ provider backoff, and stops on completion, cancellation, expiry, or a terminal
 provider error. Attempt identifiers and one-time codes are treated as secrets
 and are not written to logs or telemetry.
 
-The OpenAI Codex source publishes the device flow, and Amp and other hosted
-agents demonstrate subscription-backed use. The downstream
+The OpenAI Codex source publishes the device flow. The downstream
 `chatgpt.com/backend-api/codex` inference contract is nevertheless less formal
 than the OpenAI Platform API. Kodo labels this integration "ChatGPT
 Subscription (Beta)", identifies itself honestly in supported client headers,
@@ -110,7 +109,7 @@ Before general availability, a live compatibility check must confirm device
 authorization, a tool-calling turn, structured output used by review and search
 roles, refresh-token rotation, restart recovery, and Kodo's client identity.
 If OpenAI rejects Kodo's identity or restricts this use, the integration remains
-disabled rather than impersonating Codex, Amp, Pi, or another client.
+disabled rather than impersonating another client.
 
 Anthropic subscription OAuth is outside this RFD. Anthropic permits API keys
 and supported cloud-provider credentials for third-party applications but
@@ -222,11 +221,10 @@ their existing `/users/settings` and `/integrations` paths, but render inside
 one settings shell with consistent navigation, page headings, content width,
 and action placement.
 
-The visual direction takes cues from Amp's tablet interface: a quiet neutral
-canvas, clear sectional navigation, subtle separators, rounded surfaces,
-generous spacing, restrained accent color, and controls sized for touch. Kodo
-uses those principles for settings rather than copying Amp's conversation,
-project, or composer chrome.
+The visual direction uses a quiet neutral canvas, clear sectional navigation,
+subtle separators, rounded surfaces, generous spacing, restrained accent
+color, and controls sized for touch. These principles support settings without
+introducing conversation, project, or composer chrome into the page.
 
 At desktop and tablet widths, settings appear as one framed workspace within
 the authenticated application: a compact persistent rail lists Account and
@@ -237,10 +235,10 @@ transient modal whose state disappears on refresh. A clear back or close action
 returns to the user's prior application context.
 
 Kodo does not add Personal/Workspace switching, Billing, Usage, Secrets, or
-other placeholder destinations merely because they appear in the reference.
-Only implemented settings are visible. If Kodo later gains workspace-owned
-configuration, its ownership, authorization, and navigation require a separate
-decision rather than overloading user-owned integrations.
+other placeholder destinations. Only implemented settings are visible. If Kodo
+later gains workspace-owned configuration, its ownership, authorization, and
+navigation require a separate decision rather than overloading user-owned
+integrations.
 
 On narrow phones the frame becomes edge-to-edge and the rail becomes horizontal
 section navigation above the page; it must not create a second off-canvas menu
@@ -403,7 +401,7 @@ role mapping.
 Kodo applies the following boundaries:
 
 * Provider secrets remain in the Phoenix control plane and are never sent to
-  runners, browsers after submission, or Amp orbs used as Kodo runners.
+  runners, browsers after submission, or hosted runner environments.
 * Provider endpoints and authorization endpoints are allowlisted in code.
 * Logs and exceptions redact API keys, bearer tokens, refresh tokens, device
   codes, authorization codes, and encrypted payloads.
@@ -420,6 +418,42 @@ Kodo applies the following boundaries:
 Operational documentation covers initial encryption-key provisioning, backup
 handling, rotation, provider revocation, device-flow failures, refresh failure
 rates, and safe rollback while legacy environment fallback exists.
+
+== Questions to resolve
+
+The following questions do not reopen the settled ownership, encryption,
+request-local credential, or no-runner-secret boundaries. Each has a named
+decision point before the affected phase can ship.
+
+=== Codex support basis and client identity
+
+A successful device flow and inference request prove technical compatibility,
+not that OpenAI offers a supported third-party contract for Kodo's use. Phase 0
+must establish the basis on which Kodo is willing to expose the integration:
+published provider documentation or terms, direct provider confirmation, or an
+explicit project decision to accept a private-API Beta with a documented
+disable policy. The decision must also confirm that Kodo's own originator and
+client identity are accepted. Without that decision, Phase 3 remains disabled
+by default even if the live compatibility checks pass.
+
+=== First-run model routing
+
+Connecting a provider does not by itself decide which models should serve the
+primary, search, and review roles. Before Phase 1 completes, Kodo must decide
+whether onboarding asks the user to confirm a provider-compatible preset or
+automatically selects one for new sessions. Existing session mappings must
+never be rewritten. The chosen flow must distinguish `openai` Platform models
+from `openai_codex` subscription models and explain their different billing
+paths.
+
+=== Credential validation and possible cost
+
+Providers do not all expose an equivalent unbilled credential-introspection
+endpoint. Before each API-key provider ships, Kodo must identify a reliable
+non-billed validation request or decide that validation is an explicit model
+request that may incur a small charge. Saving a credential must remain possible
+during a provider outage; the UI must distinguish saved, unverified, valid, and
+invalid states and disclose any billed Test action before it runs.
 
 == Alternatives considered
 

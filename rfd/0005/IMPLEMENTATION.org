@@ -16,6 +16,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Document compatibility criteria, the Beta support boundary, and the
   provider response that disables ChatGPT subscription integration rather than
   impersonating another client.
+- [ ] Record the support basis for third-party Codex use and the project
+  decision that either enables the private-API Beta or keeps it disabled by
+  default; technical compatibility alone is insufficient.
 
 * Phase 1: Build encrypted integration storage and OpenAI API keys
 
@@ -54,6 +57,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   desktop, tablet, and narrow-mobile browser checks for the sketched layouts.
 - [ ] Preserve the OpenAI environment key only as an explicitly enabled,
   deployment-managed migration fallback after user-owned resolution.
+- [ ] Decide and test first-run model routing after a provider is connected,
+  including confirmation of provider-compatible role presets, distinct
+  Platform and subscription billing, and preservation of existing sessions.
 - [ ] Test encryption round trips and redaction, ownership isolation, concurrent
   users with different OpenAI keys, key replacement during a session, missing
   integration behavior, and migration fallback precedence.
@@ -65,6 +71,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Add OpenRouter API-key connection, fixed endpoint configuration,
   provider-specific non-destructive validation, and explicit OpenRouter billing
   identity for routed models.
+- [ ] Document whether validation for each API-key provider is unbilled or an
+  explicit potentially billed Test action, and represent saved-but-unverified
+  credentials separately from valid and invalid credentials.
 - [ ] Extend integration settings and model-selection feedback to distinguish
   OpenAI API, Anthropic, and OpenRouter providers without displaying saved
   credentials.
