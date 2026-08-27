@@ -153,8 +153,7 @@ contains at least:
 * a generated identifier, owning user, provider identity, and authentication
   type;
 * encrypted credentials and the encryption-key version;
-* connection status, provider account identifier when available, and token
-  expiry;
+* connection status and token expiry;
 * validation and refresh timestamps plus a bounded safe error code; and
 * normal insertion and update timestamps.
 
@@ -163,13 +162,26 @@ and provider pair. Context functions take the authenticated scope as their
 first argument and apply the owning user in the query. Changesets never cast a
 `user_id` supplied by a browser.
 
-Credentials use authenticated encryption with a unique nonce per write. Kodo
-requires a deployment-level credential-encryption key, supplied independently
-of all LLM providers, and records a key version so ciphertext can be rotated.
-Production refuses to persist or decrypt integrations when this key is absent
-or malformed. Database encryption does not remove the need to protect the
-control-plane process; it protects database copies, backups, and read-only
-database access from directly revealing provider credentials.
+Credentials use authenticated encryption with a unique nonce per write. API
+keys, access and refresh tokens, and provider account or workspace identifiers
+remain inside the encrypted payload. Each write binds its ciphertext through
+AEAD associated data containing the integration identifier, owning user,
+provider identity, authentication type, and credential-payload format version.
+A valid payload copied to another integration, user, provider, or
+authentication type therefore fails authentication rather than becoming a
+cross-user credential or billing path.
+
+Kodo requires a deployment-level credential-encryption key ring, supplied
+independently of all LLM providers, and records a key version so ciphertext can
+be rotated. Every production replica validates the complete configured current
+and previous key ring before becoming ready to serve integration operations.
+Production refuses to persist or decrypt integrations when a required key is
+absent or malformed. An AEAD association or authentication failure fails closed
+with a bounded corruption error and never falls back or sends the credential to
+a provider; recovery requires credential replacement or an operator procedure.
+Database encryption does not remove the need to protect the control-plane
+process; it protects database copies, backups, and read-only database access
+from directly revealing provider credentials.
 
 The credential payload is opaque to Ecto query code and never appears in
 session events, model mappings, changeset errors, exception inspection,

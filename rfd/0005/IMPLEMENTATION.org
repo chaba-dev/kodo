@@ -26,9 +26,14 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Generate migrations for user-owned provider integrations, unique active
   user/provider identity, non-secret status metadata, credential generation,
   and encryption-key version.
-- [ ] Add authenticated encryption with unique nonces, versioned keys, safe
-  redaction, and production configuration that distinguishes the Kodo
-  credential-encryption key from all LLM provider credentials.
+- [ ] Add authenticated encryption with unique nonces, versioned keys, and AEAD
+  associated data binding integration ID, user ID, provider, authentication
+  type, and payload format version; keep provider account and workspace
+  identifiers inside the encrypted payload.
+- [ ] Add safe redaction and production configuration that distinguishes the
+  Kodo credential-encryption key ring from all LLM provider credentials,
+  validates every current and previous key before replica readiness, and fails
+  closed on missing keys or payload authentication failures.
 - [ ] Implement scope-first integration context operations for listing,
   connecting, replacing, validating, and disconnecting credentials without
   accepting browser-supplied ownership.
@@ -68,7 +73,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   required integration never silently reroutes existing sessions.
 - [ ] Test encryption round trips and redaction, ownership isolation, concurrent
   users with different OpenAI keys, key replacement during a session, missing
-  integration behavior, and the absence of environment-key fallback.
+  integration behavior, ciphertext swaps between users and providers,
+  tampering, wrong and missing keys, unknown payload versions, nonce
+  uniqueness, and the absence of environment-key fallback.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 
