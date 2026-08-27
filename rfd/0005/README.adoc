@@ -29,7 +29,9 @@ provider accounts.
 The existing execution boundary is otherwise suitable. Agent inference runs in
 the Phoenix control plane, sessions have a durable owning user, and model role
 mappings identify the provider used for each request. The Rust runner executes
-workspace tools and does not call LLM providers directly.
+workspace tools and does not call LLM providers directly. The evaluation runner
+currently calls the LLM adapter without a durable session owner, so this RFD
+must bring that path under an explicit test-user integration as well.
 
 == Decision
 
@@ -39,6 +41,12 @@ execution route selects the provider and billing path; the authenticated
 session owner selects the credential for that route. ReqLLM receives that
 credential through request-local options so concurrent users never share
 mutable process or application configuration.
+
+Every text, tool-calling, and structured-output generation requires an explicit
+typed Kodo credential whose owner is known before the adapter is called. This
+includes primary, search, review, evaluation, and live-provider paths. No
+production adapter entry point infers an owner or credential from ambient
+configuration.
 
 Kodo is not yet live, so this proposal does not preserve a runtime migration
 fallback to deployment environment keys. Once user-owned integrations land, a
@@ -65,10 +73,10 @@ the exact primary, search, and review model identities selected at creation;
 later user or repository default changes affect new sessions only. Mappings do
 not contain credentials. Their execution routes may use different providers,
 in which case the session owner must have every required integration. Kodo
-checks this when starting a turn and resolves the current credential again
-immediately before each provider request. Key replacement, token refresh,
-disconnection, or revocation therefore takes effect without rewriting session
-history.
+preflights every role integration before accepting a turn and resolves the
+current credential again immediately before each provider request. Key
+replacement, token refresh, disconnection, or revocation therefore takes effect
+without rewriting session history.
 
 The first release permits an explicit execution-route change between
 `openai` Platform billing and `openai_codex` ChatGPT subscription billing while
@@ -260,8 +268,11 @@ inline model specifications, and OpenRouter models whose underlying model
 vendor is OpenAI or Anthropic.
 
 The ReqLLM adapter translates an API-key credential to `:api_key` and a Codex
-credential to request-local OAuth options. No request uses `System.put_env/2`,
-`Application.put_env/3`, ReqLLM's global key store, or a shared OAuth file.
+credential to request-local OAuth options. Only the current API key or OAuth
+access token and required decrypted account identifier cross into ReqLLM;
+refresh tokens, expiry, generation, and rotation state remain in Kodo. No
+request uses `System.put_env/2`, `Application.put_env/3`, ReqLLM's global key
+store, or a shared OAuth file.
 
 Credential resolution occurs before Kodo persists a model invocation as
 started. A missing integration, a `disconnected` or
@@ -277,6 +288,12 @@ resolved boundary: canonical provider, authentication type, and billing path
 (`platform`, `subscription`, or `aggregator`). It never records credential
 material. This provenance remains stable even if the integration or mapping is
 later replaced.
+
+Kodo classifies Req and ReqLLM failures into bounded domain errors before they
+leave the LLM boundary. Session events, exception inspection, logs, telemetry,
+and browser responses may contain only the provider, operation, bounded outcome
+class, and actionable user guidance; they never contain raw provider bodies,
+headers, request options, URLs with secrets, or inspected credential values.
 
 Model validation remains credential-independent. Provider capability checks
 may resolve model metadata without making a billed request, while connection
@@ -526,9 +543,11 @@ and removal of ReqLLM's environment-key path therefore land in the same phase.
 There is no deployment fallback, automatic import, or implicit owner for an
 existing environment key.
 
-Development and opt-in live-provider tests create an explicit test-user
-integration or pass a typed test credential through the same Kodo-owned
-boundary. They do not add environment lookup to the production adapter.
+Development, evaluation, and opt-in live-provider runs require an explicit test
+user whose encrypted integrations are provisioned through the Kodo context.
+Ordinary tests use fake adapters and fake typed credentials without external
+provider access. Neither path adds environment lookup or owner inference to the
+production adapter.
 
 At the end of this RFD, no LLM API key or OAuth token is required at boot. A
 credential-encryption key remains required because encrypted database secrets

@@ -46,6 +46,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   ReqLLM options without mutating process environment, application config, or
   shared credential files; include the canonical provider identity in every
   typed credential.
+- [ ] Require an explicitly owned typed credential in the ~Kodo.LLM~ text/tool
+  and structured-output generation callbacks and update primary, search,
+  review, and every direct adapter caller to supply one.
 - [ ] Resolve each model through ~ReqLLM.model/1~, allow only ~openai~,
   ~openai_codex~, ~anthropic~, and ~openrouter~, and fetch the session owner's
   integration using the resulting ~LLMDB.Model.provider~; replace model-string
@@ -62,9 +65,16 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   provider, authentication type, and Platform, subscription, or aggregator
   billing path.
 - [ ] Remove provider-key environment lookup from the production adapter and
-  make missing user integrations fail closed; give development and opt-in
-  live-provider checks explicit test-user integrations or typed test
-  credentials through the same Kodo-owned boundary.
+  make missing user integrations fail closed; update the evaluation runner,
+  development setup, and opt-in live-provider checks to require an explicit
+  test user with encrypted integrations through the same Kodo-owned boundary.
+- [ ] Pass only API keys or current OAuth access tokens and required account
+  identifiers into ReqLLM; keep refresh tokens, expiry, generation, and rotation
+  state inside Kodo.
+- [ ] Preflight every role integration before accepting a turn, resolve again
+  immediately before every generation call, and normalize Req/ReqLLM failures
+  into bounded domain errors before persistence, inspection, logging,
+  telemetry, or browser display.
 - [ ] Build a shared responsive settings shell with Account and Integrations
   navigation, a framed desktop/tablet workspace, compact persistent rail,
   deep-linkable detail pane, clear return action, accessible narrow-screen
@@ -96,8 +106,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   tampering, wrong and missing keys, unknown payload versions, nonce
   uniqueness, lifecycle transitions, generation-fenced asynchronous updates,
   catalog aliases, inline model specs, OpenRouter underlying vendors, malformed
-  models, credential/provider mismatches, billing provenance, and the absence
-  of environment-key fallback.
+  models, credential/provider mismatches, billing provenance, text and object
+  generation ownership, evaluation ownership, safe provider errors, secret
+  redaction, and the absence of environment-key fallback.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 
@@ -118,7 +129,8 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   search, and review, including absence or revocation of one required
   integration during a turn.
 - [ ] Add opt-in live-provider checks for OpenAI API, Anthropic, and OpenRouter
-  while keeping ordinary tests independent of external provider access.
+  using explicit test-user integrations while keeping ordinary tests
+  independent of external provider access.
 
 * Phase 3: Add ChatGPT subscription device authorization beta
 
