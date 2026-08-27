@@ -12,6 +12,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   verify ReqLLM's ~openai_codex~ provider with a Kodo originator for a text
   response, Kodo tool calls, structured output, and every reasoning effort
   required by current role mappings.
+- [ ] Record exact model identities available through both ~openai~ and
+  ~openai_codex~ and verify each route preserves the same role capability
+  contract; do not treat merely similar models as interchangeable.
 - [ ] Verify refresh-token rotation, control-plane restart recovery, quota
   errors, revocation, and required reauthorization without using a shared OAuth
   file.
@@ -47,6 +50,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   ~openai_codex~, ~anthropic~, and ~openrouter~, and fetch the session owner's
   integration using the resulting ~LLMDB.Model.provider~; replace model-string
   splitting with that resolved provider when storing derived display data.
+- [ ] Persist exact model identity separately from execution provider and
+  billing route in every session role mapping; user and repository default
+  changes affect new sessions only.
 - [ ] Require exact equality between resolved model and credential providers
   before recording an invocation or making an HTTP request, with actionable
   missing, invalid, disconnected, reauthorization-required, malformed-model,
@@ -140,12 +146,23 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Add the "ChatGPT Subscription (Beta)" connection flow, billing
   explanation, progress state, cancellation, quota errors, disconnect, and
   reauthorization to the authenticated integrations page.
-- [ ] Route ~openai_codex~ models only through the user's ChatGPT integration
-  and prohibit silent fallback to OpenAI API billing.
+- [ ] Add an explicit per-session execution-route change between OpenAI
+  Platform and ChatGPT Subscription only when the destination supports every
+  affected role's exact preserved model and capability contract; show billing
+  confirmation and append a durable route-change event.
+- [ ] Freeze the route for an in-flight turn and its continuations, apply a
+  confirmed route change at the next turn boundary, and replay normalized
+  visible assistant/tool history without provider-specific reasoning,
+  signature, or cache state.
+- [ ] Route requests whose current execution route is ~openai_codex~ only
+  through the user's ChatGPT integration and prohibit silent fallback to OpenAI
+  API billing.
 - [ ] Test authorization ownership and expiry, polling backoff, two-node refresh
   contention, late success after lease expiry, takeover ~invalid_grant~, node
   pause, replacement during refresh, permanently lost rotated-token responses,
-  restart recovery, revocation, and secret redaction.
+  restart recovery, revocation, exact-model route changes, incompatible route
+  rejection, in-flight route freezing, normalized cross-route replay, no
+  automatic route fallback, and secret redaction.
 - [ ] Run the Phase 0 live compatibility suite against the production path and
   do not declare ChatGPT/Codex implementation complete while a required
   capability fails; classify later contract failures as regressions and never

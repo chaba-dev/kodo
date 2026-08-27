@@ -34,10 +34,11 @@ workspace tools and does not call LLM providers directly.
 == Decision
 
 Kodo will persist user-owned provider integrations and resolve one for every
-model request. The model specification selects the provider; the authenticated
-session owner selects the credential. ReqLLM receives that credential through
-request-local options so concurrent users never share mutable process or
-application configuration.
+model request. A session role mapping selects an exact model identity and an
+execution route selects the provider and billing path; the authenticated
+session owner selects the credential for that route. ReqLLM receives that
+credential through request-local options so concurrent users never share
+mutable process or application configuration.
 
 Kodo is not yet live, so this proposal does not preserve a runtime migration
 fallback to deployment environment keys. Once user-owned integrations land, a
@@ -59,21 +60,43 @@ connect both and makes billing and model routing explicit. Supporting several
 accounts for one provider may be added later with an explicit integration
 selection in model settings; the first release does not add that complexity.
 
-Model role mappings continue to own model selection. They do not contain
-credentials. A mapping may use different providers for primary, search, and
-review roles, in which case the session owner must have every required
-integration. Kodo checks this when starting a turn and resolves the current
-credential again immediately before each provider request. Key replacement,
-token refresh, disconnection, or revocation therefore takes effect without
-rewriting session history.
+Model role mappings continue to own model selection. Each session preserves
+the exact primary, search, and review model identities selected at creation;
+later user or repository default changes affect new sessions only. Mappings do
+not contain credentials. Their execution routes may use different providers,
+in which case the session owner must have every required integration. Kodo
+checks this when starting a turn and resolves the current credential again
+immediately before each provider request. Key replacement, token refresh,
+disconnection, or revocation therefore takes effect without rewriting session
+history.
 
-Connecting a provider and changing model routing are separate actions. If the
-current role mapping remains usable, connecting another provider does not
-prompt for or apply a routing change. If a user has no usable mapping, Kodo
-presents one recommended provider-compatible preset and shows its primary,
-search, and review models with their Platform, subscription, or aggregator
-billing paths. The preset is applied only after the user chooses "Use
-recommended models".
+The first release permits an explicit execution-route change between
+`openai` Platform billing and `openai_codex` ChatGPT subscription billing while
+preserving the role's exact model identity. Kodo accepts the change only when
+both routes expose that exact model and satisfy the same role capability
+contract. It records a durable route-change event, shows the destination
+billing path for confirmation, and applies the new route at the next turn
+boundary; an in-flight turn and all its continuations finish on the old route.
+Quota, disconnection, or provider failure never triggers this change
+automatically.
+
+After a route change, Kodo replays normalized visible assistant content, tool
+calls, and tool results while omitting provider-specific reasoning signatures,
+encrypted reasoning state, and cache metadata that cannot safely cross the
+boundary. The visible conversation and selected model remain intact, but
+provider-private cache or hidden reasoning continuity is not promised. If the
+destination does not expose the exact model, Kodo rejects the change and keeps
+the current route. Switching to a merely similar model is deferred to a future
+decision backed by behavioral benchmarks and scoring evidence that the quality
+change is acceptable.
+
+Connecting a provider, changing user model defaults, and changing an existing
+session's execution route are separate actions. If the current role mapping
+remains usable, connecting another provider does not prompt for or apply either
+change. If a user has no usable mapping, Kodo presents one recommended
+provider-compatible preset and shows its primary, search, and review models
+with their Platform, subscription, or aggregator billing paths. The preset is
+applied only after the user chooses "Use recommended models".
 
 A mapping is usable when every role resolves to an allowed provider whose
 integration contains a credential, has connection state `connected`, and does
@@ -83,12 +106,14 @@ outages, quota exhaustion, missing model entitlement, and Codex contract
 regressions are request outcomes; they do not mutate credential validity or
 make another billing path eligible.
 
-Confirmed presets affect new sessions and user defaults; existing session
-mappings are never rewritten. Mapping availability is derived from the current
-model resolution and integration state rather than persisted into each mapping.
-Disconnecting an integration therefore makes dependent mappings unavailable
-and links to model settings without rewriting them or silently routing requests
-through a differently billed provider.
+Confirmed presets affect new sessions and user defaults; they never rewrite an
+existing session's model identities or execution routes. Only the explicit,
+same-model route-change action above can change an existing route. Mapping
+availability is derived from the current model resolution and integration state
+rather than persisted into each mapping. Disconnecting an integration therefore
+makes dependent mappings unavailable and links to model settings without
+rewriting them or silently routing requests through a differently billed
+provider.
 
 == Provider support
 
@@ -217,12 +242,14 @@ the deployment procedure.
 
 == Request-time resolution
 
-Kodo resolves each model specification through `ReqLLM.model/1` before looking
-up a credential. The `provider` on the resulting `LLMDB.Model` is canonical;
-provider text derived from a stored model string is display data and cannot
-select a credential. This RFD allows only `openai`, `openai_codex`, `anthropic`,
-and `openrouter`. Unknown, malformed, and unsupported models fail before a
-provider request.
+Kodo combines the session's preserved model identity with its current execution
+route and resolves that provider-specific model specification through
+`ReqLLM.model/1` before looking up a credential. The `provider` on the resulting
+`LLMDB.Model` is canonical and must equal the selected route; provider text
+derived from a stored model string is display data and cannot select a
+credential. This RFD allows only `openai`, `openai_codex`, `anthropic`, and
+`openrouter`. Unknown, malformed, unsupported, and route-incompatible models
+fail before a provider request.
 
 The provider-independent LLM boundary accepts the resolved model and a typed
 Kodo credential value containing its provider identity. It fetches the
