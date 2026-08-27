@@ -16,9 +16,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Document compatibility criteria, the Beta support boundary, and the
   provider response that disables ChatGPT subscription integration rather than
   impersonating another client.
-- [ ] Record the support basis for third-party Codex use and the project
-  decision that either enables the private-API Beta or keeps it disabled by
-  default; technical compatibility alone is insufficient.
+- [ ] Gate ChatGPT Subscription UI and requests behind a deployment-level
+  feature flag that defaults to disabled, document operator opt-in and the
+  private-interface support boundary, and require a later decision before
+  changing the default.
 
 * Phase 1: Build encrypted integration storage and OpenAI API keys
 

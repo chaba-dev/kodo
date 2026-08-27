@@ -105,11 +105,19 @@ Subscription (Beta)", identifies itself honestly in supported client headers,
 and does not silently replace it with an OpenAI API key if authorization or
 subscription quota fails.
 
-Before general availability, a live compatibility check must confirm device
-authorization, a tool-calling turn, structured output used by review and search
-roles, refresh-token rotation, restart recovery, and Kodo's client identity.
-If OpenAI rejects Kodo's identity or restricts this use, the integration remains
-disabled rather than impersonating another client.
+ChatGPT Subscription is disabled by default behind a deployment-level feature
+flag. An operator may explicitly enable the Beta only after accepting its
+private-interface support boundary and running the compatibility check for
+device authorization, a tool-calling turn, structured output used by review and
+search roles, refresh-token rotation, restart recovery, and Kodo's client
+identity. Kodo never impersonates another client. An explicit provider response
+that rejects Kodo's identity or third-party use marks the integration
+unsupported rather than retrying or falling back to Platform billing.
+
+Enabling ChatGPT Subscription by default requires a later decision backed by
+published provider support or direct provider confirmation. Ordinary transient,
+quota, and authorization errors do not change the deployment feature flag and
+remain scoped to the affected integration.
 
 Anthropic subscription OAuth is outside this RFD. Anthropic permits API keys
 and supported cloud-provider credentials for third-party applications but
@@ -424,17 +432,6 @@ rates, and safe rollback while legacy environment fallback exists.
 The following questions do not reopen the settled ownership, encryption,
 request-local credential, or no-runner-secret boundaries. Each has a named
 decision point before the affected phase can ship.
-
-=== Codex support basis and client identity
-
-A successful device flow and inference request prove technical compatibility,
-not that OpenAI offers a supported third-party contract for Kodo's use. Phase 0
-must establish the basis on which Kodo is willing to expose the integration:
-published provider documentation or terms, direct provider confirmation, or an
-explicit project decision to accept a private-API Beta with a documented
-disable policy. The decision must also confirm that Kodo's own originator and
-client identity are accepted. Without that decision, Phase 3 remains disabled
-by default even if the live compatibility checks pass.
 
 === First-run model routing
 
