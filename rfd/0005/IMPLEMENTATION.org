@@ -134,12 +134,25 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 
 * Phase 3: Add ChatGPT subscription device authorization beta
 
-- [ ] Generate persistence for expiring, user-scoped, single-use device
-  authorization attempts with encrypted sensitive fields, refresh lease state,
-  and bounded cleanup.
+- [ ] Generate persistence for one active, expiring, user-scoped, single-use
+  device authorization attempt per ~openai_codex~ integration, including
+  encrypted sensitive fields, attempt and expected integration generations,
+  provider deadline and polling interval, database-time claim state, and
+  bounded cleanup.
 - [ ] Implement device-code creation, interval-aware asynchronous polling,
   cancellation, expiry, terminal errors, and authorization-code exchange using
   Req rather than embedded browser scripts.
+- [ ] Trigger claims only from attempt creation or LiveView mount/remount, use
+  one conditional update against the exact attempt row, and run a successful
+  claim as a finite task under ~Kodo.ControlPlaneTaskSupervisor~ that survives
+  the originating LiveView closing.
+- [ ] Do not run a device-polling sweeper on every replica; expire attempts
+  lazily and delete terminal rows in bounded batches, using one database-elected
+  cleanup owner only if periodic cleanup becomes necessary.
+- [ ] Make a new attempt atomically supersede the prior attempt and fence
+  cancellation, expiry, completion, replacement, and disconnection by attempt
+  generation; install OAuth credentials only when both attempt and expected
+  integration generations still match.
 - [ ] Store access tokens, refresh tokens, account identifiers, expiries, and
   credential generations in the encrypted integration payload without logging
   device or token material.
@@ -170,9 +183,12 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   through the user's ChatGPT integration and prohibit silent fallback to OpenAI
   API billing.
 - [ ] Test authorization ownership and expiry, polling backoff, two-node refresh
-  contention, late success after lease expiry, takeover ~invalid_grant~, node
-  pause, replacement during refresh, permanently lost rotated-token responses,
-  restart recovery, revocation, exact-model route changes, incompatible route
+  contention, multi-node and concurrent-tab device claims, duplicate exchange
+  and completion, LiveView closure and remount, node restart, superseded and
+  stale attempts, cancellation/replacement/disconnection races, late refresh
+  success after lease expiry, takeover ~invalid_grant~, node pause, replacement
+  during refresh, permanently lost rotated-token responses, refresh restart
+  recovery, revocation, exact-model route changes, incompatible route
   rejection, in-flight route freezing, normalized cross-route replay, no
   automatic route fallback, and secret redaction.
 - [ ] Run the Phase 0 live compatibility suite against the production path and

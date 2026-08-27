@@ -160,6 +160,31 @@ provider backoff, and stops on completion, cancellation, expiry, or a terminal
 provider error. Attempt identifiers and one-time codes are treated as secrets
 and are not written to logs or telemetry.
 
+The database permits one active attempt per user and `openai_codex`
+integration. Each attempt records an attempt generation, expected integration
+generation, state, provider deadline and polling interval, encrypted sensitive
+fields, and a database-time claim lease. Starting a new attempt atomically
+cancels and supersedes the prior attempt. Cancellation, expiry, completion,
+replacement, and disconnection transitions compare the attempt generation;
+completion installs credentials only while the attempt remains active and both
+its attempt and expected integration generations still match.
+
+Device polling is connection-driven rather than replica-driven. The node that
+handles creation or a LiveView mount attempts one conditional claim update
+against that attempt's row and, on success, starts one finite polling task under
+`Kodo.ControlPlaneTaskSupervisor`. Closing the LiveView does not cancel that
+task. After a node failure, a browser reconnect or remount can resume the
+persisted attempt when the old claim expires. Concurrent tabs may contend for
+the same row, but replicas with no connection for that attempt perform no work.
+Kodo does not run a per-replica polling sweeper, so claim traffic is
+proportional to active device flows rather than cluster size.
+
+Duplicate or stale polling and code-exchange results become no-ops after their
+generation check and cannot replace newer credentials. Expiry is applied
+lazily when an attempt is read, claimed, or superseded. Terminal rows are
+deleted in bounded batches; if periodic cleanup later becomes necessary, one
+database-elected cleanup owner runs it rather than every replica.
+
 The OpenAI Codex source publishes the device flow. The downstream
 `chatgpt.com/backend-api/codex` inference contract is nevertheless less formal
 than the OpenAI Platform API. Kodo labels this integration "ChatGPT
