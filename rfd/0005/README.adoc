@@ -226,6 +226,11 @@ retry through another client identity or fall back to Platform billing.
 Ordinary transient, quota, and authorization errors remain scoped to the
 affected integration.
 
+No provider in this RFD is gated by a deployment feature flag once its required
+phase acceptance checks pass. References to opt-in live-provider or
+compatibility checks describe tests that contact and may bill an external
+provider; they are test controls, not product availability controls.
+
 Anthropic subscription OAuth is outside this RFD. Anthropic permits API keys
 and supported cloud-provider credentials for third-party applications but
 currently prohibits third parties from collecting or intermediating Claude

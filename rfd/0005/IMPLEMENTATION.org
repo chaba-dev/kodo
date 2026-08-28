@@ -24,6 +24,8 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Ship ChatGPT Subscription as a Beta without a deployment feature flag
   once its implementation and required compatibility suite pass; surface later
   contract regressions as actionable integration-unavailable errors.
+- [ ] Treat opt-in live-provider and compatibility checks only as controls for
+  externally billed tests, not as deployment or product feature flags.
 
 * Phase 1A: Establish the credential security foundation
 
