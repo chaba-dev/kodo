@@ -271,7 +271,7 @@ cross-user credential or billing path.
 Kodo requires a deployment-level credential-encryption key ring, supplied
 independently of all LLM providers, and records a key version so ciphertext can
 be rotated. Every production replica validates the complete configured current
-and previous key ring before becoming ready to serve integration operations.
+and non-current key ring before becoming ready to serve integration operations.
 Production refuses to persist or decrypt integrations when a required key is
 absent or malformed. An AEAD association or authentication failure fails closed
 with a bounded corruption error and never falls back or sends the credential to
@@ -279,6 +279,25 @@ a provider; recovery requires credential replacement or an operator procedure.
 Database encryption does not remove the need to protect the control-plane
 process; it protects database copies, backups, and read-only database access
 from directly revealing provider credentials.
+
+Kodo is not yet live, so Phase 1 creates a fresh encrypted schema and does not
+import plaintext credentials, legacy provider environment variables, or an
+earlier integration format. Post-launch key rotation is staged. Operators first
+distribute a new non-current key and wait until every replica reports readiness
+with both keys. They then make the new key current for writes and re-encrypt old
+rows in bounded batches. Each rewrite compares the credential generation and
+old key version it read, so replacement or disconnection wins and the batch
+retries or skips the stale row without changing its logical credential
+generation.
+
+The old key remains available for decryption through the documented application
+rollback and backup-retention window. Rollback restores compatible application
+behavior while both keys are still configured; it never removes key material
+first, downgrades ciphertext to plaintext, or enables a provider-environment
+fallback. Operators remove an old key only after the database has no payloads
+at that version, all replicas use the new ring, the rollback window has closed,
+and backups that require the old key have expired or remain paired with a
+separately protected copy of that key.
 
 The credential payload is opaque to Ecto query code and never appears in
 session events, model mappings, changeset errors, exception inspection,
@@ -632,14 +651,17 @@ Kodo applies the following boundaries:
   first credential form ships. Audit data excludes API keys, access and refresh
   tokens, device and authorization codes, encrypted payloads, raw provider
   responses, and secret-bearing URLs.
-* Encryption-key rotation re-encrypts credentials in bounded batches and keeps
-  the previous decryption key only for the documented migration window.
+* Encryption-key rotation uses a distribute, activate, CAS-safe re-encrypt, and
+  retire sequence; the old key remains through application rollback and backup
+  retention.
 * Disconnecting instructs the user how to revoke the credential at the
   provider when Kodo cannot revoke it directly.
 
 Operational documentation covers initial encryption-key provisioning, backup
 handling, rotation, provider revocation, device-flow failures, refresh failure
 rates, and safe rollback across integration schema and encryption-key changes.
+Encryption keys are backed up and access-controlled separately from database
+backups.
 
 == Question to resolve
 

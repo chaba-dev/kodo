@@ -29,7 +29,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 
 - [ ] Generate migrations for one durable integration per user/provider pair,
   separate connection and validation states, non-secret status metadata,
-  credential generation, and encryption-key version.
+  credential generation, and encryption-key version. Treat this as a fresh
+  encrypted schema with no plaintext, environment-key, or legacy integration
+  import path.
 - [ ] Add authenticated encryption with unique nonces, versioned keys, and AEAD
   associated data binding integration ID, user ID, provider, authentication
   type, and payload format version; keep provider account and workspace
@@ -228,13 +230,20 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   cancellation, disconnection, validation outcomes, execution-route changes,
   refresh outcomes, and reauthorization; permit internal actor and integration
   IDs only in audit records, never metric labels.
-- [ ] Implement and test bounded-batch encryption-key rotation with a documented
-  previous-key migration window and rollback procedure.
+- [ ] Implement and test staged encryption-key rotation: distribute the new key
+  as non-current, verify every replica accepts both keys, make it current for
+  writes, and re-encrypt old rows in bounded batches using credential-generation
+  and old-key-version CAS checks.
+- [ ] Retain the old key until no payload uses it and the application rollback
+  and backup-retention windows close; test concurrent replacement and
+  disconnection, interrupted-batch resume, mixed-version reads, rollback while
+  both keys remain configured, and refusal to start with an incomplete ring.
 - [ ] Verify provider credentials never reach runner registration, runner
   WebSockets, tool subprocesses, session events, browser responses, exception
   inspection, or telemetry metadata.
-- [ ] Document encryption-key provisioning, backup handling, credential and
-  provider revocation, key rotation, device-flow troubleshooting, refresh
-  failure alerts, and rollback from each rollout phase.
+- [ ] Document encryption-key provisioning, separately protected key backups,
+  database-backup retention, credential and provider revocation, staged key
+  rotation, device-flow troubleshooting, refresh failure alerts, and rollback
+  from each rollout phase without plaintext or provider-environment fallback.
 - [ ] Run ~mix precommit~ and the opt-in provider compatibility checks before
   declaring the RFD implemented.
