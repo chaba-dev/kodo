@@ -250,6 +250,15 @@ provider pair. Context functions take the authenticated scope as their first
 argument and apply the owning user in the query. Changesets never cast a
 `user_id` supplied by a browser.
 
+Deleting a Kodo user cascades in the database to all of that user's integration
+rows and from each integration to its device-authorization attempts and claim
+state. Provider availability or revocation success never blocks account
+deletion. Any validation, polling, refresh, or rotation task that races with
+deletion observes the missing ownership-checked row and terminates without
+persisting state or issuing a later provider request. The deletion flow advises
+the user to revoke credentials at providers where Kodo cannot do so, but does
+not promise provider-side revocation.
+
 Connection and validation are separate state axes. Connection is one of
 `disconnected`, `connected`, or `reauthorization_required`. Validation is one
 of `unverified`, `valid`, `invalid`, or `unavailable`. Connecting, replacing,
@@ -686,7 +695,10 @@ Operational documentation covers initial encryption-key provisioning, backup
 handling, rotation, provider revocation, device-flow failures, refresh failure
 rates, and safe rollback across integration schema and encryption-key changes.
 Encryption keys are backed up and access-controlled separately from database
-backups.
+backups. User deletion removes live database payloads but cannot selectively
+erase ciphertext already present in retained database backups or write-ahead
+logs; those copies remain governed by the documented backup expiry and key
+retention policy.
 
 == Question to resolve
 

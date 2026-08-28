@@ -32,6 +32,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   credential generation, and encryption-key version. Treat this as a fresh
   encrypted schema with no plaintext, environment-key, or legacy integration
   import path.
+- [ ] Enforce ~ON DELETE CASCADE~ from users to integrations and from each
+  integration to authorization attempts and claim state; account deletion must
+  not depend on a successful provider call.
 - [ ] Add authenticated encryption with unique nonces, versioned keys, and AEAD
   associated data binding integration ID, user ID, provider, authentication
   type, and payload format version; keep provider account and workspace
@@ -104,7 +107,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   evaluation ownership, safe provider errors, same-origin and cross-origin
   redirect rejection, no credential-bearing follow-up request, and absence of
   an environment-key fallback. Assert credential-derived identifiers are absent
-  from persistence, UI, logs, telemetry, and audit records.
+  from persistence, UI, logs, telemetry, and audit records. Delete a user with
+  API-key integrations and racing validation work, then assert all owned rows
+  are gone and the late task performs no state write or provider request.
 - [ ] Do not expose a credential form or permit a production provider request
   until every Phase 1A security boundary and test is complete.
 
@@ -204,6 +209,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Store access tokens, refresh tokens, account identifiers, expiries, and
   credential generations in the encrypted integration payload without logging
   device or token material.
+- [ ] Test user deletion with OAuth credentials, an active authorization
+  attempt, a held claim, and in-flight refresh; all rows cascade and every late
+  completion becomes a no-op.
 - [ ] Run just-in-time refreshes as bounded tasks under
   ~Kodo.ControlPlaneTaskSupervisor~; coordinate callers directly through the
   database rather than adding a refresh coordinator ~GenServer~, long-lived
@@ -263,8 +271,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   disconnection, interrupted-batch resume, mixed-version reads, rollback while
   both keys remain configured, and refusal to start with an incomplete ring.
 - [ ] Document encryption-key provisioning, separately protected key backups,
-  database-backup retention, credential and provider revocation, staged key
-  rotation, device-flow troubleshooting, refresh failure alerts, and rollback
-  from each rollout phase without plaintext or provider-environment fallback.
+  database-backup and write-ahead-log retention, account deletion limits,
+  credential and provider revocation, staged key rotation, device-flow
+  troubleshooting, refresh failure alerts, and rollback from each rollout phase
+  without plaintext or provider-environment fallback.
 - [ ] Run ~mix precommit~ and the opt-in provider compatibility checks before
   declaring the RFD implemented.
