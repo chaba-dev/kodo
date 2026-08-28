@@ -146,6 +146,14 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   the intended action across reauthentication; and implement the OpenAI
   Platform API-key provider card, contextual form, connection status, loading
   state, and accessible feedback.
+- [ ] Save OpenAI API keys encrypted as ~unverified~ before asynchronously
+  probing ~GET /v1/models~ in a bounded generation-fenced task. Mark only a
+  confirmed authentication rejection invalid; classify network, TLS, timeout,
+  redirect, rate-limit, provider, and insufficient-permission failures as
+  validation unavailable.
+- [ ] Never run billed inference during automatic validation. Offer a Test model
+  request only after explicit confirmation identifies the exact provider and
+  model and warns of possible charges; require ownership but not fresh sudo.
 - [ ] State in disconnect confirmation that future Kodo requests stop while an
   already-sent provider request and its billing may continue, and link to
   provider-side revocation when Kodo cannot revoke the credential directly.
@@ -173,25 +181,32 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   explicit route-change billing confirmation. Cover request start followed by
   disconnect, completion with original provenance, failure of the next request
   or tool continuation, and rejection of late refresh or validation updates.
+  Verify save succeeds during outage, stale validation cannot overwrite a newer
+  generation, permission-limited probes do not mark a key invalid, and no
+  automatic path sends a billed model request.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 
 - [ ] Add Anthropic API-key connection, fixed endpoint configuration,
-  provider-specific non-destructive validation, and safe error classification.
+  unbilled asynchronous ~GET /v1/models~ validation, and safe generation-fenced
+  error classification.
 - [ ] Add OpenRouter API-key connection, fixed endpoint configuration,
-  provider-specific non-destructive validation, and explicit OpenRouter billing
-  identity for routed models.
-- [ ] Document whether validation for each API-key provider is unbilled or an
-  explicit potentially billed Test action, and represent saved-but-unverified
-  credentials separately from valid, invalid, and validation-unavailable
-  credentials; do not classify quota, entitlement, or provider outages as
-  credential invalidity.
+  unbilled asynchronous ~GET /api/v1/key~ validation, and explicit OpenRouter
+  billing identity for routed models.
+- [ ] Represent saved-but-unverified credentials separately from valid, invalid,
+  and validation-unavailable credentials. Keep unverified and unavailable
+  credentials usable, block only confirmed invalid credentials, and treat quota,
+  billing, entitlement, restricted validation permission, and provider outages
+  as non-invalid outcomes.
 - [ ] Extend integration settings and model-selection feedback to distinguish
   OpenAI API, Anthropic, and OpenRouter providers without displaying saved
   credentials.
 - [ ] Test a role mapping that uses different connected providers for primary,
   search, and review, including absence or revocation of one required
   integration during a turn.
+- [ ] Test each provider probe and outcome class, generation fencing, usable
+  unverified/unavailable credentials, blocking confirmed-invalid credentials,
+  and explicit cost confirmation for each optional Test model request.
 - [ ] Add opt-in live-provider checks for OpenAI API, Anthropic, and OpenRouter
   using explicit test-user integrations while keeping ordinary tests
   independent of external provider access.

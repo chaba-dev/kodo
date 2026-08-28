@@ -149,12 +149,35 @@ code being forwarded to an unexpected destination.
 Validation is non-destructive and provider-specific. A transient validation
 failure does not expose or invalidate the credential. Kodo records a bounded
 status and safe error code, while the detailed provider error is redacted
-before logging or display. A saved credential is never rendered back to the
-browser. The UI shows provider, billing identity, status, connection and
-validation times, and an explicitly non-secret provider-supplied key or account
-label where that provider contract supplies one. Kodo does not derive, persist,
-or display an API-key hash, suffix, or fingerprint, and never fingerprints an
-OAuth access or refresh token.
+before logging or display.
+
+Saving or replacing an API key first commits its encrypted payload as
+`connected` and `unverified`, then starts a bounded asynchronous validation task
+under the control-plane task supervisor. The unbilled probes are OpenAI
+`GET /v1/models`, Anthropic `GET /v1/models`, and OpenRouter
+`GET /api/v1/key`, using each provider's required authentication headers. A
+successful probe marks the integration `valid`. Only a provider-specific,
+confirmed authentication rejection marks it `invalid`; Kodo does not treat
+every `403` as proof of a bad key when restricted-key permissions may explain
+the response. Network and TLS failures, timeouts, redirects, `429`, `5xx`, and
+insufficient validation permission produce `unavailable`. Quota, billing, and
+model-entitlement failures remain request outcomes. Every result compares the
+credential generation captured by the task so it cannot update a replacement
+or disconnection.
+
+Kodo never runs billed inference automatically. A user may explicitly confirm
+a Test model request after the UI identifies the exact provider and model and
+warns that the request may incur provider charges. Testing requires
+authenticated ownership and confirmation but not renewed sudo mode. Saving
+remains successful during provider outages, and `unverified` or `unavailable`
+credentials remain usable while `invalid` blocks provider requests.
+
+A saved credential is never rendered back to the browser. The UI shows
+provider, billing identity, status, connection and validation times, and an
+explicitly non-secret provider-supplied key or account label where that
+provider contract supplies one. Kodo does not derive, persist, or display an
+API-key hash, suffix, or fingerprint, and never fingerprints an OAuth access or
+refresh token.
 
 OpenRouter is a provider in its own right rather than a transparent fallback
 for direct provider integrations. Models routed through OpenRouter use the
@@ -731,21 +754,6 @@ retention policy. Production guidance restricts BEAM debugging and memory
 inspection and protects or disables crash dumps, core dumps, and swap according
 to the deployment environment. Guaranteed zeroization would require a separate
 native or isolated secret-handling boundary and is outside this RFD.
-
-== Question to resolve
-
-The remaining question does not reopen the settled ownership, encryption,
-request-local credential, no-runner-secret, or model-routing boundaries. It
-must be answered before the affected providers ship.
-
-=== Credential validation and possible cost
-
-Providers do not all expose an equivalent unbilled credential-introspection
-endpoint. Before each API-key provider ships, Kodo must identify a reliable
-non-billed validation request or decide that validation is an explicit model
-request that may incur a small charge. Saving a credential must remain possible
-during a provider outage; the UI must distinguish saved, unverified, valid, and
-invalid states and disclose any billed Test action before it runs.
 
 == Alternatives considered
 
