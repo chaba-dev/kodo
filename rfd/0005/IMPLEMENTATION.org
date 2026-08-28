@@ -40,6 +40,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   Kodo credential-encryption key ring from all LLM provider credentials,
   validates every current and previous key before replica readiness, and fails
   closed on missing keys or payload authentication failures.
+- [ ] Do not derive or persist API-key hashes, suffixes, or fingerprints and
+  never fingerprint OAuth tokens; permit only provider-supplied labels that are
+  explicitly classified as non-secret by the reviewed provider contract.
 - [ ] Implement scope-first integration context operations for listing,
   connecting, replacing, validating, and disconnecting credentials without
   accepting browser-supplied ownership; disconnect clears the encrypted payload
@@ -100,7 +103,8 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   generation fencing, provider mismatches, owned text and object generation,
   evaluation ownership, safe provider errors, same-origin and cross-origin
   redirect rejection, no credential-bearing follow-up request, and absence of
-  an environment-key fallback.
+  an environment-key fallback. Assert credential-derived identifiers are absent
+  from persistence, UI, logs, telemetry, and audit records.
 - [ ] Do not expose a credential form or permit a production provider request
   until every Phase 1A security boundary and test is complete.
 

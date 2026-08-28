@@ -150,8 +150,11 @@ Validation is non-destructive and provider-specific. A transient validation
 failure does not expose or invalidate the credential. Kodo records a bounded
 status and safe error code, while the detailed provider error is redacted
 before logging or display. A saved credential is never rendered back to the
-browser; the UI shows only provider, status, validation time, and a non-secret
-fingerprint where useful.
+browser. The UI shows provider, billing identity, status, connection and
+validation times, and an explicitly non-secret provider-supplied key or account
+label where that provider contract supplies one. Kodo does not derive, persist,
+or display an API-key hash, suffix, or fingerprint, and never fingerprints an
+OAuth access or refresh token.
 
 OpenRouter is a provider in its own right rather than a transparent fallback
 for direct provider integrations. Models routed through OpenRouter use the
@@ -666,6 +669,11 @@ Kodo applies the following boundaries:
   first credential form ships. Audit data excludes API keys, access and refresh
   tokens, device and authorization codes, encrypted payloads, raw provider
   responses, and secret-bearing URLs.
+* Credential-derived hashes, suffixes, and fingerprints do not appear in the
+  database, UI, logs, telemetry, or audit records. If a future operational need
+  requires API-key correlation, a separate proposal must use a versioned,
+  domain-separated keyed HMAC restricted to internal access; an unkeyed hash or
+  OAuth-token fingerprint is never acceptable.
 * Encryption-key rotation uses a distribute, activate, CAS-safe re-encrypt, and
   retire sequence; the old key remains through application rollback and backup
   retention.
