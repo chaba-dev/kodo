@@ -9,9 +9,9 @@
 == Goal
 
 Let each Kodo user connect the LLM providers used by their agent sessions
-without requiring an operator to supply an OpenAI API key when the control
-plane boots. The first provider set includes OpenAI Platform API keys,
-Anthropic API keys, OpenRouter API keys, and OpenAI Codex access through a
+without requiring an operator to configure a deployment-wide OpenAI API key for
+successful model requests. The first provider set includes OpenAI Platform API
+keys, Anthropic API keys, OpenRouter API keys, and OpenAI Codex access through a
 linked ChatGPT subscription.
 
 Provider credentials remain in the control plane. Runners continue to receive
@@ -22,9 +22,11 @@ access tokens, or refresh tokens.
 
 Kodo delegates provider authentication to ReqLLM. With no request-local
 credential, ReqLLM reads `OPENAI_API_KEY` from the control-plane environment.
-This creates one deployment-wide provider identity, makes credential changes an
-operational restart concern, and prevents users from choosing separately billed
-provider accounts.
+This lookup occurs when a model request is made; the key is not required for
+the control plane to boot, but model requests fail without it. The fallback
+creates one deployment-wide provider identity, makes credential changes a
+deployment-configuration concern, and prevents users from choosing separately
+billed provider accounts.
 
 The existing execution boundary is otherwise suitable. Agent inference runs in
 the Phoenix control plane, sessions have a durable owning user, and model role
@@ -620,12 +622,13 @@ Ordinary tests use fake adapters and fake typed credentials without external
 provider access. Neither path adds environment lookup or owner inference to the
 production adapter.
 
-At the end of this RFD, no LLM API key or OAuth token is required at boot. A
-credential-encryption key remains required because encrypted database secrets
-need a root of trust outside the database. Installations with no connected
-provider can boot and serve account and integration pages, but cannot start a
-model turn until the user connects every provider required by the selected
-role mapping.
+At the end of this RFD, no LLM API key or OAuth token is read from deployment
+configuration at boot or request time. The credential-encryption key ring is a
+production-readiness requirement because encrypted database secrets need a
+root of trust outside the database. Installations with a valid key ring but no
+connected provider can boot and serve account and integration pages, but cannot
+start a model turn until the user connects every provider required by the
+selected role mapping.
 
 == Security and operations
 
