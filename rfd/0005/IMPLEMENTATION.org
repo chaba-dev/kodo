@@ -87,15 +87,26 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   balanced settings surfaces without changing generated authentication,
   confirmation, or sudo-mode behavior.
 - [ ] Add ~/integrations~ to the existing authenticated LiveView session and
-  browser pipeline, require sudo mode for credential changes, and implement the
-  OpenAI Platform API-key provider card, contextual form, connection status,
-  loading state, and accessible feedback.
+  browser pipeline; require a fresh server-side sudo check for API-key
+  submission or replacement, authorization start, and disconnection; preserve
+  the intended action across reauthentication; and implement the OpenAI
+  Platform API-key provider card, contextual form, connection status, loading
+  state, and accessible feedback.
+- [ ] Permit an active generation-fenced authorization attempt to complete
+  after sudo expiry, require authenticated ownership but not fresh sudo for
+  cancellation, and keep status viewing, automatic validation, and ordinary
+  inference outside sudo mode.
+- [ ] Add every provider secret field to Phoenix parameter filtering before
+  shipping its form, and test that filtered request logs, changeset errors,
+  exception inspection, and LiveView events cannot expose credential material.
 - [ ] Add LiveView selector tests for the settings shell, section navigation,
   provider cards, contextual forms, and device-flow states, plus representative
   desktop, tablet, and narrow-mobile browser checks for the sketched layouts.
 - [ ] Keep provider connection separate from routing changes; when no usable
   mapping exists, present one provider-compatible role preset with explicit
   billing paths and apply it only after "Use recommended models" confirmation.
+- [ ] Use an explicit billing confirmation rather than sudo mode for a
+  same-model execution-route change during an active session.
 - [ ] Test that connecting another provider leaves a usable mapping unchanged,
   confirmed presets affect only defaults and new sessions, and disconnecting a
   required integration derives an unavailable mapping without rewriting or
@@ -108,7 +119,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   catalog aliases, inline model specs, OpenRouter underlying vendors, malformed
   models, credential/provider mismatches, billing provenance, text and object
   generation ownership, evaluation ownership, safe provider errors, secret
-  redaction, and the absence of environment-key fallback.
+  redaction, the absence of environment-key fallback, cross-user sensitive
+  actions, expired sudo mode, stale LiveView sockets, post-sudo authorization
+  completion, ownership-checked cancellation, and explicit route-change billing
+  confirmation.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 
@@ -201,7 +215,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Add onboarding and session/model-settings feedback that links users to
   every missing provider integration required by their selected role mapping.
 - [ ] Add bounded-cardinality telemetry and credential-free security audit logs
-  for connection changes, validation, refresh outcomes, and reauthorization.
+  for API-key submission and replacement, authorization start/completion and
+  cancellation, disconnection, validation outcomes, execution-route changes,
+  refresh outcomes, and reauthorization; permit internal actor and integration
+  IDs only in audit records, never metric labels.
 - [ ] Implement and test bounded-batch encryption-key rotation with a documented
   previous-key migration window and rollback procedure.
 - [ ] Verify provider credentials never reach runner registration, runner

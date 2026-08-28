@@ -382,9 +382,22 @@ retrying an ambiguously consumed token.
 Integration management lives at `/integrations` inside the existing
 `:require_authenticated_user` LiveView session and browser pipeline. The route
 requires login because every integration is user-owned and its status controls
-that user's model requests. Connecting, replacing, and disconnecting a
-credential require sudo mode because they change access to a separately billed
-external account.
+that user's model requests. Submitting or replacing an API key, starting OAuth
+or device reauthorization, and disconnecting an integration require sudo mode
+because they change access to a separately billed external account. Kodo checks
+recent authentication again in the server-side handler for each sensitive
+event rather than trusting a LiveView that was mounted while sudo mode was
+active. After reauthentication, Kodo returns the user to the intended provider
+action without requiring them to rediscover the affected integration.
+
+An OAuth or device flow created while sudo mode was active may complete after
+that mode expires only while the same user-owned attempt remains active and its
+generation checks succeed. Cancelling such an attempt requires authenticated
+ownership but not renewed sudo mode. Viewing status, automatic credential
+validation, and ordinary model requests do not require sudo mode. An explicit
+same-model execution-route change uses a clear billing confirmation instead of
+sudo mode so it does not interrupt an active session; the existing turn-boundary
+and exact-model compatibility rules still apply.
 
 The page provides distinct actions for OpenAI API, ChatGPT Subscription,
 Anthropic, and OpenRouter. It explains the billing identity before connection,
@@ -593,8 +606,16 @@ Kodo applies the following boundaries:
 * Metrics use bounded provider, authentication-type, operation, and outcome
   labels; user, account, integration, and token identifiers stay out of metric
   labels.
-* Connection changes and terminal refresh failures produce security-relevant
-  audit logs without credential material.
+* API-key submission and replacement, authorization start and completion,
+  cancellation, disconnection, validation outcomes, execution-route changes,
+  refresh outcomes, and required reauthorization produce security-relevant
+  audit logs without credential material. Audit records may contain internal
+  actor and integration identifiers for investigation, but those identifiers
+  never become metric labels.
+* Phoenix parameter filtering covers every provider secret field before the
+  first credential form ships. Audit data excludes API keys, access and refresh
+  tokens, device and authorization codes, encrypted payloads, raw provider
+  responses, and secret-bearing URLs.
 * Encryption-key rotation re-encrypts credentials in bounded batches and keeps
   the previous decryption key only for the documented migration window.
 * Disconnecting instructs the user how to revoke the credential at the
