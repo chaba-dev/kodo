@@ -78,7 +78,9 @@ in which case the session owner must have every required integration. Kodo
 preflights every role integration before accepting a turn and resolves the
 current credential again immediately before each provider request. Key
 replacement, token refresh, disconnection, or revocation therefore takes effect
-without rewriting session history.
+for requests that have not started, without rewriting session history. It does
+not retroactively cancel a provider request to which Kodo has already sent a
+credential.
 
 The first release permits an explicit execution-route change between
 `openai` Platform billing and `openai_codex` ChatGPT subscription billing while
@@ -348,6 +350,16 @@ resolved boundary: canonical provider, authentication type, and billing path
 (`platform`, `subscription`, or `aggregator`). It never records credential
 material. This provenance remains stable even if the integration or mapping is
 later replaced.
+
+Once a provider request has resolved its credential and begun the external HTTP
+operation, replacement or disconnection does not alter that request. Its
+response may complete and be persisted with the billing provenance captured at
+start because Kodo cannot reliably retract transmitted credentials, stop
+provider computation, or prevent already-incurred billing. Each later provider
+request, including a tool-call continuation or another role call in the same
+turn, resolves again and fails closed if the integration is then unusable. A
+late validation or refresh result remains generation-fenced and cannot restore
+or overwrite a disconnected integration.
 
 Kodo classifies Req and ReqLLM failures into bounded domain errors before they
 leave the LLM boundary. Session events, exception inspection, logs, telemetry,
@@ -658,7 +670,9 @@ Kodo applies the following boundaries:
   retire sequence; the old key remains through application rollback and backup
   retention.
 * Disconnecting instructs the user how to revoke the credential at the
-  provider when Kodo cannot revoke it directly.
+  provider when Kodo cannot revoke it directly. The confirmation states that
+  disconnect prevents future Kodo requests but cannot guarantee cancellation
+  of a request already sent to the provider or its associated billing.
 
 Operational documentation covers initial encryption-key provisioning, backup
 handling, rotation, provider revocation, device-flow failures, refresh failure
