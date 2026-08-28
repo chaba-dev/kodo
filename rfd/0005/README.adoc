@@ -722,15 +722,25 @@ capabilities, token refresh, and restart recovery. Phase 0 defines the
 production contract and regression diagnostics; it is not a gate for omitting
 the required ChatGPT/Codex integration.
 
-=== Phase 1: Build encrypted integration storage
+=== Phase 1A: Establish the credential security foundation
 
 Add the user-owned integration schema, authenticated encryption and key
-versioning, scoped context operations, safe inspection, explicit live-test
-credentials, and fail-closed request-time resolution. Add the shared responsive
-settings shell, improve the existing Account presentation without changing its
-behavior, and ship the authenticated integration page with OpenAI Platform
-API-key connection first. This establishes the full path from UI through
-request-local ReqLLM options without a provider-key environment fallback.
+versioning, scoped context operations, parameter filtering, safe inspection,
+fixed outbound endpoint policy, credential-free audit framework, typed
+request-local credential boundary, and fail-closed resolution. Security tests
+must prove ownership isolation and prevent secret egress to logs, browsers,
+runners, telemetry, or redirected requests. This phase is deployable without a
+credential UI; Kodo must not accept a credential or send a production provider
+request until the complete foundation passes.
+
+=== Phase 1B: Add OpenAI API integration and settings
+
+Add the shared responsive settings shell, improve the existing Account
+presentation without changing its behavior, and ship the authenticated
+integration page with OpenAI Platform API-key connection first. Wire model
+resolution, explicit live-test credentials, validation, lifecycle audit events,
+and request-local ReqLLM options through the Phase 1A boundary without a
+provider-key environment fallback.
 
 === Phase 2: Add Anthropic and OpenRouter
 
@@ -749,8 +759,9 @@ that leave affected integrations unavailable while Kodo fixes the contract.
 === Phase 4: Harden operations
 
 Complete operational hardening, exercise multi-node refresh and key rotation,
-and publish operator guidance. The encryption key remains the only
-integration-related boot secret.
+and publish operator guidance. All Phase 4 requirements are production-launch
+requirements even though they follow provider implementation. The encryption
+key remains the only integration-related boot secret.
 
 == Implementation
 

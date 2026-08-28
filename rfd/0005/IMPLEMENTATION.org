@@ -25,7 +25,7 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   once its implementation and required compatibility suite pass; surface later
   contract regressions as actionable integration-unavailable errors.
 
-* Phase 1: Build encrypted integration storage and OpenAI API keys
+* Phase 1A: Establish the credential security foundation
 
 - [ ] Generate migrations for one durable integration per user/provider pair,
   separate connection and validation states, non-secret status metadata,
@@ -81,6 +81,27 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   redirects for every credential-bearing validation, inference, authorization,
   polling, exchange, and refresh request; classify every ~3xx~, including
   same-origin redirects, as provider unavailable without a follow-up request.
+- [ ] Add every provider secret field to Phoenix parameter filtering and test
+  that filtered request logs, changeset errors, exception inspection, and
+  LiveView events cannot expose credential material.
+- [ ] Add the credential-free security audit framework and API-key lifecycle
+  events; permit internal actor and integration IDs only in audit records,
+  never metric labels.
+- [ ] Verify provider credentials never reach runner registration, runner
+  WebSockets, tool subprocesses, session events, browser responses, exception
+  inspection, or telemetry metadata.
+- [ ] Test encryption round trips and redaction, ownership isolation,
+  ciphertext swaps between users and providers, tampering, wrong and missing
+  keys, unknown payload versions, nonce uniqueness, lifecycle transitions,
+  generation fencing, provider mismatches, owned text and object generation,
+  evaluation ownership, safe provider errors, same-origin and cross-origin
+  redirect rejection, no credential-bearing follow-up request, and absence of
+  an environment-key fallback.
+- [ ] Do not expose a credential form or permit a production provider request
+  until every Phase 1A security boundary and test is complete.
+
+* Phase 1B: Add OpenAI API integration and settings
+
 - [ ] Build a shared responsive settings shell with Account and Integrations
   navigation, a framed desktop/tablet workspace, compact persistent rail,
   deep-linkable detail pane, clear return action, accessible narrow-screen
@@ -102,9 +123,6 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   after sudo expiry, require authenticated ownership but not fresh sudo for
   cancellation, and keep status viewing, automatic validation, and ordinary
   inference outside sudo mode.
-- [ ] Add every provider secret field to Phoenix parameter filtering before
-  shipping its form, and test that filtered request logs, changeset errors,
-  exception inspection, and LiveView events cannot expose credential material.
 - [ ] Add LiveView selector tests for the settings shell, section navigation,
   provider cards, contextual forms, and device-flow states, plus representative
   desktop, tablet, and narrow-mobile browser checks for the sketched layouts.
@@ -117,18 +135,12 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   confirmed presets affect only defaults and new sessions, and disconnecting a
   required integration derives an unavailable mapping without rewriting or
   silently rerouting existing sessions.
-- [ ] Test encryption round trips and redaction, ownership isolation, concurrent
-  users with different OpenAI keys, key replacement during a session, missing
-  integration behavior, ciphertext swaps between users and providers,
-  tampering, wrong and missing keys, unknown payload versions, nonce
-  uniqueness, lifecycle transitions, generation-fenced asynchronous updates,
-  catalog aliases, inline model specs, OpenRouter underlying vendors, malformed
-  models, credential/provider mismatches, billing provenance, text and object
-  generation ownership, evaluation ownership, safe provider errors, secret
-  redaction, the absence of environment-key fallback, cross-user sensitive
-  actions, expired sudo mode, stale LiveView sockets, post-sudo authorization
-  completion, ownership-checked cancellation, and explicit route-change billing
-  confirmation.
+- [ ] Test concurrent users with different OpenAI keys, key replacement during
+  a session, missing integration behavior, catalog aliases, inline model specs,
+  OpenRouter underlying vendors, malformed models, billing provenance,
+  cross-user sensitive actions, expired sudo mode, stale LiveView sockets,
+  post-sudo authorization completion, ownership-checked cancellation, and
+  explicit route-change billing confirmation.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 
@@ -225,11 +237,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 
 - [ ] Add onboarding and session/model-settings feedback that links users to
   every missing provider integration required by their selected role mapping.
-- [ ] Add bounded-cardinality telemetry and credential-free security audit logs
-  for API-key submission and replacement, authorization start/completion and
-  cancellation, disconnection, validation outcomes, execution-route changes,
-  refresh outcomes, and reauthorization; permit internal actor and integration
-  IDs only in audit records, never metric labels.
+- [ ] Add bounded-cardinality telemetry for integration operations and complete
+  credential-free audit coverage for authorization start/completion and
+  cancellation, validation outcomes, execution-route changes, refresh outcomes,
+  and reauthorization using the Phase 1A audit framework.
 - [ ] Implement and test staged encryption-key rotation: distribute the new key
   as non-current, verify every replica accepts both keys, make it current for
   writes, and re-encrypt old rows in bounded batches using credential-generation
@@ -238,9 +249,6 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   and backup-retention windows close; test concurrent replacement and
   disconnection, interrupted-batch resume, mixed-version reads, rollback while
   both keys remain configured, and refusal to start with an incomplete ring.
-- [ ] Verify provider credentials never reach runner registration, runner
-  WebSockets, tool subprocesses, session events, browser responses, exception
-  inspection, or telemetry metadata.
 - [ ] Document encryption-key provisioning, separately protected key backups,
   database-backup retention, credential and provider revocation, staged key
   rotation, device-flow troubleshooting, refresh failure alerts, and rollback
