@@ -133,6 +133,15 @@ the initial UI does not accept arbitrary base URLs or HTTP headers. This avoids
 turning provider configuration into a server-side request forgery or
 credential-exfiltration path.
 
+Every credential-bearing provider request uses a fixed HTTPS origin and
+disables automatic redirect following. This includes validation, inference,
+device authorization and polling, authorization-code exchange, and token
+refresh. Kodo treats every `3xx` response, including a same-origin redirect, as
+provider unavailable without issuing a second request. A legitimate provider
+endpoint migration therefore requires an explicit code and allowlist update
+rather than risking an API key, bearer token, device code, or authorization
+code being forwarded to an unexpected destination.
+
 Validation is non-destructive and provider-specific. A transient validation
 failure does not expose or invalidate the credential. Kodo records a bounded
 status and safe error code, while the detailed provider error is redacted
@@ -148,11 +157,16 @@ by OpenAI or Anthropic.
 === ChatGPT subscription
 
 ChatGPT subscription support uses OpenAI Codex device authorization. The user
-starts the flow in Kodo, receives an OpenAI verification URL and one-time code,
-and approves the request in a browser. Kodo polls at OpenAI's instructed
-interval, exchanges the resulting authorization code and PKCE verifier, and
-stores the returned access token, refresh token, account identifier, and expiry
-as encrypted credentials.
+starts the flow in Kodo, receives an OpenAI verification destination and
+one-time code, and approves the request in a browser. The destination rendered
+by Kodo is a fixed HTTPS URL from the reviewed provider contract. Kodo validates
+that a provider-returned verification URL matches the exact allowlist, but does
+not automatically navigate to it or render an untrusted destination. It shows
+the fixed destination and code separately so a returned URL cannot become a
+phishing or code-exfiltration path. Kodo polls at OpenAI's instructed interval,
+exchanges the resulting authorization code and PKCE verifier, and stores the
+returned access token, refresh token, account identifier, and expiry as
+encrypted credentials.
 
 Authorization attempts are user-scoped, single-use, and expire after the
 provider deadline. Polling continues only while an attempt is active, respects
@@ -600,7 +614,9 @@ Kodo applies the following boundaries:
 
 * Provider secrets remain in the Phoenix control plane and are never sent to
   runners, browsers after submission, or hosted runner environments.
-* Provider endpoints and authorization endpoints are allowlisted in code.
+* Provider endpoints and authorization endpoints are exact HTTPS allowlists in
+  code. Credential-bearing requests never follow redirects, and device
+  verification UI never navigates automatically to a provider-returned URL.
 * Logs and exceptions redact API keys, bearer tokens, refresh tokens, device
   codes, authorization codes, and encrypted payloads.
 * Metrics use bounded provider, authentication-type, operation, and outcome

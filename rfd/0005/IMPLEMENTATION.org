@@ -75,6 +75,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   immediately before every generation call, and normalize Req/ReqLLM failures
   into bounded domain errors before persistence, inspection, logging,
   telemetry, or browser display.
+- [ ] Centralize exact HTTPS provider-origin allowlists and disable automatic
+  redirects for every credential-bearing validation, inference, authorization,
+  polling, exchange, and refresh request; classify every ~3xx~, including
+  same-origin redirects, as provider unavailable without a follow-up request.
 - [ ] Build a shared responsive settings shell with Account and Integrations
   navigation, a framed desktop/tablet workspace, compact persistent rail,
   deep-linkable detail pane, clear return action, accessible narrow-screen
@@ -156,6 +160,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Implement device-code creation, interval-aware asynchronous polling,
   cancellation, expiry, terminal errors, and authorization-code exchange using
   Req rather than embedded browser scripts.
+- [ ] Render the fixed allowlisted HTTPS verification destination and one-time
+  code separately, reject a provider-returned verification URL that does not
+  match the exact allowlist, and never automatically navigate to that URL.
 - [ ] Trigger claims only from attempt creation or LiveView mount/remount, use
   one conditional update against the exact attempt row, and run a successful
   claim as a finite task under ~Kodo.ControlPlaneTaskSupervisor~ that survives
@@ -204,7 +211,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   during refresh, permanently lost rotated-token responses, refresh restart
   recovery, revocation, exact-model route changes, incompatible route
   rejection, in-flight route freezing, normalized cross-route replay, no
-  automatic route fallback, and secret redaction.
+  automatic route fallback, same-origin and cross-origin redirect rejection,
+  malicious verification URLs, absence of a credential-bearing follow-up
+  request, and secret redaction.
 - [ ] Run the Phase 0 live compatibility suite against the production path and
   do not declare ChatGPT/Codex implementation complete while a required
   capability fails; classify later contract failures as regressions and never
