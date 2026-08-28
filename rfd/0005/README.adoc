@@ -353,6 +353,24 @@ refresh tokens, expiry, generation, and rotation state remain in Kodo. No
 request uses `System.put_env/2`, `Application.put_env/3`, ReqLLM's global key
 store, or a shared OAuth file.
 
+Status pages and turn preflight query only non-secret integration metadata and
+batch all required role providers into one indexed query. Immediately before
+each credential-bearing external operation, Kodo reads the current integration
+or authorization-attempt state through its ownership index and decrypts the
+required fields in the Phoenix process. An operation is one validation,
+inference or streaming call, tool-call continuation, device poll or exchange,
+or token refresh. Kodo does not hold a database transaction or row lock during
+the external request.
+
+This adds a small bounded set of indexed reads per external operation and scales
+with active provider calls rather than the number of Kodo replicas. Since
+provider calls are orders of magnitude slower than the lookup and local AEAD
+decryption, Kodo does not introduce a plaintext credential cache in a
+`GenServer`, ETS, persistent terms, or session state. A future generation-aware
+encrypted cache requires measured database pressure and a separate consistency
+review because stale cache entries weaken immediate replacement and
+disconnection semantics.
+
 Credential resolution occurs before Kodo persists a model invocation as
 started. A missing integration, a `disconnected` or
 `reauthorization_required` connection, or an `invalid` validation returns a
@@ -398,9 +416,10 @@ identifier, and expiry in one encrypted payload.
 Refresh is just-in-time, bounded work rather than a long-lived process per
 integration. A request that encounters a near-expiry token starts the external
 HTTP operation under Kodo's existing task supervisor after acquiring the
-database lease. The task holds decrypted credentials only for the operation's
-duration. A task or node failure leaves durable credential state unchanged and
-the expired lease available for takeover.
+database lease. The task decrypts immediately before use, retains references
+only for the bounded operation, and discards them afterward so they become
+eligible for garbage collection. A task or node failure leaves durable
+credential state unchanged and the expired lease available for takeover.
 
 Callers coordinate directly through the database; Kodo does not add a refresh
 coordinator `GenServer`, a `DynamicSupervisor` child, or an in-memory timer per
@@ -688,6 +707,11 @@ Kodo applies the following boundaries:
   requires API-key correlation, a separate proposal must use a versioned,
   domain-separated keyed HMAC restricted to internal access; an unkeyed hash or
   OAuth-token fingerprint is never acceptable.
+* Kodo minimizes plaintext credential references and does not retain them in
+  long-lived processes, caches, or unnecessary process messages. BEAM immutable
+  binaries, garbage collection, and HTTP client internals do not provide a
+  guarantee of immediate memory zeroization, so tests assert application-level
+  non-retention rather than physical erasure.
 * Encryption-key rotation uses a distribute, activate, CAS-safe re-encrypt, and
   retire sequence; the old key remains through application rollback and backup
   retention.
@@ -703,7 +727,10 @@ Encryption keys are backed up and access-controlled separately from database
 backups. User deletion removes live database payloads but cannot selectively
 erase ciphertext already present in retained database backups or write-ahead
 logs; those copies remain governed by the documented backup expiry and key
-retention policy.
+retention policy. Production guidance restricts BEAM debugging and memory
+inspection and protects or disables crash dumps, core dumps, and swap according
+to the deployment environment. Guaranteed zeroization would require a separate
+native or isolated secret-handling boundary and is outside this RFD.
 
 == Question to resolve
 
