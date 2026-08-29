@@ -433,8 +433,12 @@ validation and inference use the session owner's integration.
 
 API keys do not refresh. Codex access tokens refresh shortly before expiry,
 using the stored refresh token and OpenAI's token endpoint. A successful
-refresh atomically replaces the access token, rotated refresh token, account
-identifier, and expiry in one encrypted payload.
+refresh must return a new access token and valid expiry. It atomically writes
+those values, retains the existing refresh token or account identifier when the
+response omits either one, and replaces the refresh token when the response
+rotates it. A different returned account identifier is a contract and billing-
+identity violation: Kodo discards that response and requires reauthorization
+rather than silently changing the linked account.
 
 Refresh is just-in-time, bounded work rather than a long-lived process per
 integration. A request that encounters a near-expiry token starts the external
@@ -464,17 +468,28 @@ overlap the replacement after resuming.
 Every attempt captures the credential generation it read. A successful
 response may atomically replace the encrypted payload and advance that
 generation even if its lease expired while the task or node was paused, but
-only if no refresh, replacement, reconnection, or disconnection has already
-advanced it. The first successful response wins; later responses reload the
-stored result. Failure-derived state changes use the same generation fencing.
+only if no successful refresh, replacement, reauthorization, or disconnection
+has already advanced it. The first successful response wins; later responses
+reload the stored result. User replacement, starting or completing
+reauthorization, and disconnection always advance the generation and
+irrevocably fence every old refresh response. A new authorization attempt
+captures the post-advance integration generation.
 
-An `invalid_grant` or equivalent terminal response marks the integration as
-requiring authorization and discards unusable access for request purposes only
-after its generation check succeeds. A stale-lease or takeover attempt that
-receives `invalid_grant` first reloads and waits for a bounded interval so a
-late successful response can advance the generation; it must not overwrite
-that success with a terminal state. Transient provider or network failures
-preserve the credential, release or expire the lease, and return a retryable
+An `invalid_grant` or refresh identity mismatch records
+`reauthorization_required` with a bounded refresh-specific reason after its
+generation check succeeds, but does not advance the source credential
+generation or erase the encrypted payload. This state is terminal for new
+requests but provisional in refresh-outcome precedence: a successful response
+already produced from that same generation may replace it and advance the
+generation, even after an arbitrarily long process pause. A successful response
+cannot replace reauthorization initiated or completed by the user, replacement,
+or disconnection because those actions advance the generation.
+
+A stale-lease or takeover attempt that receives `invalid_grant` reloads and may
+wait for a bounded interval before displaying reauthorization so a common late
+success avoids UI churn. The wait is only an optimization and is never the
+correctness boundary. Transient provider or network failures preserve the
+credential, release or expire the lease, and return a retryable
 provider-unavailable error.
 
 This protocol minimizes concurrent refresh but cannot make an external token
