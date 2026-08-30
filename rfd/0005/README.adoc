@@ -207,11 +207,20 @@ and are not written to logs or telemetry.
 The database permits one active attempt per user and `openai_codex`
 integration. Each attempt records an attempt generation, expected integration
 generation, state, provider deadline and polling interval, encrypted sensitive
-fields, and a database-time claim lease. Starting a new attempt atomically
-cancels and supersedes the prior attempt. Cancellation, expiry, completion,
-replacement, and disconnection transitions compare the attempt generation;
-completion installs credentials only while the attempt remains active and both
-its attempt and expected integration generations still match.
+fields with encryption-key and payload-format versions, and a database-time
+claim lease. Starting a new attempt atomically cancels and supersedes the prior
+attempt. Cancellation, expiry, completion, replacement, and disconnection
+transitions compare the attempt generation; completion installs credentials
+only while the attempt remains active and both its attempt and expected
+integration generations still match.
+
+The attempt generation is assigned with its encrypted payload and is immutable
+for that attempt. Attempt ciphertext uses a unique nonce and AEAD associated
+data containing the attempt ID, integration ID, owning user, provider, attempt
+generation, and attempt-payload format version. Moving a valid device code,
+authorization code, PKCE verifier, or polling payload to another attempt, user,
+integration, provider, or generation therefore fails authentication rather
+than linking the wrong provider account.
 
 Device polling is connection-driven rather than replica-driven. The node that
 handles creation or a LiveView mount attempts one conditional claim update
@@ -316,10 +325,13 @@ Kodo requires a deployment-level credential-encryption key ring, supplied
 independently of all LLM providers, and records a key version so ciphertext can
 be rotated. Every production replica validates the complete configured current
 and non-current key ring before becoming ready to serve integration operations.
-Production refuses to persist or decrypt integrations when a required key is
-absent or malformed. An AEAD association or authentication failure fails closed
-with a bounded corruption error and never falls back or sends the credential to
-a provider; recovery requires credential replacement or an operator procedure.
+Readiness verifies that every key version referenced by an integration or
+authorization-attempt row is present. Production refuses to persist or decrypt
+either payload type when a required key is absent or malformed. An AEAD
+association or authentication failure fails closed with a bounded corruption
+error and never falls back or sends the credential to a provider; recovery
+requires credential replacement, restarting authorization, or an operator
+procedure.
 Database encryption does not remove the need to protect the control-plane
 process; it protects database copies, backups, and read-only database access
 from directly revealing provider credentials.
@@ -338,10 +350,14 @@ The old key remains available for decryption through the documented application
 rollback and backup-retention window. Rollback restores compatible application
 behavior while both keys are still configured; it never removes key material
 first, downgrades ciphertext to plaintext, or enables a provider-environment
-fallback. Operators remove an old key only after the database has no payloads
-at that version, all replicas use the new ring, the rollback window has closed,
-and backups that require the old key have expired or remain paired with a
-separately protected copy of that key.
+fallback. Routine rotation does not re-encrypt short-lived authorization
+attempts: new attempts use the current key, while old keys remain until attempts
+at those versions expire and are deleted. Operators remove an old key only
+after the database has no integration or attempt payloads at that version, all
+replicas use the new ring, the rollback window has closed, and backups that
+require the old key have expired or remain paired with a separately protected
+copy of that key. Emergency retirement of a compromised key cancels and deletes
+affected attempts and requires those users to restart authorization.
 
 The credential payload is opaque to Ecto query code and never appears in
 session events, model mappings, changeset errors, exception inspection,

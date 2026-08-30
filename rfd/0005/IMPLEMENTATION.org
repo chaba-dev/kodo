@@ -215,9 +215,13 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 
 - [ ] Generate persistence for one active, expiring, user-scoped, single-use
   device authorization attempt per ~openai_codex~ integration, including
-  encrypted sensitive fields, attempt and expected integration generations,
-  provider deadline and polling interval, database-time claim state, and
-  bounded cleanup.
+  encrypted sensitive fields, encryption-key and payload-format versions,
+  immutable attempt and expected integration generations, provider deadline and
+  polling interval, database-time claim state, and bounded cleanup.
+- [ ] Encrypt every attempt payload with a unique nonce and AEAD associated data
+  binding attempt ID, integration ID, user ID, provider, immutable attempt
+  generation, and payload-format version; fail closed on swaps, tampering,
+  unknown formats, and unavailable keys.
 - [ ] Implement device-code creation, interval-aware asynchronous polling,
   cancellation, expiry, terminal errors, and authorization-code exchange using
   Req rather than embedded browser scripts.
@@ -284,7 +288,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   after a pause longer than every waiter timeout, node pause, replacement during
   refresh, omitted and rotated refresh tokens, omitted and changed account IDs,
   permanently lost rotated-token responses, refresh restart recovery,
-  revocation, exact-model route changes, incompatible route
+  revocation, cross-user and cross-attempt ciphertext swaps, attempt tampering,
+  missing attempt keys, unknown attempt payload versions, routine rotation with
+  an active old-key attempt, emergency attempt cancellation, exact-model route
+  changes, incompatible route
   rejection, in-flight route freezing, normalized cross-route replay, no
   automatic route fallback, same-origin and cross-origin redirect rejection,
   malicious verification URLs, absence of a credential-bearing follow-up
@@ -309,7 +316,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Retain the old key until no payload uses it and the application rollback
   and backup-retention windows close; test concurrent replacement and
   disconnection, interrupted-batch resume, mixed-version reads, rollback while
-  both keys remain configured, and refusal to start with an incomplete ring.
+  both keys remain configured, active authorization attempts on an old key,
+  emergency cancellation for a compromised key, and refusal to start when any
+  integration or attempt key version is missing from the ring.
 - [ ] Document encryption-key provisioning, separately protected key backups,
   database-backup and write-ahead-log retention, account deletion limits,
   credential and provider revocation, staged key rotation, device-flow
