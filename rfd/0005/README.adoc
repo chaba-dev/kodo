@@ -71,26 +71,39 @@ accounts for one provider may be added later with an explicit integration
 selection in model settings; the first release does not add that complexity.
 
 Model role mappings continue to own model selection. Each session preserves
-the exact primary, search, and review model identities selected at creation;
-later user or repository default changes affect new sessions only. Mappings do
-not contain credentials. Their execution routes may use different providers,
-in which case the session owner must have every required integration. Kodo
-preflights every role integration before accepting a turn and resolves the
-current credential again immediately before each provider request. Key
-replacement, token refresh, disconnection, or revocation therefore takes effect
-for requests that have not started, without rewriting session history. It does
-not retroactively cancel a provider request to which Kodo has already sent a
-credential.
+the exact primary, search, and review model identities selected at creation. An
+exact identity is Kodo's provider-neutral wire selector, including an immutable
+snapshot or version when both routes expose one; a rolling alias remains that
+exact selector but is not a claim that two billing routes use identical backend
+weights or deployment snapshots. Later user or repository default changes
+affect new sessions only. Mappings do not contain credentials. Their execution
+routes may use different providers, in which case the session owner must have
+every required integration. Kodo preflights every role integration before
+accepting a turn and resolves the current credential again immediately before
+each provider request. Key replacement, token refresh, disconnection, or
+revocation therefore takes effect for requests that have not started, without
+rewriting session history. It does not retroactively cancel a provider request
+to which Kodo has already sent a credential.
 
 The first release permits an explicit execution-route change between
 `openai` Platform billing and `openai_codex` ChatGPT subscription billing while
 preserving the role's exact model identity. Kodo accepts the change only when
 both routes expose that exact model and satisfy the same role capability
-contract. It records a durable route-change event, shows the destination
-billing path for confirmation, and applies the new route at the next turn
-boundary; an in-flight turn and all its continuations finish on the old route.
-Quota, disconnection, or provider failure never triggers this change
-automatically.
+contract. A versioned compatibility record for the exact selector, source and
+destination routes, and role-contract version must confirm tools, structured
+output, reasoning options, context requirements, and input modalities. Matching
+slugs or ReqLLM catalog fallback alone is insufficient evidence.
+
+Turn acceptance and route changes use the same durable session lock. Accepting
+a turn atomically stores a route revision and complete per-role model, route,
+and capability-contract snapshot. Primary, search, review, tool continuations,
+and execution resumed after a process or node restart use that turn snapshot,
+never the session's then-current mapping. A confirmed route change writes a
+pending revision under the lock and affects only subsequently accepted turns;
+an in-flight turn and all its continuations finish on its old snapshot. Changes
+to multiple affected roles are atomic and Kodo rejects the whole change if any
+role lacks exact-selector compatibility. Quota, disconnection, or provider
+failure never triggers a route change automatically.
 
 After a route change, Kodo replays normalized visible assistant content, tool
 calls, and tool results while omitting provider-specific reasoning signatures,
@@ -368,8 +381,8 @@ the deployment procedure.
 
 == Request-time resolution
 
-Kodo combines the session's preserved model identity with its current execution
-route and resolves that provider-specific model specification through
+Kodo combines each accepted turn's preserved model identity and route snapshot
+and resolves that provider-specific model specification through
 `ReqLLM.model/1` before looking up a credential. The `provider` on the resulting
 `LLMDB.Model` is canonical and must equal the selected route; provider text
 derived from a stored model string is display data and cannot select a

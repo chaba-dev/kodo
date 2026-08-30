@@ -13,8 +13,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   response, Kodo tool calls, structured output, and every reasoning effort
   required by current role mappings.
 - [ ] Record exact model identities available through both ~openai~ and
-  ~openai_codex~ and verify each route preserves the same role capability
-  contract; do not treat merely similar models as interchangeable.
+  ~openai_codex~ and create versioned compatibility records by provider-neutral
+  selector, source/destination routes, and role-contract version for tools,
+  structured output, reasoning, context, and modalities; do not treat matching
+  slugs, catalog fallback, or merely similar models as sufficient evidence.
 - [ ] Verify refresh-token rotation, control-plane restart recovery, quota
   errors, revocation, and required reauthorization without using a shared OAuth
   file.
@@ -64,8 +66,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   integration using the resulting ~LLMDB.Model.provider~; replace model-string
   splitting with that resolved provider when storing derived display data.
 - [ ] Persist exact model identity separately from execution provider and
-  billing route in every session role mapping; user and repository default
-  changes affect new sessions only.
+  billing route in every session role mapping. Define identity as the exact
+  provider-neutral selector, including an immutable version when both routes
+  expose one, without claiming rolling aliases are identical backend snapshots;
+  user and repository default changes affect new sessions only.
 - [ ] Require exact equality between resolved model and credential providers
   before recording an invocation or making an HTTP request, with actionable
   missing, invalid, disconnected, reauthorization-required, malformed-model,
@@ -271,13 +275,18 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   reauthorization to the authenticated integrations page.
 - [ ] Add an explicit per-session execution-route change between OpenAI
   Platform and ChatGPT Subscription only when the destination supports every
-  affected role's exact preserved model and capability contract; show billing
-  confirmation and append a durable route-change event.
-- [ ] Freeze the route for an in-flight turn and its continuations, apply a
-  confirmed route change at the next turn boundary, and replay normalized
-  visible assistant/tool history without provider-specific reasoning,
-  signature, or cache state.
-- [ ] Route requests whose current execution route is ~openai_codex~ only
+  affected role's exact provider-neutral selector and has a versioned
+  compatibility record for its capability contract; show billing confirmation
+  and reject the whole atomic role set when any role is incompatible.
+- [ ] Under the existing durable session lock, assign each accepted turn a route
+  revision and persist its complete per-role model, execution-route, and
+  capability-contract snapshot. Write confirmed route changes as pending
+  revisions under the same lock and apply them only to later accepted turns.
+- [ ] Use the persisted turn snapshot for primary, search, review, every tool
+  continuation, and process/node restart recovery; replay normalized visible
+  assistant/tool history after a route change without provider-specific
+  reasoning, signature, or cache state.
+- [ ] Route requests whose persisted turn snapshot selects ~openai_codex~ only
   through the user's ChatGPT integration and prohibit silent fallback to OpenAI
   API billing.
 - [ ] Test authorization ownership and expiry, polling backoff, two-node refresh
@@ -291,8 +300,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   revocation, cross-user and cross-attempt ciphertext swaps, attempt tampering,
   missing attempt keys, unknown attempt payload versions, routine rotation with
   an active old-key attempt, emergency attempt cancellation, exact-model route
-  changes, incompatible route
-  rejection, in-flight route freezing, normalized cross-route replay, no
+  changes, rolling-alias and immutable-snapshot compatibility, whole-set
+  rejection when one role is incompatible, route-change/turn-acceptance races,
+  process and node restart during a turn, in-flight route freezing, normalized
+  cross-route replay, no
   automatic route fallback, same-origin and cross-origin redirect rejection,
   malicious verification URLs, absence of a credential-bearing follow-up
   request, and secret redaction.
