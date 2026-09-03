@@ -17,6 +17,11 @@ revisions pinned in link:CODEX_CONTRACT.adoc[the Codex contract investigation].
 The opt-in check is
 `test/e2e/openai_codex_contract_live_test.exs`. It passes credentials to
 ReqLLM operation-locally, preventing ReqLLM's OAuth-file fallback.
+Because ReqLLM 1.19.0 populates its public Codex response model from the
+requested selector, the test-only `Kodo.Test.OpenAICodexContractProbe` captures
+only `response.model` from the terminal provider SSE event immediately before
+ReqLLM decodes the unchanged response. The identities below therefore come
+from provider response payloads rather than a comparison with request input.
 
 [cols="1,2,2",options="header"]
 |===

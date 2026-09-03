@@ -1,6 +1,7 @@
 defmodule Kodo.E2E.OpenAICodexContractLiveTest do
   use ExUnit.Case, async: false
 
+  alias Kodo.Test.OpenAICodexContractProbe
   alias ReqLLM.Context
   alias ReqLLM.Response
   alias ReqLLM.Tool
@@ -123,7 +124,8 @@ defmodule Kodo.E2E.OpenAICodexContractLiveTest do
     prompt = "Reply with exactly KODO_IDENTITY_OK"
     codex_opts = route_options!(routes, codex_model())
 
-    assert {:ok, codex_response} = ReqLLM.generate_text(codex_model(), prompt, codex_opts)
+    assert {:ok, codex_response, codex_provider_model} =
+             OpenAICodexContractProbe.generate_text(codex_model(), prompt, codex_opts)
 
     assert {:ok, platform_response} =
              ReqLLM.generate_text(platform_model(), prompt,
@@ -133,7 +135,7 @@ defmodule Kodo.E2E.OpenAICodexContractLiveTest do
 
     assert Response.text(codex_response) == "KODO_IDENTITY_OK"
     assert Response.text(platform_response) == "KODO_IDENTITY_OK"
-    assert codex_response.model == @model
+    assert codex_provider_model == @model
     assert platform_response.model == @platform_model
   end
 

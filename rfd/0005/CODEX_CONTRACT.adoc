@@ -310,6 +310,10 @@ strict object output, and the current mappings' omitted `none` reasoning
 effort. The same behavioral checks passed through the Platform route. Refresh
 returned a distinct replacement refresh token, atomically replaced the
 spike-owned file, and a new inference process succeeded afterward.
+The test-only compatibility probe captures the subscription model identity
+from the terminal SSE event before ReqLLM replaces it with the requested
+catalog selector; it preserves the response for ReqLLM's normal decoder and
+retains no other raw provider data.
 
 The candidate nevertheless failed the exact-identity rule above, so Phase 0
 ends with a no-go for cross-route switching. Deliberately exhausting a user's
