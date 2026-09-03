@@ -5,6 +5,7 @@ defmodule Kodo.IntegrationsTest do
   alias Kodo.Integrations
   alias Kodo.Integrations.CredentialEncryption
   alias Kodo.Integrations.Integration
+  alias Kodo.Test.BlockingJSONValue
 
   describe "scoped credential lifecycle" do
     setup do
@@ -256,33 +257,29 @@ defmodule Kodo.IntegrationsTest do
     test "admits exactly one of two replacements at the same generation", %{scope: scope} do
       assert {:ok, integration} = connect(scope)
       supervisor = start_supervised!(Task.Supervisor)
-      parent = self()
+      owner = self()
 
       tasks =
         for suffix <- ["first", "second"] do
-          Task.Supervisor.async_nolink(supervisor, fn ->
-            send(parent, {:replacement_ready, self()})
+          ref = make_ref()
 
-            receive do
-              :replace ->
-                Integrations.replace_credentials(
-                  scope,
-                  integration.id,
-                  integration.credential_generation,
-                  %{"api_key" => "replacement-#{suffix}"}
-                )
-            end
-          end)
+          task =
+            async_operation(supervisor, fn ->
+              Integrations.replace_credentials(
+                scope,
+                integration.id,
+                integration.credential_generation,
+                %{"api_key" => blocking_value(owner, ref, "replacement-#{suffix}")}
+              )
+            end)
+
+          {task, ref}
         end
 
-      for task <- tasks do
-        task_pid = task.pid
-        assert_receive {:replacement_ready, ^task_pid}
-        Ecto.Adapters.SQL.Sandbox.allow(Repo, self(), task.pid)
-      end
+      Enum.each(tasks, fn {task, ref} -> assert_encoding_blocked(task, ref) end)
+      Enum.each(tasks, fn {task, ref} -> send(task.pid, {:continue_json_encoding, ref}) end)
 
-      Enum.each(tasks, &send(&1.pid, :replace))
-      results = Enum.map(tasks, &Task.await/1)
+      results = Enum.map(tasks, fn {task, _ref} -> Task.await(task) end)
 
       assert Enum.count(results, &match?({:ok, _integration}, &1)) == 1
 
@@ -295,66 +292,113 @@ defmodule Kodo.IntegrationsTest do
     test "delayed credential and validation results cannot undo disconnection", %{scope: scope} do
       assert {:ok, api_integration} = connect(scope)
       api_generation = api_integration.credential_generation
+      supervisor = start_supervised!(Task.Supervisor)
+      owner = self()
+      replace_ref = make_ref()
+
+      replace_task =
+        async_operation(supervisor, fn ->
+          Integrations.replace_credentials(
+            scope,
+            api_integration.id,
+            api_generation,
+            %{"api_key" => blocking_value(owner, replace_ref, "delayed")}
+          )
+        end)
+
+      assert_encoding_blocked(replace_task, replace_ref)
 
       assert {:ok, _disconnected} =
                Integrations.disconnect(scope, api_integration.id, api_generation)
 
+      send(replace_task.pid, {:continue_json_encoding, replace_ref})
+
       assert {:error, :stale_credential_generation} =
-               Integrations.replace_credentials(
-                 scope,
-                 api_integration.id,
-                 api_generation,
-                 %{"api_key" => "delayed"}
-               )
+               Task.await(replace_task)
 
       assert {:error, :stale_credential_generation} =
                Integrations.validation_invalid(scope, api_integration.id, api_generation)
 
       oauth = oauth_integration(scope)
+      oauth_ref = make_ref()
 
-      assert {:ok, oauth} =
-               Integrations.oauth_succeeded(scope, oauth.id, 0, %{
+      oauth_task =
+        async_operation(supervisor, fn ->
+          Integrations.oauth_succeeded(scope, oauth.id, 0, %{
+            "access_token" => blocking_value(owner, oauth_ref, "access"),
+            "refresh_token" => "refresh"
+          })
+        end)
+
+      assert_encoding_blocked(oauth_task, oauth_ref)
+      assert {:ok, oauth_disconnected} = Integrations.disconnect(scope, oauth.id, 0)
+      send(oauth_task.pid, {:continue_json_encoding, oauth_ref})
+
+      assert {:error, :stale_credential_generation} = Task.await(oauth_task)
+      assert oauth_disconnected.connection_status == "disconnected"
+
+      refresh_scope = AccountsFixtures.user_scope_fixture()
+      refresh = oauth_integration(refresh_scope)
+
+      assert {:ok, refresh} =
+               Integrations.oauth_succeeded(refresh_scope, refresh.id, 0, %{
                  "access_token" => "access",
                  "refresh_token" => "refresh"
                })
 
-      oauth_generation = oauth.credential_generation
-      assert {:ok, _disconnected} = Integrations.disconnect(scope, oauth.id, oauth_generation)
+      refresh_ref = make_ref()
 
-      delayed_payload = %{"access_token" => "delayed", "refresh_token" => "delayed"}
+      refresh_task =
+        async_operation(supervisor, fn ->
+          Integrations.refresh_succeeded(
+            refresh_scope,
+            refresh.id,
+            refresh.credential_generation,
+            %{
+              "access_token" => blocking_value(owner, refresh_ref, "new-access"),
+              "refresh_token" => "new-refresh"
+            }
+          )
+        end)
 
-      assert {:error, :stale_credential_generation} =
-               Integrations.oauth_succeeded(
-                 scope,
-                 oauth.id,
-                 oauth_generation,
-                 delayed_payload
+      assert_encoding_blocked(refresh_task, refresh_ref)
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(
+                 refresh_scope,
+                 refresh.id,
+                 refresh.credential_generation
                )
 
-      assert {:error, :stale_credential_generation} =
-               Integrations.refresh_succeeded(
-                 scope,
-                 oauth.id,
-                 oauth_generation,
-                 delayed_payload
-               )
+      send(refresh_task.pid, {:continue_json_encoding, refresh_ref})
+      assert {:error, :stale_credential_generation} = Task.await(refresh_task)
 
-      assert {:ok, current} = Integrations.get_integration(scope, oauth.id)
+      assert {:ok, current} = Integrations.get_integration(refresh_scope, refresh.id)
       assert current.connection_status == "disconnected"
       assert is_nil(current.encrypted_credentials)
     end
 
     test "deletion after credential lookup cannot recreate integration state", %{scope: scope} do
       assert {:ok, integration} = connect(scope)
-      Repo.delete!(scope.user)
+      supervisor = start_supervised!(Task.Supervisor)
+      owner = self()
+      ref = make_ref()
 
-      assert {:error, :integration_not_found} =
-               Integrations.replace_credentials(
-                 scope,
-                 integration.id,
-                 integration.credential_generation,
-                 %{"api_key" => "late-replacement"}
-               )
+      task =
+        async_operation(supervisor, fn ->
+          Integrations.replace_credentials(
+            scope,
+            integration.id,
+            integration.credential_generation,
+            %{"api_key" => blocking_value(owner, ref, "late-replacement")}
+          )
+        end)
+
+      assert_encoding_blocked(task, ref)
+      Repo.delete!(scope.user)
+      send(task.pid, {:continue_json_encoding, ref})
+
+      assert {:error, :stale_credential_generation} = Task.await(task)
 
       refute Repo.get(Integration, integration.id)
     end
@@ -413,5 +457,20 @@ defmodule Kodo.IntegrationsTest do
       authentication_type: "oauth"
     })
     |> Repo.insert!()
+  end
+
+  defp async_operation(supervisor, operation) do
+    task = Task.Supervisor.async_nolink(supervisor, operation)
+    Ecto.Adapters.SQL.Sandbox.allow(Repo, self(), task.pid)
+    task
+  end
+
+  defp blocking_value(owner, ref, value) do
+    %BlockingJSONValue{owner: owner, ref: ref, value: value}
+  end
+
+  defp assert_encoding_blocked(task, ref) do
+    task_pid = task.pid
+    assert_receive {:json_encoding_blocked, ^ref, ^task_pid}
   end
 end

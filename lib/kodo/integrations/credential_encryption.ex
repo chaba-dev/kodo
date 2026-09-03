@@ -13,7 +13,7 @@ defmodule Kodo.Integrations.CredentialEncryption do
   def encrypt(%Integration{} = integration, payload) when is_map(payload) do
     with {:ok, ring} <- key_ring(),
          {:ok, associated_data} <- associated_data(integration, @format_version),
-         {:ok, plaintext} <- Jason.encode(payload) do
+         {:ok, plaintext} <- encode_payload(payload) do
       nonce = :crypto.strong_rand_bytes(@nonce_bytes)
       key = Map.fetch!(ring.keys, ring.current_key_version)
 
@@ -35,6 +35,7 @@ defmodule Kodo.Integrations.CredentialEncryption do
          credential_format_version: @format_version
        }}
     else
+      {:error, :credential_payload_invalid} = error -> error
       _error -> {:error, :credential_encryption_unavailable}
     end
   end
@@ -105,6 +106,17 @@ defmodule Kodo.Integrations.CredentialEncryption do
   defp valid_keys?(_keys), do: false
 
   defp valid_version?(version), do: is_binary(version) and Regex.match?(@key_version, version)
+
+  defp encode_payload(payload) do
+    try do
+      case Jason.encode(payload) do
+        {:ok, encoded} -> {:ok, encoded}
+        {:error, _reason} -> {:error, :credential_payload_invalid}
+      end
+    rescue
+      _exception -> {:error, :credential_payload_invalid}
+    end
+  end
 
   defp associated_data(integration, format_version) do
     values = [

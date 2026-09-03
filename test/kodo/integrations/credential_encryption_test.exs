@@ -120,9 +120,13 @@ defmodule Kodo.Integrations.CredentialEncryptionTest do
   test "rejects malformed payloads without raising or exposing them in diagnostics" do
     sentinel = "plaintext-provider-secret"
 
-    assert result = {:error, :credential_payload_invalid}
-    assert ^result = CredentialEncryption.encrypt(integration(), sentinel)
-    refute inspect(result) =~ sentinel
+    malformed_payloads = [sentinel, %{"api_key" => ["value" | {sentinel}]}]
+
+    for payload <- malformed_payloads do
+      assert result = {:error, :credential_payload_invalid}
+      assert ^result = CredentialEncryption.encrypt(integration(), payload)
+      refute inspect(result) =~ sentinel
+    end
   end
 
   test "rejects key versions that cannot be persisted" do
