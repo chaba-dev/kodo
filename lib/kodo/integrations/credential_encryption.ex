@@ -73,22 +73,35 @@ defmodule Kodo.Integrations.CredentialEncryption do
     end
   end
 
+  @doc false
+  def configured_key_versions do
+    with {:ok, ring} <- key_ring() do
+      {:ok, Map.keys(ring.keys)}
+    end
+  end
+
   defp key_ring do
     config = Application.get_env(:kodo, __MODULE__, [])
     current_key_version = config[:current_key_version]
     keys = config[:keys]
 
-    if is_binary(current_key_version) and current_key_version != "" and is_map(keys) and
-         map_size(keys) > 0 and Map.has_key?(keys, current_key_version) and
-         Enum.all?(keys, fn {version, key} ->
-           is_binary(version) and version != "" and is_binary(key) and
-             byte_size(key) == @key_bytes
-         end) do
+    if valid_version?(current_key_version) and valid_keys?(keys) and
+         Map.has_key?(keys, current_key_version) do
       {:ok, %{current_key_version: current_key_version, keys: keys}}
     else
       {:error, :credential_encryption_config_invalid}
     end
   end
+
+  defp valid_keys?(keys) when is_map(keys) and map_size(keys) > 0 do
+    Enum.all?(keys, fn {version, key} ->
+      valid_version?(version) and is_binary(key) and byte_size(key) == @key_bytes
+    end)
+  end
+
+  defp valid_keys?(_keys), do: false
+
+  defp valid_version?(version), do: is_binary(version) and version != ""
 
   defp associated_data(integration, format_version) do
     values = [

@@ -68,6 +68,8 @@ jobs:
               -e SECRET_KEY_BASE="$(printf 'a%.0s' {1..64})" \
               -e KODO_ARTIFACT_REVISION="$GITHUB_SHA" \
               -e KODO_DEPLOYMENT_GENERATION=0 \
+              -e KODO_CREDENTIAL_ENCRYPTION_CURRENT_KEY_VERSION=smoke-v1 \
+              -e KODO_CREDENTIAL_ENCRYPTION_KEYS='{"smoke-v1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' \
               kodo:release-smoke \
               eval 'IO.write(Application.spec(:kodo, :vsn))'
           )

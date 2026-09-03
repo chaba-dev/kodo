@@ -89,8 +89,9 @@ uses Unix process groups and signals.
 The image starts `/app/bin/kodo start` as an unprivileged user. Supply the
 production settings documented in the [operations guide](operations.org),
 including `DATABASE_URL`, `SECRET_KEY_BASE`, `KODO_ARTIFACT_REVISION`, and the
-monotonic `KODO_DEPLOYMENT_GENERATION`. Run migrations before starting the new
-server revision:
+monotonic `KODO_DEPLOYMENT_GENERATION`. It also requires the independently
+managed credential-encryption key ring described there. Run migrations before
+starting the new server revision:
 
 ```sh
 docker run --rm \
@@ -98,6 +99,8 @@ docker run --rm \
   -e SECRET_KEY_BASE \
   -e KODO_ARTIFACT_REVISION \
   -e KODO_DEPLOYMENT_GENERATION \
+  -e KODO_CREDENTIAL_ENCRYPTION_CURRENT_KEY_VERSION \
+  -e KODO_CREDENTIAL_ENCRYPTION_KEYS \
   ghcr.io/chaba-dev/kodo:MAJOR.MINOR.PATCH /app/bin/migrate
 ```
 

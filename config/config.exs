@@ -35,6 +35,25 @@ config :kodo,
     tool_timeout: default_tool_timeout_ms
   ]
 
+# Phoenix and LiveView use this list before inspecting request or event parameters.
+config :phoenix, :filter_parameters, [
+  "password",
+  "token",
+  "api_key",
+  "access_token",
+  "refresh_token",
+  "id_token",
+  "device_code",
+  "user_code",
+  "client_secret",
+  "authorization",
+  "encrypted_credentials",
+  "account_id",
+  "chatgpt_account_id",
+  "organization_id",
+  "workspace_id"
+]
+
 config :kodo, Kodo.Cluster.InstanceManager,
   enabled: true,
   artifact_revision: "development",

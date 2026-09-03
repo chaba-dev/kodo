@@ -94,6 +94,35 @@ non-production environment, both are validated and required. Tests disable the
 instance manager because application-owned heartbeat writes would sit outside
 ExUnit SQL Sandbox transactions.
 
+* Credential-encryption key ring
+
+Every production server and migration command requires a credential-encryption
+key ring that is independent of provider API keys and OAuth credentials:
+
+| Variable                                             | Meaning |
+|------------------------------------------------------+---------|
+| ~KODO_CREDENTIAL_ENCRYPTION_CURRENT_KEY_VERSION~     | Key version used for new writes |
+| ~KODO_CREDENTIAL_ENCRYPTION_KEYS~                    | JSON object mapping every available version to one Base64-encoded 32-byte key |
+
+Generate key material with a cryptographically secure generator, store it in
+the deployment secret manager, and inject the same ring into every replica. Do
+not derive it from ~SECRET_KEY_BASE~ or any provider credential. For example,
+the shape is ~{"2026-09-v1":"<base64-encoded 32-byte key>"}~; never commit the
+real value.
+
+Startup validates every configured key and refuses to proceed unless the
+current version exists. After PostgreSQL starts, Kodo also verifies that every
+key version referenced by a durable integration is present before instance
+registration, recovery, or the HTTP endpoint starts. Missing and malformed
+keys therefore fail closed rather than falling back to environment provider
+credentials or accepting undecryptable rows.
+
+For rotation, first add the new non-current key to every replica. After all
+replicas have the complete ring, make that version current for new writes.
+Retain previous keys until all rows have been re-encrypted, the rollback window
+has closed, and retained backups no longer require them. Never remove old key
+material before confirming there are no remaining database references.
+
 * Control-plane instance lifecycle
 
 One running BEAM VM registers one durable control-plane instance record. Its
@@ -248,7 +277,11 @@ Inject these values into every Pod:
 - immutable ~KODO_ARTIFACT_REVISION~ from the built image or release;
 - one durable, monotonically increasing ~KODO_DEPLOYMENT_GENERATION~ for the
   rollout, supplied by the release pipeline rather than a pod-local counter;
-- the shared ~DATABASE_URL~, ~SECRET_KEY_BASE~, and provider credentials.
+- the shared ~DATABASE_URL~ and ~SECRET_KEY_BASE~;
+- one Secret-backed ~KODO_CREDENTIAL_ENCRYPTION_CURRENT_KEY_VERSION~ and
+  ~KODO_CREDENTIAL_ENCRYPTION_KEYS~ ring shared by every replica; and
+- provider credentials only until the Phase 1A user-integration cutover removes
+  that legacy runtime path.
 
 Use ~RollingUpdate~ with ~maxUnavailable: 0~ and ~maxSurge~ of at least one so a
 ready target exists before an old Pod terminates. The replacement must have
