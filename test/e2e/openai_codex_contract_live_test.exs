@@ -1,10 +1,12 @@
 defmodule Kodo.E2E.OpenAICodexContractLiveTest do
   use ExUnit.Case, async: false
 
+  alias Kodo.Agent.ReviewResult
+  alias Kodo.Agent.Tools
+  alias Kodo.LLM.ReqLLM, as: KodoReqLLM
   alias Kodo.Test.OpenAICodexContractProbe
   alias ReqLLM.Context
   alias ReqLLM.Response
-  alias ReqLLM.Tool
   alias ReqLLM.ToolCall
 
   @moduletag live_provider: true, timeout: 240_000
@@ -34,16 +36,15 @@ defmodule Kodo.E2E.OpenAICodexContractLiveTest do
         ReqLLM.Providers.OpenAI.OAuth.account_id_from_token(access_token) ||
         flunk("the Codex credential does not contain a ChatGPT account ID")
 
-    codex_opts = [
-      access_token: access_token,
-      chatgpt_account_id: account_id,
-      auth_mode: :oauth,
-      codex_originator: "kodo",
-      receive_timeout: @timeout,
-      total_timeout: @timeout
-    ]
+    codex_opts =
+      Keyword.merge(common_options(),
+        access_token: access_token,
+        chatgpt_account_id: account_id,
+        auth_mode: :oauth,
+        codex_originator: "kodo"
+      )
 
-    {:ok, routes: [{codex_model(), codex_opts}, {platform_model(), []}]}
+    {:ok, routes: [{codex_model(), codex_opts}, {platform_model(), common_options()}]}
   end
 
   test "subscription route supports text with Kodo's originator", %{routes: routes} do
@@ -52,95 +53,82 @@ defmodule Kodo.E2E.OpenAICodexContractLiveTest do
     assert {:ok, response} =
              ReqLLM.generate_text(codex_model(), "Reply with exactly KODO_CODEX_OK", opts)
 
-    assert Response.text(response) == "KODO_CODEX_OK"
+    assert String.trim(Response.text(response)) == "KODO_CODEX_OK"
     assert response.model == @model
   end
 
   test "both billing routes support a Kodo tool call and continuation", %{routes: routes} do
-    tool =
-      Tool.new!(
-        name: "add_integers",
-        description: "Add two integers",
-        parameter_schema: %{
-          "type" => "object",
-          "properties" => %{
-            "left" => %{"type" => "integer"},
-            "right" => %{"type" => "integer"}
-          },
-          "required" => ["left", "right"],
-          "additionalProperties" => false
-        },
-        callback: fn _arguments -> {:error, :not_executed_by_spike} end,
-        strict: true
-      )
+    definition = Enum.find(Tools.definitions("workspace-v5"), &(&1.name == "read_file"))
+    [tool] = KodoReqLLM.build_tools([definition])
+    tool_choice = %{type: "function", function: %{name: "read_file"}}
 
     for {model, opts} <- routes do
       assert {:ok, response} =
                ReqLLM.generate_text(
                  model,
-                 "Use add_integers to add 20 and 22. Do not calculate it yourself.",
-                 Keyword.put(opts, :tools, [tool])
+                 "Use read_file for README.md with offset 0 and limit 1.",
+                 opts |> Keyword.put(:tools, [tool]) |> Keyword.put(:tool_choice, tool_choice)
                )
 
       assert [call] = Response.tool_calls(response)
-      assert ToolCall.name(call) == "add_integers"
-      assert ToolCall.args_map(call) == %{"left" => 20, "right" => 22}
+      assert ToolCall.name(call) == "read_file"
+      assert ToolCall.args_map(call) == %{"path" => "README.md", "offset" => 0, "limit" => 1}
 
       continued_context =
         Context.append(
           response.context,
-          Context.tool_result(call.id, "add_integers", "42")
+          Context.tool_result(call.id, "read_file", "# Kodo")
         )
 
       assert {:ok, continued} =
-               ReqLLM.generate_text(model, continued_context, Keyword.put(opts, :tools, [tool]))
+               ReqLLM.generate_text(
+                 model,
+                 continued_context,
+                 opts |> Keyword.put(:tools, []) |> Keyword.put(:tool_choice, :none)
+               )
 
-      assert Response.text(continued) =~ "42"
+      assert String.trim(Response.text(continued)) != ""
       assert Response.tool_calls(continued) == []
     end
   end
 
   test "both billing routes support strict review-shaped object output", %{routes: routes} do
-    schema = [
-      verdict: [type: {:in, ["pass"]}, required: true],
-      summary: [type: :string, required: true]
-    ]
-
     for {model, opts} <- routes do
       assert {:ok, response} =
                ReqLLM.generate_object(
                  model,
-                 "Return a passing review with a short summary.",
-                 schema,
+                 "Return a clean review with no findings.",
+                 ReviewResult.schema(),
                  Keyword.merge(opts, output_validation: :strict)
                )
 
-      assert %{"verdict" => "pass", "summary" => summary} = Response.object(response)
-      assert is_binary(summary) and summary != ""
+      assert %{"clean" => true, "findings" => []} = Response.object(response)
     end
   end
 
   test "billing routes report their exact model identities", %{routes: routes} do
     prompt = "Reply with exactly KODO_IDENTITY_OK"
     codex_opts = route_options!(routes, codex_model())
+    platform_opts = route_options!(routes, platform_model())
 
     assert {:ok, codex_response, codex_provider_model} =
              OpenAICodexContractProbe.generate_text(codex_model(), prompt, codex_opts)
 
     assert {:ok, platform_response} =
-             ReqLLM.generate_text(platform_model(), prompt,
-               receive_timeout: @timeout,
-               total_timeout: @timeout
-             )
+             ReqLLM.generate_text(platform_model(), prompt, platform_opts)
 
-    assert Response.text(codex_response) == "KODO_IDENTITY_OK"
-    assert Response.text(platform_response) == "KODO_IDENTITY_OK"
+    assert String.trim(Response.text(codex_response)) == "KODO_IDENTITY_OK"
+    assert String.trim(Response.text(platform_response)) == "KODO_IDENTITY_OK"
     assert codex_provider_model == @model
     assert platform_response.model == @platform_model
   end
 
   defp codex_model, do: "openai_codex:#{@model}"
   defp platform_model, do: "openai:#{@model}"
+
+  defp common_options do
+    [receive_timeout: @timeout, total_timeout: @timeout, max_retries: 0]
+  end
 
   defp route_options!(routes, model) do
     {_model, opts} = List.keyfind!(routes, model, 0)

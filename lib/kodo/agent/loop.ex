@@ -12,29 +12,6 @@ defmodule Kodo.Agent.Loop do
   alias Kodo.Sessions.Projection
 
   @protocol_version RunnerProtocol.version()
-  @review_schema %{
-    "type" => "object",
-    "additionalProperties" => false,
-    "properties" => %{
-      "clean" => %{"type" => "boolean"},
-      "findings" => %{
-        "type" => "array",
-        "items" => %{
-          "type" => "object",
-          "additionalProperties" => false,
-          "properties" => %{
-            "severity" => %{"type" => "string", "enum" => ["low", "medium", "high"]},
-            "path" => %{"type" => "string"},
-            "line" => %{"type" => "integer", "minimum" => 1},
-            "explanation" => %{"type" => "string"},
-            "suggested_fix" => %{"type" => "string"}
-          },
-          "required" => ["severity", "path", "line", "explanation", "suggested_fix"]
-        }
-      }
-    },
-    "required" => ["clean", "findings"]
-  }
 
   def run(session_id, opts \\ []) do
     budgets = Keyword.get(opts, :budgets, Application.fetch_env!(:kodo, :agent_budgets))
@@ -234,7 +211,7 @@ defmodule Kodo.Agent.Loop do
                      "Original task:\n#{task}\n\nReview this final diff:\n\n#{diff.output["content"]}"
                  }
                ],
-               @review_schema,
+               ReviewResult.schema(),
                timeout: context.budgets[:model_timeout],
                reasoning: review["reasoning"]
              )

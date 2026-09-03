@@ -5,29 +5,6 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   @timeout 120_000
   @max_output 32_000
-  @review_schema %{
-    "type" => "object",
-    "additionalProperties" => false,
-    "required" => ["clean", "findings"],
-    "properties" => %{
-      "clean" => %{"type" => "boolean"},
-      "findings" => %{
-        "type" => "array",
-        "items" => %{
-          "type" => "object",
-          "additionalProperties" => false,
-          "required" => ["severity", "path", "line", "explanation", "suggested_fix"],
-          "properties" => %{
-            "severity" => %{"type" => "string", "enum" => ["low", "medium", "high"]},
-            "path" => %{"type" => "string"},
-            "line" => %{"type" => "integer", "minimum" => 1},
-            "explanation" => %{"type" => "string"},
-            "suggested_fix" => %{"type" => "string"}
-          }
-        }
-      }
-    }
-  }
 
   @doc "Runs every task and returns a JSON-safe report. Errors are isolated per task."
   def run(opts \\ []) do
@@ -148,7 +125,7 @@ defmodule Kodo.Agent.EvaluationRunner do
     started = System.monotonic_time(:millisecond)
 
     {:ok, response} =
-      adapter.generate_object(role["model"], messages, @review_schema,
+      adapter.generate_object(role["model"], messages, ReviewResult.schema(),
         timeout: @timeout,
         reasoning: role["reasoning"]
       )
@@ -484,7 +461,7 @@ defmodule Kodo.Agent.EvaluationRunner do
           contract.prompt,
           "Original task:\n#{task}\n\nReview this final diff:\n\n#{diff}"
         ),
-        @review_schema,
+        ReviewResult.schema(),
         timeout: @timeout,
         reasoning: role["reasoning"]
       )

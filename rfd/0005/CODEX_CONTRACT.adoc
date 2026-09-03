@@ -194,26 +194,32 @@ a live-contract question. Sources:
 | WebSocket inference
 | `ApiWebSocketResponsesClient` through the HTTP client factory
 | Bearer and account headers on the handshake
-| Endpoint-aware handshake. No RFD-compatible reject-all-redirect policy is
-  established by the reviewed call site.
+| Endpoint-aware Tungstenite handshake. It does not follow an HTTP `3xx`; a
+  non-upgrade response fails the handshake without a second request. Kodo must
+  preserve and contract-test that behavior rather than infer it from the HTTP
+  client policy.
 |===
 
 The builder default is evidenced by
 https://github.com/openai/codex/blob/1d6727c0b52316515bfbf5dea578374bafb4d898/codex-rs/http-client/src/client_builder.rs[`HttpClientBuilder`].
-Codex's redirect policy is less strict than RFD 5. Kodo must reject every
-redirect, including same-origin redirects, and must enforce exact HTTPS
+Codex's HTTP redirect policy is less strict than RFD 5. Kodo must reject every
+HTTP redirect, including same-origin redirects, and must enforce exact HTTPS
 origins at each credential-bearing transport rather than inherit upstream
-behavior.
+behavior. The WebSocket client already treats a redirect as a failed handshake,
+but Kodo still needs a regression control for it.
 
 === ReqLLM 1.19.0
 
 ReqLLM's `openai_codex` provider uses
 `POST https://chatgpt.com/backend-api/codex/responses` by default. It accepts an
-operation-local `access_token` and `chatgpt_account_id`, with top-level options
-taking precedence over `provider_options`. It then sends `Authorization`,
-`ChatGPT-Account-ID`, `originator`, and `content-type`. It defaults the
-originator to `pi`; Kodo must explicitly set `kodo`. ReqLLM does not set a
-Codex-specific `User-Agent`.
+operation-local `access_token` and `chatgpt_account_id`. A top-level access
+token is resolved directly, but provider-specific options are auto-hoisted and
+merged with existing nested `provider_options` taking precedence. A stale
+nested account ID or originator can therefore override a top-level value. Kodo
+must remove conflicting nested values before passing its operation-local
+account ID and `codex_originator: "kodo"`. ReqLLM sends `Authorization`,
+`ChatGPT-Account-ID`, `originator`, and `content-type`, defaults the originator
+to `pi`, and does not set a Codex-specific `User-Agent`.
 
 ReqLLM supports three inference paths:
 
@@ -324,6 +330,58 @@ malformed bearer token and HTTP 401 with provider code `token_expired` for a
 malformed refresh token. Production quota and revocation behavior remains a
 bounded request outcome, not durable credential state, and requires regression
 evidence only if a future exact-identity candidate passes.
+
+=== Evidence status
+
+[cols="2,1,3",options="header"]
+|===
+| Check | Status | Evidence boundary
+
+| Device authorization, polling, and exchange
+| Live, manually initiated
+| Reproducible through the ignored-file spike script.
+
+| Text with `originator: kodo`
+| Live, automated
+| Covered by the opt-in compatibility test.
+
+| Canonical Kodo tool and continuation
+| Live, automated
+| Uses Kodo's current `read_file` definition and ReqLLM adapter conversion.
+
+| Canonical review object
+| Live, automated
+| Uses `Kodo.Agent.ReviewResult.schema/0`, the production schema owner.
+
+| Current `none` reasoning mapping
+| Live, automated
+| Verified through the adapter's intentional omission of the provider option.
+
+| Process restart and credential reload
+| Live, manually observed
+| Inference ran in a new BEAM instance after loading the isolated file.
+
+| Refresh-token replacement
+| Live, manually observed
+| Provider returned a distinct replacement; inference passed afterward.
+
+| Refresh response omitting a replacement
+| Source-only
+| The spike preserves an omitted token, but the live provider returned one.
+
+| Malformed bearer and refresh credentials
+| Live, manually observed
+| Bounded negative controls returned HTTP 401 without mutating shared state.
+
+| Quota exhaustion and real revocation
+| Skipped after no-go
+| Not manufactured because cost or token-family damage could not change the
+  failed identity decision.
+
+| HTTP and WebSocket redirect canaries
+| Deferred
+| Required for the Phase 1A Kodo-owned transport; not inferred from this spike.
+|===
 
 == Phase 0 implementation consequences
 

@@ -44,16 +44,16 @@ from provider response payloads rather than a comparison with request input.
 | Passed with `originator: kodo`
 
 | Strict Kodo-shaped tool call
-| Passed
-| Passed
+| Passed with the canonical `read_file` schema
+| Passed with the canonical `read_file` schema
 
 | Function-result continuation
 | Passed
 | Passed
 
 | Strict review-shaped object output
-| Passed
-| Passed
+| Passed with `Kodo.Agent.ReviewResult.schema/0`
+| Passed with `Kodo.Agent.ReviewResult.schema/0`
 
 | Current mapping reasoning effort
 | Passed with no reasoning option
@@ -93,7 +93,21 @@ LIVE_CODEX_AUTH_FILE=tmp/openai-codex-phase0.json \
 
 The check also requires `OPENAI_API_KEY` for the separately billed Platform
 route. It is excluded by default and must remain an opt-in, externally billed
-test rather than a product or deployment feature flag.
+test rather than a product or deployment feature flag. A complete run makes
+nine bounded model requests: four through Platform billing and five through
+the ChatGPT subscription route. Retries are disabled to avoid duplicate billed
+requests.
+
+Refresh and rerun a focused post-rotation inference check with:
+
+----
+mix run --no-start scripts/openai_codex_contract.exs refresh tmp/openai-codex-phase0.json
+LIVE_CODEX_AUTH_FILE=tmp/openai-codex-phase0.json \
+  mix test test/e2e/openai_codex_contract_live_test.exs:48 --include live_provider
+----
+
+The broader source-only, manually observed, deferred, and deliberately skipped
+checks are classified in the investigation's evidence-status table.
 
 == Boundary and diagnostics
 
