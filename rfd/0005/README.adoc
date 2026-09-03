@@ -211,6 +211,15 @@ compares the credential generation captured by the task so it cannot update a
 replacement or disconnection. Raw provider bodies are never persisted or
 logged.
 
+Kodo normalizes quota exhaustion and billing-required responses into bounded
+outcomes on the affected invocation. They do not change connection or
+validation state, become persistent integration status, or trigger background
+quota checks. The session or turn that encountered the outcome keeps the user's
+work available, offers retry, and links to the provider's billing page and the
+relevant Kodo integration settings. Integration cards therefore do not show a
+quota badge or imply that one observation applies to every model, provider
+project, or later quota window.
+
 Kodo never runs billed inference automatically. A user may explicitly confirm
 a Test model request after the UI identifies the exact provider and model and
 warns that the request may incur provider charges. Testing requires
@@ -319,7 +328,7 @@ A provider rejection or contract change is a compatibility regression to fix;
 affected integrations report an actionable unavailable state. Kodo does not
 retry through another client identity or fall back to Platform billing.
 Ordinary transient, quota, and authorization errors remain scoped to the
-affected integration.
+affected request.
 
 No provider in this RFD is gated by a deployment feature flag once its required
 phase acceptance checks pass. References to opt-in live-provider or
@@ -657,8 +666,10 @@ and exact-model compatibility rules still apply.
 The page provides distinct actions for OpenAI API, ChatGPT Subscription,
 Anthropic, and OpenRouter. It explains the billing identity before connection,
 shows progress and expiry for device authorization, and provides actionable
-states for missing credentials, invalid keys, quota exhaustion, and required
-reauthorization. It never embeds raw scripts; device-flow progress uses normal
+states for missing credentials, invalid keys, and required reauthorization. It
+does not present request-scoped quota or billing outcomes as integration state.
+Those outcomes appear with retry and billing guidance on the affected session
+or turn. The page never embeds raw scripts; device-flow progress uses normal
 LiveView events and asynchronous server work.
 
 Session creation and model settings identify integrations by provider and

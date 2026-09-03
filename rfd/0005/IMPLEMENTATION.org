@@ -97,6 +97,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   immediately before every generation call, and normalize Req/ReqLLM failures
   into bounded domain errors before persistence, inspection, logging,
   telemetry, or browser display.
+- [ ] Represent quota exhaustion and billing-required responses only as bounded
+  outcomes on the affected invocation. Do not mutate or persist integration
+  state or run background quota checks; preserve the session work and provide
+  retry plus links to provider billing and the relevant integration settings.
 - [ ] Batch preflight metadata through indexed user/provider queries without
   decryption; immediately before each credential-bearing external operation,
   perform the bounded current integration or authorization-attempt lookup and
@@ -192,7 +196,8 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   tablet, and narrow-mobile browser checks for the sketched layouts.
 - [ ] Render connection state before validation state and show validation only
   for connected integrations; add selector coverage proving the UI cannot
-  display impossible combinations such as disconnected plus valid.
+  display impossible combinations such as disconnected plus valid or a
+  request-scoped quota badge.
 - [ ] Keep provider connection separate from routing changes; when no usable
   mapping exists, present one provider-compatible role preset with explicit
   billing paths and apply it only after "Use recommended models" confirmation.
@@ -250,6 +255,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   expected safe error identifiers without raw response persistence, and explicit
   cost confirmation for each optional Test model request. Pin the expected
   metadata response contract and verify its charging documentation before ship.
+- [ ] Test provider- and model-specific quota and billing responses on an
+  invocation: the affected session preserves work and offers retry and guidance,
+  while connection and validation remain unchanged and integration cards show
+  no stale quota state.
 - [ ] Add opt-in live-provider checks for OpenAI API, Anthropic, and OpenRouter
   using explicit test-user integrations while keeping ordinary tests
   independent of external provider access.
@@ -319,8 +328,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Treat bounded waiting after takeover ~invalid_grant~ only as a UI-churn
   optimization, not an outcome-selection boundary.
 - [ ] Add the "ChatGPT Subscription (Beta)" connection flow, billing
-  explanation, progress state, cancellation, quota errors, disconnect, and
-  reauthorization to the authenticated integrations page.
+  explanation, progress state, cancellation, disconnect, and reauthorization to
+  the authenticated integrations page; show subscription quota errors only on
+  the affected session or turn with retry and billing guidance.
 - [ ] Require a fresh server-side sudo check to start authorization or
   reauthorization. Permit the same active generation-fenced attempt to complete
   after sudo expiry, require authenticated ownership but not fresh sudo for
