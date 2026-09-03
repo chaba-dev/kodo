@@ -167,17 +167,49 @@ before logging or display.
 
 Saving or replacing an API key first commits its encrypted payload as
 `connected` and `unverified`, then starts a bounded asynchronous validation task
-under the control-plane task supervisor. The unbilled probes are OpenAI
-`GET /v1/models`, Anthropic `GET /v1/models`, and OpenRouter
-`GET /api/v1/key`, using each provider's required authentication headers. A
-successful probe marks the integration `valid`. Only a provider-specific,
-confirmed authentication rejection marks it `invalid`; Kodo does not treat
-every `403` as proof of a bad key when restricted-key permissions may explain
-the response. Network and TLS failures, timeouts, redirects, `429`, `5xx`, and
-insufficient validation permission produce `unavailable`. Quota, billing, and
-model-entitlement failures remain request outcomes. Every result compares the
-credential generation captured by the task so it cannot update a replacement
-or disconnection.
+under the control-plane task supervisor. Kodo uses non-inference metadata
+endpoints with no currently documented usage charge: OpenAI `GET /v1/models`,
+Anthropic `GET /v1/models`, and OpenRouter `GET /api/v1/key`, with each
+provider's required authentication headers. This wording is not a permanent
+guarantee that providers will never charge for those endpoints; their contract
+and response classification are verified before each provider ships and when
+that integration contract changes.
+
+[cols="1,2,2,3",options="header"]
+|===
+| Provider | Valid | Invalid | Unavailable or configuration required
+
+| OpenAI
+| Successful metadata response
+| Explicit `invalid_api_key` or revoked-key response
+| Other `401` contexts, `403`, network or TLS failure, timeout, redirect,
+  `429`, or `5xx`
+
+| Anthropic
+| Successful metadata response for a standard workspace-scoped Console key
+| Explicit authentication failure for that supported key type
+| `403`, organization/Admin credential requiring workspace selection, network
+  or TLS failure, timeout, redirect, `429`, or `5xx`
+
+| OpenRouter
+| Successful key metadata response
+| Documented invalid/revoked-key `401`
+| Other permission or configuration failure, network or TLS failure, timeout,
+  redirect, `429`, or `5xx`
+|===
+
+Phase 2 supports standard workspace-scoped Anthropic Console API keys only.
+Organization/Admin credentials that require an explicit workspace selector are
+higher privilege than inference needs and return actionable unsupported-
+credential guidance rather than adding workspace selection in this RFD.
+
+A successful probe marks the integration `valid`. Only the provider-specific
+invalid outcomes above mark it `invalid`; Kodo never infers invalidity from a
+status code without the expected safe provider error identifier. Quota,
+billing, and model-entitlement failures remain request outcomes. Every result
+compares the credential generation captured by the task so it cannot update a
+replacement or disconnection. Raw provider bodies are never persisted or
+logged.
 
 Kodo never runs billed inference automatically. A user may explicitly confirm
 a Test model request after the UI identifies the exact provider and model and

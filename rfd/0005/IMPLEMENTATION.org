@@ -154,10 +154,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Add baseline onboarding and model-settings feedback that links users to
   the OpenAI integration required by their selected role mapping.
 - [ ] Save OpenAI API keys encrypted as ~unverified~ before asynchronously
-  probing ~GET /v1/models~ in a bounded generation-fenced task. Mark only a
-  confirmed authentication rejection invalid; classify network, TLS, timeout,
-  redirect, rate-limit, provider, and insufficient-permission failures as
-  validation unavailable.
+  probing the non-inference ~GET /v1/models~ metadata endpoint in a bounded
+  generation-fenced task. Mark only an explicit ~invalid_api_key~ or revoked-key
+  response invalid; classify other authentication contexts, permission, network,
+  TLS, timeout, redirect, rate-limit, and provider failures as unavailable.
 - [ ] Never run billed inference during automatic validation. Offer a Test model
   request only after explicit confirmation identifies the exact provider and
   model and warns of possible charges; require ownership but not fresh sudo.
@@ -191,11 +191,14 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 * Phase 2: Add Anthropic and OpenRouter API keys
 
 - [ ] Add Anthropic API-key connection, fixed endpoint configuration,
-  unbilled asynchronous ~GET /v1/models~ validation, and safe generation-fenced
-  error classification.
+  asynchronous non-inference ~GET /v1/models~ metadata validation, and safe
+  generation-fenced error classification. Support only standard workspace-
+  scoped Console keys; return actionable unsupported-credential guidance for
+  organization/Admin credentials that require workspace selection.
 - [ ] Add OpenRouter API-key connection, fixed endpoint configuration,
-  unbilled asynchronous ~GET /api/v1/key~ validation, and explicit OpenRouter
-  billing identity for routed models.
+  asynchronous non-inference ~GET /api/v1/key~ metadata validation, documented
+  invalid/revoked-key ~401~ handling, and explicit OpenRouter billing identity
+  for routed models.
 - [ ] Represent saved-but-unverified credentials separately from valid, invalid,
   and validation-unavailable credentials. Keep unverified and unavailable
   credentials usable, block only confirmed invalid credentials, and treat quota,
@@ -216,7 +219,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   underlying vendor is OpenAI or Anthropic.
 - [ ] Test each provider probe and outcome class, generation fencing, usable
   unverified/unavailable credentials, blocking confirmed-invalid credentials,
-  and explicit cost confirmation for each optional Test model request.
+  expected safe error identifiers without raw response persistence, and explicit
+  cost confirmation for each optional Test model request. Pin the expected
+  metadata response contract and verify its charging documentation before ship.
 - [ ] Add opt-in live-provider checks for OpenAI API, Anthropic, and OpenRouter
   using explicit test-user integrations while keeping ordinary tests
   independent of external provider access.
