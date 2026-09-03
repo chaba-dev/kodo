@@ -160,6 +160,14 @@ endpoint migration therefore requires an explicit code and allowlist update
 rather than risking an API key, bearer token, device code, or authorization
 code being forwarded to an unexpected destination.
 
+This policy is enforced and tested at every concrete transport boundary rather
+than assumed from one shared adapter. The initial transport inventory covers
+buffered Req and ReqLLM requests, Finch streaming, Req-based device
+authorization, polling, exchange and refresh, and the Codex-specific inference
+path. Adding or changing a provider transport requires updating this inventory
+and proving both exact-origin selection and redirect rejection before it can
+carry credentials.
+
 Validation is non-destructive and provider-specific. A transient validation
 failure does not expose or invalidate the credential. Kodo records a bounded
 status and safe error code, while the detailed provider error is redacted
@@ -511,6 +519,14 @@ current API key or OAuth access token and required decrypted account identifier
 cross into ReqLLM; refresh tokens, expiry, generation, and rotation state remain
 in Kodo. No request uses `System.put_env/2`, `Application.put_env/3`, ReqLLM's
 global key store, or a shared OAuth file.
+
+Transport contract tests deliberately configure sentinel provider environment
+keys, ReqLLM global credentials, and OAuth files while exercising each request
+path. A request with a scoped integration must send only that integration's
+operation-local credential. A request without one must fail before network
+admission instead of selecting any sentinel credential. Redirect tests make
+both same-origin and cross-origin destinations observable and assert that each
+transport issues no follow-up request and forwards no authorization material.
 
 Status pages and turn preflight query only non-secret integration metadata and
 batch all required role providers into one indexed query. Immediately before

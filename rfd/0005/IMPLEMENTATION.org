@@ -8,6 +8,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   OpenAI's published Codex source and record the public OAuth client identity,
   scopes, device and token endpoints, PKCE behavior, polling rules, expiry,
   token rotation, account identification, and client headers.
+- [ ] Inventory the concrete HTTP clients and request constructors used by
+  Codex device authorization, polling, exchange, refresh, buffered inference,
+  and streaming; record where exact origins, redirect behavior, and
+  request-local credentials are enforced.
 - [ ] Reproduce the complete device flow in a bounded Kodo live spike and
   verify ReqLLM's ~openai_codex~ provider with a Kodo originator for a text
   response, Kodo tool calls, structured output, and every reasoning effort
@@ -121,6 +125,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   redirects for every credential-bearing validation, inference, authorization,
   polling, exchange, and refresh request; classify every ~3xx~, including
   same-origin redirects, as provider unavailable without a follow-up request.
+- [ ] Maintain a transport security matrix covering buffered Req/ReqLLM calls,
+  Finch streaming, Req OAuth operations, and Codex-specific inference. Require
+  every new or changed transport to enforce exact origins, reject redirects,
+  and accept credentials only from the scoped operation-local value.
 - [ ] Add every provider secret field to Phoenix parameter filtering and test
   that filtered request logs, changeset errors, exception inspection, and
   LiveView events cannot expose credential material.
@@ -149,6 +157,12 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   before and after admission, forged and cross-user references, and
   application-level non-retention in process state and messages without
   asserting physical memory erasure.
+- [ ] Add contract tests for every transport and operation in the matrix. For
+  same-origin and cross-origin redirects, assert no follow-up request and no
+  forwarded authorization material. Configure sentinel provider environment
+  keys, ReqLLM global credentials, and OAuth files, then prove scoped requests
+  send only the user integration credential and missing integrations fail
+  before network admission without fallback.
 - [ ] Add table-driven tests for every allowed connection-validation pair,
   rejection of impossible pairs and payload combinations, each legal transition,
   generation fencing, invalid-to-valid and invalid-to-unavailable revalidation,
