@@ -120,6 +120,11 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Add every provider secret field to Phoenix parameter filtering and test
   that filtered request logs, changeset errors, exception inspection, and
   LiveView events cannot expose credential material.
+- [ ] Keep API keys out of LiveView socket assigns and rendered forms: accept
+  them only in a ~phx-submit~ event with no secret-field ~phx-change~, pass the
+  event value directly to the scoped encryption context, never echo it through
+  validation errors or diffs, and clear the browser input after a successful
+  save.
 - [ ] Add the credential-free security audit framework and API-key lifecycle
   events; permit internal actor and integration IDs only in audit records,
   never metric labels.
@@ -162,8 +167,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   balanced settings surfaces without changing generated authentication,
   confirmation, or sudo-mode behavior.
 - [ ] Add ~/integrations~ to the existing authenticated LiveView session and
-  browser pipeline; require a fresh server-side sudo check for API-key
-  submission or replacement and disconnection; preserve the intended action
+  browser pipeline; require a fresh server-side sudo check before displaying
+  and again when submitting an API-key form, replacing a credential, or
+  disconnecting; preserve only provider and intended action, never the key,
   across reauthentication; and implement the OpenAI Platform API-key provider
   card, contextual form, connection status, loading state, and accessible
   feedback.
@@ -203,6 +209,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   succeeds during outage, stale validation cannot overwrite a newer generation,
   permission-limited probes do not mark a key invalid, and no automatic path
   sends a billed model request.
+- [ ] Test that the API-key field is unavailable before sudo, has no
+  ~phx-change~, is never copied into socket assigns or rendered diffs, is
+  cleared after success, and must be re-entered if sudo expires at submission.
 - [ ] Emit and test credential-free audit events for OpenAI API-key submission,
   replacement, validation, Test confirmation/outcome, and disconnection through
   the Phase 1A audit framework.
@@ -320,7 +329,10 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Add LiveView selector tests for device-flow start, verification code,
   progress, expiry, completion, cancellation, and reauthorization states, plus
   post-sudo completion, ownership-checked cancellation, stale sockets, and
-  representative responsive browser checks.
+  representative responsive browser checks. Verify the short-lived device code
+  has an accessible Copy action, is retained only while needed to present the
+  active attempt, and disappears after every terminal state without entering
+  logs or telemetry.
 - [ ] Extend onboarding and missing-provider feedback for ChatGPT Subscription,
   and emit credential-free audit events for authorization start/completion and
   cancellation, refresh outcomes, reauthorization, and disconnection.

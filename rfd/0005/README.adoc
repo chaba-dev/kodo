@@ -225,6 +225,15 @@ provider contract supplies one. Kodo does not derive, persist, or display an
 API-key hash, suffix, or fingerprint, and never fingerprints an OAuth access or
 refresh token.
 
+API-key entry uses a secret input submitted only with the completed form; it
+does not use `phx-change`. The browser necessarily holds the value while the
+user pastes or types it, but LiveView never copies the key or submitted form
+parameters into socket assigns, renders them back in a diff, or includes them
+in a validation error. The submit handler passes the event value directly to
+the scoped encryption context. After a successful save, Kodo clears the browser
+input and offers no way to reveal or copy the saved key. A user who needs the
+key elsewhere must retain it through the provider's own issuance flow.
+
 OpenRouter is a provider in its own right rather than a transparent fallback
 for direct provider integrations. Models routed through OpenRouter use the
 OpenRouter integration and billing even when the underlying model was produced
@@ -630,8 +639,11 @@ or device reauthorization, and disconnecting an integration require sudo mode
 because they change access to a separately billed external account. Kodo checks
 recent authentication again in the server-side handler for each sensitive
 event rather than trusting a LiveView that was mounted while sudo mode was
-active. After reauthentication, Kodo returns the user to the intended provider
-action without requiring them to rediscover the affected integration.
+active. API-key forms are shown only after that check, before the user enters a
+secret. If reauthentication is nevertheless required at submission, Kodo
+preserves only the provider and intended action, never the key; the user must
+enter it again. After reauthentication, Kodo returns the user to that action
+without requiring them to rediscover the affected integration.
 
 An OAuth or device flow created while sudo mode was active may complete after
 that mode expires only while the same user-owned attempt remains active and its
@@ -699,9 +711,13 @@ replace, reconnect, or disconnect.
 Connection forms open within the provider's page context rather than placing
 four permanent secret inputs on the screen. Device authorization emphasizes
 the OpenAI-owned verification destination, the one-time code, remaining time,
-and a cancellable progress state. Success and failure feedback stays attached
-to the affected provider card and is also announced accessibly; transient
-loading must not shift unrelated cards or discard entered credentials.
+and a cancellable progress state. Because the short-lived code must be entered
+at the provider, it is an intentional display exception and has an accessible
+Copy action; Kodo removes it from the UI when the attempt completes, expires,
+or is cancelled. Success and failure feedback stays attached to the affected
+provider card and is also announced accessibly. Before submission, transient
+loading must not shift unrelated cards or discard the browser-held API key;
+after a successful submission, Kodo clears that input.
 
 == Interface sketches
 
