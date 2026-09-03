@@ -1,0 +1,131 @@
+:toc:
+
+= Rejected compatibility record: `gpt-5.4`, `alpha-v1`
+
+== Decision
+
+`gpt-5.4` is *not approved* for route changes between `openai` and
+`openai_codex` under Kodo's `alpha-v1` role contract. The live checks showed
+compatible behavior for the exercised capabilities, but the routes did not
+report the same exact model identity. Matching request selectors are therefore
+insufficient evidence under RFD 5.
+
+== Evidence
+
+This record was observed on 2026-09-03 with the dependency and source
+revisions pinned in link:CODEX_CONTRACT.adoc[the Codex contract investigation].
+The opt-in check is
+`test/e2e/openai_codex_contract_live_test.exs`. It passes credentials to
+ReqLLM operation-locally, preventing ReqLLM's OAuth-file fallback.
+Because ReqLLM 1.19.0 populates its public Codex response model from the
+requested selector, the test-only `Kodo.Test.OpenAICodexContractProbe` captures
+only `response.model` from the terminal provider SSE event immediately before
+ReqLLM decodes the unchanged response. The identities below therefore come
+from provider response payloads rather than a comparison with request input.
+
+[cols="1,2,2",options="header"]
+|===
+| Property | `openai` Platform route | `openai_codex` subscription route
+
+| Requested selector
+| `gpt-5.4`
+| `gpt-5.4`
+
+| Model identity returned by the route
+| `gpt-5.4-2026-03-05`
+| `gpt-5.4`
+
+| Billing credential
+| OpenAI Platform API key
+| ChatGPT OAuth access token plus account ID
+
+| Plain text
+| Passed
+| Passed with `originator: kodo`
+
+| Strict Kodo-shaped tool call
+| Passed with the canonical `read_file` schema
+| Passed with the canonical `read_file` schema
+
+| Function-result continuation
+| Passed
+| Passed
+
+| Strict review-shaped object output
+| Passed with `Kodo.Agent.ReviewResult.schema/0`
+| Passed with `Kodo.Agent.ReviewResult.schema/0`
+
+| Current mapping reasoning effort
+| Passed with no reasoning option
+| Passed with no reasoning option
+|===
+
+All current `alpha-v1` role mappings use Kodo's `none` reasoning setting. The
+adapter intentionally omits `reasoning_effort` for that setting, so no other
+effort is part of this record. A future mapping with a non-`none` effort needs
+new live evidence and a new compatibility record.
+
+The catalog advertises text and image input, tool calling, reasoning, object
+execution, and a 1,050,000-token context window for both resolved records. The
+live spike exercised text only; catalog modality and maximum-context metadata
+are not promoted to live compatibility evidence.
+
+As negative entitlement controls, the subscription route rejected
+`gpt-5.3-codex`, `gpt-5.2-codex`, and `gpt-5.1-codex-max` with HTTP 400 as not
+supported for Codex with a ChatGPT account. This demonstrates why LLMDB catalog
+presence cannot establish subscription availability.
+
+== Reproduction
+
+Create an isolated, ignored credential file through the published device flow:
+
+----
+mix run --no-start scripts/openai_codex_contract.exs authorize tmp/openai-codex-phase0.json
+----
+
+After approval, run the compatibility check in a new BEAM instance. The new
+process and file reload provide the Phase 0 control-plane restart simulation:
+
+----
+LIVE_CODEX_AUTH_FILE=tmp/openai-codex-phase0.json \
+  mix test test/e2e/openai_codex_contract_live_test.exs --include live_provider
+----
+
+The check also requires `OPENAI_API_KEY` for the separately billed Platform
+route. It is excluded by default and must remain an opt-in, externally billed
+test rather than a product or deployment feature flag. A complete run makes
+nine bounded model requests: four through Platform billing and five through
+the ChatGPT subscription route. Retries are disabled to avoid duplicate billed
+requests.
+
+Refresh and rerun a focused post-rotation inference check with:
+
+----
+mix run --no-start scripts/openai_codex_contract.exs refresh tmp/openai-codex-phase0.json
+LIVE_CODEX_AUTH_FILE=tmp/openai-codex-phase0.json \
+  mix test test/e2e/openai_codex_contract_live_test.exs:48 --include live_provider
+----
+
+The broader source-only, manually observed, deferred, and deliberately skipped
+checks are classified in the investigation's evidence-status table.
+
+== Boundary and diagnostics
+
+The supported result of Phase 0 is a no-go for cross-route switching, not an
+assertion that either provider route is generally unavailable. The standalone
+subscription route successfully handled the exercised ReqLLM calls. Kodo must
+continue treating `openai` and `openai_codex` as distinct provider and billing
+identities.
+
+A malformed bearer credential returned HTTP 401 and a malformed refresh token
+returned HTTP 401 with provider code `token_expired`; both require
+reauthorization rather than classification based on provider message text.
+Quota exhaustion was not present on the authorized account and was not
+manufactured by intentionally consuming a user's subscription. No durable
+quota-state behavior is approved by this record.
+
+The device authorization and refresh endpoint are upstream public-client
+dependencies, and the subscription integration remains Beta and without a
+claim of formal OpenAI support. Any changed endpoint, client identity, token
+shape, ReqLLM version, returned model identity, or `alpha-v1` capability
+contract invalidates this record and requires rerunning Phase 0.

@@ -4,31 +4,41 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 
 * Phase 0: Implement and verify the OpenAI Codex contract
 
-- [ ] Trace the current OpenAI Codex device authorization and refresh flow from
+- [X] Trace the current OpenAI Codex device authorization and refresh flow from
   OpenAI's published Codex source and record the public OAuth client identity,
   scopes, device and token endpoints, PKCE behavior, polling rules, expiry,
   token rotation, account identification, and client headers.
-- [ ] Inventory the concrete HTTP clients and request constructors used by
+- [X] Inventory the concrete HTTP clients and request constructors used by
   Codex device authorization, polling, exchange, refresh, buffered inference,
   and streaming; record where exact origins, redirect behavior, and
   request-local credentials are enforced.
-- [ ] Reproduce the complete device flow in a bounded Kodo live spike and
+- [X] Reproduce the complete device flow in a bounded Kodo live spike and
   verify ReqLLM's ~openai_codex~ provider with a Kodo originator for a text
   response, Kodo tool calls, structured output, and every reasoning effort
   required by current role mappings.
-- [ ] Record exact model identities available through both ~openai~ and
+- [X] Record exact model identities available through both ~openai~ and
   ~openai_codex~ and create versioned compatibility records by provider-neutral
   selector, source/destination routes, and role-contract version for tools,
   structured output, reasoning, context, and modalities; do not treat matching
   slugs, catalog fallback, or merely similar models as sufficient evidence.
-- [ ] Verify refresh-token rotation, control-plane restart recovery, quota
-  errors, revocation, and required reauthorization without using a shared OAuth
-  file.
-- [ ] Document the exact working contract, regression diagnostics, upstream
+- [X] Verify refresh-token rotation and control-plane restart recovery without
+  using a shared OAuth file; classify safe invalid-credential controls and stop
+  destructive quota exhaustion or rotated-token replay once the exact-model
+  candidate has already failed.
+- [X] Document the exact working contract, regression diagnostics, upstream
   public-client dependency, and Beta support boundary without claiming formal
   OpenAI support unless separately confirmed.
-- [ ] Treat opt-in live-provider and compatibility checks only as controls for
+- [X] Treat opt-in live-provider and compatibility checks only as controls for
   externally billed tests, not as deployment or product feature flags.
+
+The source trace, reviewed revisions, transport inventory, live procedure, and
+known ReqLLM gaps are recorded in [[file:CODEX_CONTRACT.adoc][the Codex contract
+investigation]]. The live ~gpt-5.4~ result is a
+[[file:COMPATIBILITY-gpt-5.4-alpha-v1.adoc][versioned rejected compatibility
+record]]: both routes passed the exercised ~alpha-v1~ behaviors, but they
+reported different exact model identities, so cross-route switching remains
+disabled. Destructive quota exhaustion and rotated-token replay were not
+manufactured after that no-go decision.
 
 * Phase 1A: Establish the credential security foundation
 
