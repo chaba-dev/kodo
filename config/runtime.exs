@@ -69,6 +69,44 @@ if config_env() == :dev do
 end
 
 if config_env() == :prod do
+  current_key_version =
+    case System.get_env("KODO_CREDENTIAL_ENCRYPTION_CURRENT_KEY_VERSION") do
+      version when is_binary(version) and version != "" -> version
+      _invalid -> raise "KODO_CREDENTIAL_ENCRYPTION_CURRENT_KEY_VERSION must be set"
+    end
+
+  encoded_key_ring =
+    System.get_env("KODO_CREDENTIAL_ENCRYPTION_KEYS") ||
+      raise "KODO_CREDENTIAL_ENCRYPTION_KEYS must be set to a JSON object of Base64 keys"
+
+  credential_encryption_keys =
+    with {:ok, encoded_keys} when is_map(encoded_keys) and map_size(encoded_keys) > 0 <-
+           Jason.decode(encoded_key_ring),
+         {:ok, keys} <-
+           Enum.reduce_while(encoded_keys, {:ok, %{}}, fn
+             {version, encoded_key}, {:ok, keys}
+             when is_binary(version) and version != "" and is_binary(encoded_key) ->
+               case Base.decode64(encoded_key) do
+                 {:ok, key} when byte_size(key) == 32 ->
+                   {:cont, {:ok, Map.put(keys, version, key)}}
+
+                 _invalid ->
+                   {:halt, :error}
+               end
+
+             _invalid_entry, _keys ->
+               {:halt, :error}
+           end) do
+      keys
+    else
+      _invalid ->
+        raise "KODO_CREDENTIAL_ENCRYPTION_KEYS must contain only named 32-byte Base64 keys"
+    end
+
+  config :kodo, Kodo.Integrations.CredentialEncryption,
+    current_key_version: current_key_version,
+    keys: credential_encryption_keys
+
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """
