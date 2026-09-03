@@ -181,11 +181,17 @@ read_rfd() {
     ' "${source}"
 }
 
-printf "%s%-4s  %-13s  %-35s  %s%s\n" "${color_bold}" "RFD" "State" "Title" "Labels" "${color_reset}"
-printf "%s%-4s  %-13s  %-35s  %s%s\n" "${color_dim}" "----" "-------------" "-----------------------------------" "--------------------" "${color_reset}"
-
 failures=0
 found=0
+rfd_width=4
+state_width=13
+tasks_width=5
+title_width=35
+row_rfds=()
+row_states=()
+row_tasks=()
+row_titles=()
+row_labels=()
 
 shopt -s nullglob
 entries=("${rfd_root}"/*)
@@ -221,6 +227,7 @@ for entry in "${entries[@]}"; do
 	implementations=()
 	[[ -f "${entry}/IMPLEMENTATION.org" ]] && implementations+=("${entry}/IMPLEMENTATION.org")
 	[[ -f "${entry}/IMPLEMENTATION.md" ]] && implementations+=("${entry}/IMPLEMENTATION.md")
+	task_summary="-"
 
 	if [[ "${#implementations[@]}" -eq 0 ]]; then
 		printf "%smissing implementation checklist%s: %s/IMPLEMENTATION.org or IMPLEMENTATION.md\n" "${color_red}" "${color_reset}" "${entry_name}" >&2
@@ -231,6 +238,16 @@ for entry in "${entries[@]}"; do
 	else
 		implementation="${implementations[0]}"
 		implementation_name="$(basename "${implementation}")"
+		read -r implementation_total implementation_completed < <(
+			awk '
+          /^[[:space:]]*[-+*][[:space:]]+\[[ xX]\][[:space:]]/ {
+            total++
+            if ($0 ~ /^[[:space:]]*[-+*][[:space:]]+\[[xX]\][[:space:]]/) completed++
+          }
+          END { printf "%d %d\n", total, completed }
+        ' "${implementation}"
+		)
+		task_summary="${implementation_completed}/${implementation_total}"
 
 		case "${implementation_name}" in
 		IMPLEMENTATION.org)
@@ -275,9 +292,41 @@ for entry in "${entries[@]}"; do
 	parser_errors="${remainder##*$'\t'}"
 	failures=$((failures + parser_errors))
 
-	state_field="$(printf '%-13s' "${state:-\(missing\)}")"
-	state_text="$(colorize_state "${state}" "${state_field}")"
-	printf "%-4s  %s  %-35s  %s\n" "${entry_name}" "${state_text}" "${title:-\(missing title\)}" "${labels:-\(missing labels\)}"
+	display_state="${state:-\(missing\)}"
+	display_title="${title:-\(missing title\)}"
+	display_labels="${labels:-\(missing labels\)}"
+	row_rfds+=("${entry_name}")
+	row_states+=("${display_state}")
+	row_tasks+=("${task_summary}")
+	row_titles+=("${display_title}")
+	row_labels+=("${display_labels}")
+	(( ${#entry_name} > rfd_width )) && rfd_width=${#entry_name}
+	(( ${#display_state} > state_width )) && state_width=${#display_state}
+	(( ${#task_summary} > tasks_width )) && tasks_width=${#task_summary}
+	(( ${#display_title} > title_width )) && title_width=${#display_title}
+done
+
+printf -v rfd_rule '%*s' "${rfd_width}" ''
+printf -v state_rule '%*s' "${state_width}" ''
+printf -v tasks_rule '%*s' "${tasks_width}" ''
+printf -v title_rule '%*s' "${title_width}" ''
+rfd_rule="${rfd_rule// /-}"
+state_rule="${state_rule// /-}"
+tasks_rule="${tasks_rule// /-}"
+title_rule="${title_rule// /-}"
+
+printf "%s%-*s  %-*s  %*s  %-*s  %s%s\n" "${color_bold}" \
+	"${rfd_width}" "RFD" "${state_width}" "State" "${tasks_width}" "Tasks" \
+	"${title_width}" "Title" "Labels" "${color_reset}"
+printf "%s%s  %s  %s  %s  %s%s\n" "${color_dim}" "${rfd_rule}" \
+	"${state_rule}" "${tasks_rule}" "${title_rule}" "--------------------" "${color_reset}"
+
+for index in "${!row_rfds[@]}"; do
+	state_field="$(printf '%-*s' "${state_width}" "${row_states[index]}")"
+	state_text="$(colorize_state "${row_states[index]}" "${state_field}")"
+	printf "%-*s  %s  %*s  %-*s  %s\n" "${rfd_width}" "${row_rfds[index]}" \
+		"${state_text}" "${tasks_width}" "${row_tasks[index]}" \
+		"${title_width}" "${row_titles[index]}" "${row_labels[index]}"
 done
 
 if [[ "${found}" -eq 0 ]]; then
