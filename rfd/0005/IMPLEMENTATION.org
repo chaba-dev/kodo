@@ -33,6 +33,12 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   credential generation, and encryption-key version. Treat this as a fresh
   encrypted schema with no plaintext, environment-key, or legacy integration
   import path.
+- [ ] Enforce the connection-validation matrix through context transition
+  functions and database constraints where practical: only
+  ~disconnected+unverified~ without a payload,
+  ~reauthorization_required+unverified~ with the provisional payload, and
+  ~connected~ with any validation state. Only connected credentials not marked
+  invalid admit new provider requests.
 - [ ] Enforce ~ON DELETE CASCADE~ from users to integrations; account deletion
   must not depend on a successful provider call.
 - [ ] Add authenticated encryption with unique nonces, versioned keys, and AEAD
@@ -50,6 +56,11 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   connecting, replacing, validating, and disconnecting credentials without
   accepting browser-supplied ownership; disconnect clears the encrypted payload
   but preserves the row, and every credential change advances its generation.
+- [ ] Implement explicit generation-fenced transitions for connect, replace,
+  validation success, confirmed invalidity, transient validation failure,
+  revalidation, disconnect, refresh ~invalid_grant~, delayed refresh success,
+  and OAuth success. Failed or cancelled authorization attempts terminate the
+  attempt without changing the integration's prior connection-validation pair.
 - [ ] Add a typed, non-secret ~Kodo.LLM~ integration reference containing
   integration and provider identity. Require authenticated scope plus that
   reference in text/tool and structured-output callbacks, and update primary,
@@ -129,6 +140,11 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   before and after admission, forged and cross-user references, and
   application-level non-retention in process state and messages without
   asserting physical memory erasure.
+- [ ] Add table-driven tests for every allowed connection-validation pair,
+  rejection of impossible pairs and payload combinations, each legal transition,
+  generation fencing, invalid-to-valid and invalid-to-unavailable revalidation,
+  and request admission for connected unverified or unavailable credentials but
+  not invalid credentials.
 - [ ] Do not expose a credential form or permit a production provider request
   until every Phase 1A security boundary and test is complete.
 
@@ -168,6 +184,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Add LiveView selector tests for the settings shell, section navigation,
   OpenAI provider card, and contextual API-key form, plus representative desktop,
   tablet, and narrow-mobile browser checks for the sketched layouts.
+- [ ] Render connection state before validation state and show validation only
+  for connected integrations; add selector coverage proving the UI cannot
+  display impossible combinations such as disconnected plus valid.
 - [ ] Keep provider connection separate from routing changes; when no usable
   mapping exists, present one provider-compatible role preset with explicit
   billing paths and apply it only after "Use recommended models" confirmation.

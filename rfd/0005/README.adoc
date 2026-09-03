@@ -353,11 +353,49 @@ Kodo cannot do so, but does not promise provider-side revocation.
 
 Connection and validation are separate state axes. Connection is one of
 `disconnected`, `connected`, or `reauthorization_required`. Validation is one
-of `unverified`, `valid`, `invalid`, or `unavailable`. Connecting, replacing,
-or reauthorizing stores a credential, sets connection to `connected`, resets
-validation to `unverified`, and advances the credential generation.
-Disconnecting clears the encrypted payload, sets connection to `disconnected`,
-and advances the generation while preserving the integration row.
+of `unverified`, `valid`, `invalid`, or `unavailable`. Their valid combinations
+and request behavior are:
+
+[cols="1,1,1,2", options="header"]
+|===
+| Connection | Validation | Encrypted payload | New provider requests
+
+| `disconnected`
+| `unverified` only
+| absent
+| blocked
+
+| `connected`
+| any validation state
+| present
+| allowed except when validation is `invalid`
+
+| `reauthorization_required`
+| `unverified` only
+| retained provisionally
+| blocked
+|===
+
+Context transition functions enforce this matrix, supplemented by database
+constraints where practical. Connecting or replacing a credential sets
+`connected` plus `unverified` and advances the credential generation. A
+generation-matching validation success produces `connected` plus `valid`; a
+confirmed invalid or revoked key produces `connected` plus `invalid` without
+clearing its payload; and a transient validation failure produces `connected`
+plus `unavailable`, which remains usable. Explicit revalidation may move a
+generation-matching invalid credential to `valid` or `unavailable` without
+requiring replacement.
+
+Disconnecting clears the encrypted payload and validation metadata, sets
+`disconnected` plus `unverified`, and advances the generation while preserving
+the integration row. Refresh `invalid_grant` sets
+`reauthorization_required` plus `unverified` while retaining the provisional
+source-generation payload. A delayed generation-matching refresh success may
+install its refreshed payload as `connected` plus `unverified` and advance the
+generation. Successful OAuth authorization likewise installs the payload as
+`connected` plus `unverified` and advances the generation. A failed or
+cancelled authorization attempt terminates only that attempt and leaves the
+integration's prior connection-validation pair unchanged.
 
 An authentication probe sets validation to `valid` only on success or to
 `invalid` only on a confirmed authentication failure. Network errors, rate
@@ -366,6 +404,10 @@ credential or blocking inference. Quota and model-entitlement errors remain
 request outcomes. Every asynchronous validation or provider-derived status
 update compares the credential generation it read so it cannot overwrite a
 replacement, reconnection, or disconnection.
+
+The integrations UI gives connection state precedence and displays validation
+only for a connected integration. It therefore never presents impossible
+combinations such as disconnected plus valid.
 
 Credentials use authenticated encryption with a unique nonce per write. API
 keys, access and refresh tokens, and provider account or workspace identifiers
