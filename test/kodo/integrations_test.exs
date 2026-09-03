@@ -252,6 +252,154 @@ defmodule Kodo.IntegrationsTest do
       assert {:ok, current} = Integrations.get_integration(scope, integration.id)
       assert current.connection_status == "connected"
     end
+
+    test "admits exactly one of two replacements at the same generation", %{scope: scope} do
+      assert {:ok, integration} = connect(scope)
+      supervisor = start_supervised!(Task.Supervisor)
+      parent = self()
+
+      tasks =
+        for suffix <- ["first", "second"] do
+          Task.Supervisor.async_nolink(supervisor, fn ->
+            send(parent, {:replacement_ready, self()})
+
+            receive do
+              :replace ->
+                Integrations.replace_credentials(
+                  scope,
+                  integration.id,
+                  integration.credential_generation,
+                  %{"api_key" => "replacement-#{suffix}"}
+                )
+            end
+          end)
+        end
+
+      for task <- tasks do
+        task_pid = task.pid
+        assert_receive {:replacement_ready, ^task_pid}
+        Ecto.Adapters.SQL.Sandbox.allow(Repo, self(), task.pid)
+      end
+
+      Enum.each(tasks, &send(&1.pid, :replace))
+      results = Enum.map(tasks, &Task.await/1)
+
+      assert Enum.count(results, &match?({:ok, _integration}, &1)) == 1
+
+      assert Enum.count(results, &(&1 == {:error, :stale_credential_generation})) == 1
+
+      assert {:ok, current} = Integrations.get_integration(scope, integration.id)
+      assert current.credential_generation == integration.credential_generation + 1
+    end
+
+    test "delayed credential and validation results cannot undo disconnection", %{scope: scope} do
+      assert {:ok, api_integration} = connect(scope)
+      api_generation = api_integration.credential_generation
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(scope, api_integration.id, api_generation)
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.replace_credentials(
+                 scope,
+                 api_integration.id,
+                 api_generation,
+                 %{"api_key" => "delayed"}
+               )
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.validation_invalid(scope, api_integration.id, api_generation)
+
+      oauth = oauth_integration(scope)
+
+      assert {:ok, oauth} =
+               Integrations.oauth_succeeded(scope, oauth.id, 0, %{
+                 "access_token" => "access",
+                 "refresh_token" => "refresh"
+               })
+
+      oauth_generation = oauth.credential_generation
+      assert {:ok, _disconnected} = Integrations.disconnect(scope, oauth.id, oauth_generation)
+
+      delayed_payload = %{"access_token" => "delayed", "refresh_token" => "delayed"}
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.oauth_succeeded(
+                 scope,
+                 oauth.id,
+                 oauth_generation,
+                 delayed_payload
+               )
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.refresh_succeeded(
+                 scope,
+                 oauth.id,
+                 oauth_generation,
+                 delayed_payload
+               )
+
+      assert {:ok, current} = Integrations.get_integration(scope, oauth.id)
+      assert current.connection_status == "disconnected"
+      assert is_nil(current.encrypted_credentials)
+    end
+
+    test "deletion after credential lookup cannot recreate integration state", %{scope: scope} do
+      assert {:ok, integration} = connect(scope)
+      Repo.delete!(scope.user)
+
+      assert {:error, :integration_not_found} =
+               Integrations.replace_credentials(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"api_key" => "late-replacement"}
+               )
+
+      refute Repo.get(Integration, integration.id)
+    end
+
+    test "rejects validation and refresh transitions from illegal connection states", %{
+      scope: scope
+    } do
+      oauth = oauth_integration(scope)
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.validation_succeeded(scope, oauth.id, 0)
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.refresh_succeeded(scope, oauth.id, 0, %{
+                 "access_token" => "access",
+                 "refresh_token" => "refresh"
+               })
+
+      assert {:ok, connected} =
+               Integrations.oauth_succeeded(scope, oauth.id, 0, %{
+                 "access_token" => "access",
+                 "refresh_token" => "refresh"
+               })
+
+      assert {:ok, reauthorization} =
+               Integrations.refresh_invalid_grant(
+                 scope,
+                 connected.id,
+                 connected.credential_generation
+               )
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.validation_succeeded(
+                 scope,
+                 reauthorization.id,
+                 reauthorization.credential_generation
+               )
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.refresh_invalid_grant(
+                 scope,
+                 reauthorization.id,
+                 reauthorization.credential_generation
+               )
+    end
   end
 
   defp connect(scope) do
