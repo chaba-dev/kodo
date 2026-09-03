@@ -1,0 +1,323 @@
+:toc:
+
+= OpenAI Codex contract investigation
+
+This document records the source trace for RFD 5 Phase 0. It is an
+implementation input, not a statement of formal OpenAI support. Facts about
+the published Codex client are source-evidenced; facts about account
+entitlement, server behavior, and model compatibility remain unverified until
+the live compatibility checks below pass.
+
+== Reviewed revisions
+
+The trace was performed on 2026-09-03 against these immutable revisions:
+
+* OpenAI Codex
+  https://github.com/openai/codex/tree/1d6727c0b52316515bfbf5dea578374bafb4d898[`1d6727c0b52316515bfbf5dea578374bafb4d898`]
+* ReqLLM
+  https://github.com/agentjido/req_llm/tree/f880edc0931a5dc4737c2352fac2dee288f3b601[`v1.19.0` at `f880edc0931a5dc4737c2352fac2dee288f3b601`]
+* LLMDB
+  https://github.com/agentjido/llmdb/tree/a8ef74cb3983dffac184f50f79c66d059a92f22d[`2026.7.5` at `a8ef74cb3983dffac184f50f79c66d059a92f22d`]
+
+Kodo pins ReqLLM `1.19.0` and LLMDB `2026.7.5` in `mix.lock`. Any dependency
+upgrade or upstream contract change requires repeating this trace and the live
+checks. Branch names and rolling model aliases are not compatibility evidence.
+
+== Published device authorization contract
+
+=== Client and endpoints
+
+The published public client ID is
+`app_EMoamEEZ73f0CkXaXp7hrann`. Codex allows an application-server override,
+but Kodo must use only the reviewed public identity unless a later contract
+review explicitly changes it. The source is
+https://github.com/openai/codex/blob/1d6727c0b52316515bfbf5dea578374bafb4d898/codex-rs/login/src/auth/manager.rs[`CLIENT_ID` and `oauth_client_id`].
+
+For the default issuer `https://auth.openai.com`, device authorization uses:
+
+[cols="1,2,2",options="header"]
+|===
+| Operation | Method and exact URL | Request
+
+| Create a device authorization
+| `POST https://auth.openai.com/api/accounts/deviceauth/usercode`
+| JSON containing `client_id`
+
+| Display verification destination
+| `https://auth.openai.com/codex/device`
+| Kodo displays this fixed URL; it does not navigate automatically
+
+| Poll authorization
+| `POST https://auth.openai.com/api/accounts/deviceauth/token`
+| JSON containing `device_auth_id` and `user_code`
+
+| Exchange authorization code
+| `POST https://auth.openai.com/oauth/token`
+| Form containing `grant_type=authorization_code`, `code`,
+  `redirect_uri=https://auth.openai.com/deviceauth/callback`, `client_id`, and
+  `code_verifier`
+
+| Refresh tokens
+| `POST https://auth.openai.com/oauth/token`
+| JSON containing `client_id`, `grant_type=refresh_token`, and `refresh_token`
+|===
+
+The source of the device paths, payloads, redirect URI, and 15-minute local
+deadline is
+https://github.com/openai/codex/blob/1d6727c0b52316515bfbf5dea578374bafb4d898/codex-rs/login/src/device_code_auth.rs[`device_code_auth.rs`].
+The exchange contract is in
+https://github.com/openai/codex/blob/1d6727c0b52316515bfbf5dea578374bafb4d898/codex-rs/login/src/server.rs[`exchange_code_for_tokens/6`].
+
+The device-code requests do not send a `scope` parameter. The server controls
+the authorization represented by the returned code and tokens. The separate
+browser authorization flow requests
+`openid profile email offline_access api.connectors.read
+api.connectors.invoke`, but those browser-flow scopes are not evidence that the
+device endpoint accepts or requires a client-supplied scope. Kodo must test the
+device flow as published rather than copying the browser query parameters.
+
+=== PKCE, polling, and expiry
+
+The device poll response supplies `authorization_code`, `code_challenge`, and
+`code_verifier`. Codex does not generate PKCE values locally for this flow; it
+passes the returned verifier to the token exchange. This differs from the
+browser flow, which generates a verifier from 64 random bytes and computes
+`BASE64URL_NO_PAD(SHA256(verifier))` for an S256 challenge. See
+https://github.com/openai/codex/blob/1d6727c0b52316515bfbf5dea578374bafb4d898/codex-rs/login/src/pkce.rs[`generate_pkce`].
+
+The user-code response returns `interval` as a JSON string. Codex parses it as
+seconds and applies no local default, minimum, or progressive backoff. Polling
+has these rules:
+
+* any `2xx` response is decoded as the authorization-code response;
+* `403` and `404` mean retry after the supplied interval;
+* every other HTTP status, transport failure, or decode failure is terminal;
+* polling stops after a local maximum of 15 minutes, and the final sleep is
+  capped by the remaining time.
+
+The source does not establish the provider-side code lifetime or semantic
+error names for `403` and `404`. Kodo should persist the earlier of its bounded
+local deadline and any provider deadline added to the response contract.
+
+=== Token fields, account identity, and refresh
+
+The initial exchange requires `id_token`, `access_token`, and `refresh_token`
+response fields represented as strings. The ID token must subsequently decode
+for persistence; the exchange decoder does not separately reject empty access
+or refresh token strings. Codex extracts these fields from the
+`https://api.openai.com/auth` ID-token claim:
+
+* `chatgpt_account_id` (the workspace/account identity sent with inference);
+* `chatgpt_user_id`, falling back to `user_id`;
+* `chatgpt_plan_type`;
+* `chatgpt_account_is_fedramp`.
+
+Email comes from the top-level `email` claim and falls back to
+`https://api.openai.com/profile.email`. The claim decoding is implemented in
+https://github.com/openai/codex/blob/1d6727c0b52316515bfbf5dea578374bafb4d898/codex-rs/login/src/token_data.rs[`token_data.rs`].
+This path decodes JWT claims; it is not evidence of local signature,
+issuer, or audience verification. Kodo treats provider-returned account and
+workspace identifiers as secret payload data and does not use decoded claims
+as an authorization boundary.
+
+Refresh responses contain optional `id_token`, `access_token`, and
+`refresh_token` fields. A returned value replaces its prior value; an omitted
+value preserves the prior value. Therefore the client supports, but does not
+prove, server-side refresh-token rotation. Successful persistence advances
+`last_refresh` even when some token fields are omitted.
+
+Codex refreshes proactively when a decodable access-token expiration is within
+five minutes. If expiration cannot be decoded, it falls back to an eight-day
+`last_refresh` age. A `401`, HTTP `400` with `invalid_grant`, or the backend
+codes `refresh_token_expired`, `refresh_token_reused`, and
+`refresh_token_invalidated` is permanent. Other refresh failures are
+transient. Inference `401` recovery performs at most one storage reload and one
+authority refresh. Kodo will own equivalent generation-fenced persistence and
+must not use Codex's file store.
+
+The server's actual rotation policy, access-token lifetime, and revocation
+behavior require live verification.
+
+=== Inference identity and headers
+
+The published Codex client applies `originator` and a generated `User-Agent` as
+default headers. Its default originator is `codex_cli_rs`, while callers may
+set a valid process or thread-specific value. ChatGPT bearer authentication
+adds:
+
+* `Authorization: Bearer <access token>`;
+* `ChatGPT-Account-ID: <account/workspace ID>`;
+* `X-OpenAI-Fedramp: true` for a FedRAMP account.
+
+Kodo's intended originator is `kodo`; it must never impersonate
+`codex_cli_rs`. Whether a Kodo-specific `User-Agent` is required or accepted is
+a live-contract question. Sources:
+
+* https://github.com/openai/codex/blob/1d6727c0b52316515bfbf5dea578374bafb4d898/codex-rs/login/src/auth/default_client.rs[`default_client.rs`]
+* https://github.com/openai/codex/blob/1d6727c0b52316515bfbf5dea578374bafb4d898/codex-rs/model-provider/src/bearer_auth_provider.rs[`BearerAuthProvider`]
+
+== HTTP transport inventory
+
+=== Published Codex client
+
+[cols="1,2,2,3",options="header"]
+|===
+| Operation | Client construction | Credentials | Redirect and origin behavior
+
+| Device authorization and polling
+| `create_raw_auth_client` once per issuer-derived operation
+| Device authorization ID and user code in JSON
+| The reviewed issuer selects the route, then fixed paths are derived from it.
+  Request logging is disabled. The HTTP builder defaults to following
+  redirects; no call-site override disables them.
+
+| Authorization-code exchange
+| `create_raw_auth_client` for the issuer
+| Authorization code and PKCE verifier in a form body
+| Fixed issuer-derived token URL; request logging disabled; redirects remain
+  enabled by the client default.
+
+| Token refresh
+| `create_default_auth_client` for the refresh endpoint
+| Refresh token in JSON
+| Exact default URL exists in source, but an environment override exists and
+  redirects remain enabled. Default Codex headers and cookie storage apply.
+
+| Buffered inference and HTTP SSE
+| `ModelClient::build_api_transport` via the route-aware HTTP client factory
+| Bearer and account headers from the request's auth provider
+| The initial endpoint selects a concrete direct or proxy route, but the fixed
+  client then follows redirects using reqwest's default behavior. It does not
+  use `RouteAwareClientPool`, which can reselect routes and strips sensitive
+  headers only when scheme, host, or effective port changes.
+
+| WebSocket inference
+| `ApiWebSocketResponsesClient` through the HTTP client factory
+| Bearer and account headers on the handshake
+| Endpoint-aware handshake. No RFD-compatible reject-all-redirect policy is
+  established by the reviewed call site.
+|===
+
+The builder default is evidenced by
+https://github.com/openai/codex/blob/1d6727c0b52316515bfbf5dea578374bafb4d898/codex-rs/http-client/src/client_builder.rs[`HttpClientBuilder`].
+Codex's redirect policy is less strict than RFD 5. Kodo must reject every
+redirect, including same-origin redirects, and must enforce exact HTTPS
+origins at each credential-bearing transport rather than inherit upstream
+behavior.
+
+=== ReqLLM 1.19.0
+
+ReqLLM's `openai_codex` provider uses
+`POST https://chatgpt.com/backend-api/codex/responses` by default. It accepts an
+operation-local `access_token` and `chatgpt_account_id`, with top-level options
+taking precedence over `provider_options`. It then sends `Authorization`,
+`ChatGPT-Account-ID`, `originator`, and `content-type`. It defaults the
+originator to `pi`; Kodo must explicitly set `kodo`. ReqLLM does not set a
+Codex-specific `User-Agent`.
+
+ReqLLM supports three inference paths:
+
+* buffered Req, which asks the server for SSE and assembles the complete
+  response;
+* Finch HTTP/SSE with `openai-beta: responses=experimental`;
+* optional WebSocket streaming with
+  `openai-beta: responses_websockets=2026-02-06`.
+
+The provider forces `store: false`, `stream: true`, and
+`include: ["reasoning.encrypted_content"]`; moves system messages into
+`instructions`; removes output-token limits; and drops `previous_response_id`
+when resuming with a function result. It implements strict JSON-schema or
+strict-tool object output through the shared OpenAI encoder.
+
+The implementation is
+https://github.com/agentjido/req_llm/blob/f880edc0931a5dc4737c2352fac2dee288f3b601/lib/req_llm/providers/openai_codex.ex[`ReqLLM.Providers.OpenAICodex`].
+
+ReqLLM does not implement device authorization. If no request-local access
+token is present, it searches explicit options, application configuration,
+`REQ_LLM_OAUTH_FILE`, `REQ_LLM_AUTH_FILE`, and working-directory OAuth files.
+It can refresh and rewrite that shared file. Kodo must bypass this fallback by
+always supplying its scoped operation-local access token and account ID; Kodo
+retains the refresh token and owns refresh persistence.
+
+ReqLLM's refresh implementation differs materially from the reviewed Codex
+client: it sends form data, requires `access_token`, `refresh_token`, and
+numeric `expires_in` in every successful response, and permits arbitrary Req
+HTTP overrides. It has no exact-origin or reject-all-redirect enforcement.
+Kodo must not delegate durable refresh to this implementation without first
+reconciling the live provider contract.
+
+Neither buffered Req, Finch SSE, WebSocket, nor ReqLLM refresh currently proves
+RFD 5's exact-origin and reject-all-redirect requirements. ReqLLM also accepts
+a caller-supplied inference `base_url`. These are blocking gaps for production,
+not properties to inherit into Kodo's credential resolver.
+
+== Compatibility evidence status
+
+LLMDB's OpenAI catalog contains Codex-named model records, and ReqLLM rewrites
+their execution provider to `openai_codex`. Those records are derived from the
+OpenAI catalog and are not evidence that a ChatGPT subscription exposes the
+same exact model, immutable snapshot, capabilities, or reasoning values as the
+Platform route.
+
+No `openai` to `openai_codex` compatibility record is approved yet. A record
+may be created only after one exact provider-neutral selector passes both
+routes for the same role-contract version. It must capture:
+
+* exact source and destination model IDs returned by each route;
+* whether the selector is immutable or a rolling alias;
+* tools and continuation behavior;
+* native or strict-tool structured output, as applicable;
+* every reasoning effort used by the mapping;
+* context requirements and input modalities;
+* observation time, dependency revisions, and live-check evidence.
+
+The current Kodo `alpha-v1` contracts require text input and tool calling for
+all roles, at least 100,000 context tokens for primary and 30,000 for search
+and review, and object output for review. Current role mappings use reasoning
+`none`; future mappings must separately verify every configured effort.
+
+== Live compatibility spike
+
+The remaining Phase 0 spike requires an explicitly authorized ChatGPT test
+account. It must run through Kodo's eventual scoped integration boundary, not a
+shared Codex or ReqLLM OAuth file. Do not commit or attach tokens, device codes,
+authorization codes, account IDs, raw provider responses, or secret-bearing
+logs.
+
+For each exact candidate selector, record only bounded, credential-free
+outcomes for:
+
+. device authorization and token exchange;
+. one plain text response with `originator: kodo`;
+. a tool call and function-result continuation;
+. review-role object output;
+. each reasoning effort used by a current candidate mapping;
+. a control-plane restart between durable token storage and inference;
+. refresh with and without a replacement refresh token;
+. subscription quota exhaustion, revocation, and `invalid_grant`;
+. same-origin and cross-origin redirect canaries proving no follow-up request
+  and no forwarded authorization material.
+
+This live work remains incomplete. In particular, source and catalog inspection
+cannot establish subscription entitlement, accepted Kodo headers, model
+identity equivalence, server token rotation, quota semantics, or revocation
+behavior.
+
+== Phase 0 implementation consequences
+
+The trace establishes these requirements for later implementation:
+
+* Kodo needs its own device authorization, polling, exchange, refresh, and
+  generation-fenced durable lifecycle; ReqLLM supplies inference encoding, not
+  that lifecycle.
+* Kodo must centralize exact origins while enforcing redirect rejection in
+  every concrete transport. Merely passing ReqLLM options is insufficient for
+  Finch and WebSocket paths.
+* The scoped resolver must always pass `access_token`,
+  `chatgpt_account_id`, `auth_mode: :oauth`, and
+  `codex_originator: "kodo"` operation-locally. It must not pass the refresh
+  token or enable OAuth-file fallback.
+* ReqLLM exceptions and stream events require bounded redaction before any
+  persistence, logging, telemetry, or browser rendering.
+* Kodo cannot enable an `openai`/`openai_codex` route switch until a versioned
+  live compatibility record exists for the exact selector and role contract.
