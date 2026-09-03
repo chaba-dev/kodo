@@ -746,14 +746,17 @@ state.
 
 Kodo has no production users or stored provider integrations to migrate. The
 integration schema, request-local credential boundary, missing-integration UX,
-and removal of ReqLLM's environment-key path therefore land in the same phase.
-There is no deployment fallback, automatic import, or implicit owner for an
-existing environment key.
+and removal of ReqLLM's environment-key path therefore form one pre-release
+cutover spanning Phases 1A and 1B. Phase 1A may deploy to pre-production with
+provider traffic disabled; Phase 1B enables the first usable integration path
+and missing-provider guidance. There is no deployment fallback, automatic
+import, or implicit owner for an existing environment key.
 
 Development, evaluation, and opt-in live-provider runs require an explicit test
 user whose encrypted integrations are provisioned through the Kodo context.
-Ordinary tests use fake adapters and fake typed credentials without external
-provider access. Neither path adds environment lookup or owner inference to the
+Ordinary tests use fake adapters plus scoped integration fixtures and non-secret
+references without external provider access. Neither path adds environment
+lookup, caller-supplied plaintext credentials, or owner inference to the
 production adapter.
 
 At the end of this RFD, no LLM API key or OAuth token is read from deployment
@@ -850,8 +853,10 @@ provider details inside the integration boundary.
 
 == Phased delivery
 
-Each phase is independently reviewable and deployable. Detailed progress is
-tracked in link:IMPLEMENTATION.org[RFD 5 implementation checklist].
+Phases 0 through 3 are independently reviewable and deployable to
+pre-production. Production launch requires Phase 4 as well as every preceding
+phase. Detailed progress is tracked in
+link:IMPLEMENTATION.org[RFD 5 implementation checklist].
 
 === Phase 0: Implement and verify the Codex contract
 
@@ -879,30 +884,34 @@ request until the complete foundation passes.
 Add the shared responsive settings shell, improve the existing Account
 presentation without changing its behavior, and ship the authenticated
 integration page with OpenAI Platform API-key connection first. Wire model
-resolution, explicit live-test credentials, validation, lifecycle audit events,
-and request-local ReqLLM options through the Phase 1A boundary without a
-provider-key environment fallback.
+resolution, explicit live-test integrations, validation, lifecycle audit events,
+baseline missing-provider guidance, and request-local ReqLLM options through
+the Phase 1A boundary without a provider-key environment fallback.
 
 === Phase 2: Add Anthropic and OpenRouter
 
 Reuse the API-key lifecycle for Anthropic and OpenRouter, add provider-specific
-validation and errors, and verify model-role mappings can use several providers
-in one session without sharing credentials or billing paths.
+validation, errors, audit events, and missing-provider guidance, and verify
+model-role mappings can use several providers in one session without sharing
+credentials or billing paths.
 
 === Phase 3: Add ChatGPT device authorization beta
 
 Add durable user-scoped authorization attempts, asynchronous polling, encrypted
 OAuth persistence, refresh leases, rotated-token updates, reauthorization, and
-the ChatGPT Subscription billing identity. Require Phase 0's compatibility
-suite to pass, retain the Beta label, and treat later failures as regressions
-that leave affected integrations unavailable while Kodo fixes the contract.
+the ChatGPT Subscription billing identity, settings and missing-provider UX,
+audit events, and exact-model route changes. Require Phase 0's compatibility
+suite to pass through the production path before shipping, retain the Beta
+label, and treat later failures as regressions that leave affected integrations
+unavailable while Kodo fixes the contract.
 
 === Phase 4: Harden operations
 
 Complete operational hardening, exercise multi-node refresh and key rotation,
-and publish operator guidance. All Phase 4 requirements are production-launch
-requirements even though they follow provider implementation. The encryption
-key remains the only integration-related boot secret.
+verify audit and telemetry completeness, and publish operator guidance. All
+Phase 4 requirements are production-launch requirements even though they follow
+provider implementation. The encryption key remains the only
+integration-related boot secret.
 
 == Implementation
 

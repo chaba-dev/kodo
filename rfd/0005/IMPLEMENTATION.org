@@ -23,9 +23,6 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Document the exact working contract, regression diagnostics, upstream
   public-client dependency, and Beta support boundary without claiming formal
   OpenAI support unless separately confirmed.
-- [ ] Ship ChatGPT Subscription as a Beta without a deployment feature flag
-  once its implementation and required compatibility suite pass; surface later
-  contract regressions as actionable integration-unavailable errors.
 - [ ] Treat opt-in live-provider and compatibility checks only as controls for
   externally billed tests, not as deployment or product feature flags.
 
@@ -36,9 +33,8 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   credential generation, and encryption-key version. Treat this as a fresh
   encrypted schema with no plaintext, environment-key, or legacy integration
   import path.
-- [ ] Enforce ~ON DELETE CASCADE~ from users to integrations and from each
-  integration to authorization attempts and claim state; account deletion must
-  not depend on a successful provider call.
+- [ ] Enforce ~ON DELETE CASCADE~ from users to integrations; account deletion
+  must not depend on a successful provider call.
 - [ ] Add authenticated encryption with unique nonces, versioned keys, and AEAD
   associated data binding integration ID, user ID, provider, authentication
   type, and payload format version; keep provider account and workspace
@@ -151,10 +147,12 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   confirmation, or sudo-mode behavior.
 - [ ] Add ~/integrations~ to the existing authenticated LiveView session and
   browser pipeline; require a fresh server-side sudo check for API-key
-  submission or replacement, authorization start, and disconnection; preserve
-  the intended action across reauthentication; and implement the OpenAI
-  Platform API-key provider card, contextual form, connection status, loading
-  state, and accessible feedback.
+  submission or replacement and disconnection; preserve the intended action
+  across reauthentication; and implement the OpenAI Platform API-key provider
+  card, contextual form, connection status, loading state, and accessible
+  feedback.
+- [ ] Add baseline onboarding and model-settings feedback that links users to
+  the OpenAI integration required by their selected role mapping.
 - [ ] Save OpenAI API keys encrypted as ~unverified~ before asynchronously
   probing ~GET /v1/models~ in a bounded generation-fenced task. Mark only a
   confirmed authentication rejection invalid; classify network, TLS, timeout,
@@ -167,33 +165,28 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   already-admitted or sent provider operation and its billing may continue, and
   link to provider-side revocation when Kodo cannot revoke the credential
   directly.
-- [ ] Permit an active generation-fenced authorization attempt to complete
-  after sudo expiry, require authenticated ownership but not fresh sudo for
-  cancellation, and keep status viewing, automatic validation, and ordinary
-  inference outside sudo mode.
 - [ ] Add LiveView selector tests for the settings shell, section navigation,
-  provider cards, contextual forms, and device-flow states, plus representative
-  desktop, tablet, and narrow-mobile browser checks for the sketched layouts.
+  OpenAI provider card, and contextual API-key form, plus representative desktop,
+  tablet, and narrow-mobile browser checks for the sketched layouts.
 - [ ] Keep provider connection separate from routing changes; when no usable
   mapping exists, present one provider-compatible role preset with explicit
   billing paths and apply it only after "Use recommended models" confirmation.
-- [ ] Use an explicit billing confirmation rather than sudo mode for a
-  same-model execution-route change during an active session.
-- [ ] Test that connecting another provider leaves a usable mapping unchanged,
+- [ ] Test that connecting OpenAI leaves an existing usable mapping unchanged,
   confirmed presets affect only defaults and new sessions, and disconnecting a
   required integration derives an unavailable mapping without rewriting or
   silently rerouting existing sessions.
 - [ ] Test concurrent users with different OpenAI keys, key replacement during
   a session, missing integration behavior, catalog aliases, inline model specs,
-  OpenRouter underlying vendors, malformed models, billing provenance,
-  cross-user sensitive actions, expired sudo mode, stale LiveView sockets,
-  post-sudo authorization completion, ownership-checked cancellation, and
-  explicit route-change billing confirmation. Cover request start followed by
+  malformed models, billing provenance, cross-user sensitive actions, expired
+  sudo mode, and stale LiveView sockets. Cover request admission followed by
   disconnect, completion with original provenance, failure of the next request
-  or tool continuation, and rejection of late refresh or validation updates.
-  Verify save succeeds during outage, stale validation cannot overwrite a newer
-  generation, permission-limited probes do not mark a key invalid, and no
-  automatic path sends a billed model request.
+  or tool continuation, and rejection of late validation updates. Verify save
+  succeeds during outage, stale validation cannot overwrite a newer generation,
+  permission-limited probes do not mark a key invalid, and no automatic path
+  sends a billed model request.
+- [ ] Emit and test credential-free audit events for OpenAI API-key submission,
+  replacement, validation, Test confirmation/outcome, and disconnection through
+  the Phase 1A audit framework.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 
@@ -211,9 +204,16 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Extend integration settings and model-selection feedback to distinguish
   OpenAI API, Anthropic, and OpenRouter providers without displaying saved
   credentials.
+- [ ] Extend onboarding and missing-provider feedback for Anthropic and
+  OpenRouter, and emit credential-free audit events for each provider's key
+  submission, replacement, validation, Test confirmation/outcome, and
+  disconnection.
 - [ ] Test a role mapping that uses different connected providers for primary,
   search, and review, including absence or revocation of one required
   integration during a turn.
+- [ ] Test that connecting another provider leaves a usable mapping unchanged
+  and that OpenRouter models use the OpenRouter integration even when their
+  underlying vendor is OpenAI or Anthropic.
 - [ ] Test each provider probe and outcome class, generation fencing, usable
   unverified/unavailable credentials, blocking confirmed-invalid credentials,
   and explicit cost confirmation for each optional Test model request.
@@ -228,7 +228,8 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   encrypted sensitive fields, encryption-key and payload-format versions,
   immutable attempt and expected integration generations, provider deadline and
   polling interval, database-time claim lease, monotonically increasing claim
-  epoch, and bounded cleanup.
+  epoch, and bounded cleanup. Enforce ~ON DELETE CASCADE~ from integrations to
+  attempts and their claim state.
 - [ ] Encrypt every attempt payload with a unique nonce and AEAD associated data
   binding attempt ID, integration ID, user ID, provider, immutable attempt
   generation, and payload-format version; fail closed on swaps, tampering,
@@ -287,11 +288,24 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
 - [ ] Add the "ChatGPT Subscription (Beta)" connection flow, billing
   explanation, progress state, cancellation, quota errors, disconnect, and
   reauthorization to the authenticated integrations page.
+- [ ] Require a fresh server-side sudo check to start authorization or
+  reauthorization. Permit the same active generation-fenced attempt to complete
+  after sudo expiry, require authenticated ownership but not fresh sudo for
+  cancellation, and preserve only provider/action context across
+  reauthentication.
+- [ ] Add LiveView selector tests for device-flow start, verification code,
+  progress, expiry, completion, cancellation, and reauthorization states, plus
+  post-sudo completion, ownership-checked cancellation, stale sockets, and
+  representative responsive browser checks.
+- [ ] Extend onboarding and missing-provider feedback for ChatGPT Subscription,
+  and emit credential-free audit events for authorization start/completion and
+  cancellation, refresh outcomes, reauthorization, and disconnection.
 - [ ] Add an explicit per-session execution-route change between OpenAI
   Platform and ChatGPT Subscription only when the destination supports every
   affected role's exact provider-neutral selector and has a versioned
   compatibility record for its capability contract; show billing confirmation
-  and reject the whole atomic role set when any role is incompatible.
+  rather than requiring sudo, and reject the whole atomic role set when any role
+  is incompatible. Emit a credential-free route-change audit event.
 - [ ] Under the existing durable session lock, assign each accepted turn a route
   revision and persist its complete per-role model, execution-route, and
   capability-contract snapshot. Write confirmed route changes as pending
@@ -319,23 +333,23 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   changes, rolling-alias and immutable-snapshot compatibility, whole-set
   rejection when one role is incompatible, route-change/turn-acceptance races,
   process and node restart during a turn, in-flight route freezing, normalized
-  cross-route replay, no
-  automatic route fallback, same-origin and cross-origin redirect rejection,
-  malicious verification URLs, absence of a credential-bearing follow-up
-  request, and secret redaction.
+  cross-route replay, no automatic route fallback, same-origin and cross-origin
+  redirect rejection, malicious verification URLs, absence of a
+  credential-bearing follow-up request, and secret redaction.
 - [ ] Run the Phase 0 live compatibility suite against the production path and
   do not declare ChatGPT/Codex implementation complete while a required
   capability fails; classify later contract failures as regressions and never
   fall back to Platform billing.
+- [ ] Ship ChatGPT Subscription as a Beta without a deployment feature flag only
+  after its implementation and required compatibility suite pass; surface later
+  contract regressions as actionable integration-unavailable errors.
 
 * Phase 4: Harden operations
 
-- [ ] Add onboarding and session/model-settings feedback that links users to
-  every missing provider integration required by their selected role mapping.
-- [ ] Add bounded-cardinality telemetry for integration operations and complete
-  credential-free audit coverage for authorization start/completion and
-  cancellation, validation outcomes, execution-route changes, refresh outcomes,
-  and reauthorization using the Phase 1A audit framework.
+- [ ] Add bounded-cardinality telemetry for integration operations and verify
+  credential-free audit completeness across every provider lifecycle,
+  validation, Test, authorization, refresh, reauthorization, disconnection, and
+  execution-route action introduced by Phases 1B through 3.
 - [ ] Implement and test staged encryption-key rotation: distribute the new key
   as non-current, verify every replica accepts both keys, make it current for
   writes, and re-encrypt old rows in bounded batches using credential-generation
