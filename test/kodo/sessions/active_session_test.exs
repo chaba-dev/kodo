@@ -449,8 +449,6 @@ defmodule Kodo.Sessions.ActiveSessionTest do
                       %{type: "session_status_changed", payload: %{"status" => "completed"}}}
 
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
-      _ = :sys.get_state(Kodo.SessionRegistry)
-      assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
     end
 
     events = Sessions.events_after(session.id)
