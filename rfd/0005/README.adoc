@@ -1,0 +1,1036 @@
+:authors: Darwin D Wu <darwin67@users.noreply.github.com>
+:state: discussion
+:discussion: https://github.com/chaba-dev/kodo/pull/25
+:labels: software, integrations, llm, oauth, security
+:toc:
+
+= RFD 5 Store user-owned LLM provider integrations
+
+== Goal
+
+Let each Kodo user connect the LLM providers used by their agent sessions
+without requiring an operator to configure a deployment-wide OpenAI API key for
+successful model requests. The first provider set includes OpenAI Platform API
+keys, Anthropic API keys, OpenRouter API keys, and OpenAI Codex access through a
+linked ChatGPT subscription.
+
+Provider credentials remain in the control plane. Runners continue to receive
+only Kodo credentials and tool requests; they never receive LLM API keys,
+access tokens, or refresh tokens.
+
+== Current state
+
+Kodo delegates provider authentication to ReqLLM. With no request-local
+credential, ReqLLM reads `OPENAI_API_KEY` from the control-plane environment.
+This lookup occurs when a model request is made; the key is not required for
+the control plane to boot, but model requests fail without it. The fallback
+creates one deployment-wide provider identity, makes credential changes a
+deployment-configuration concern, and prevents users from choosing separately
+billed provider accounts.
+
+The existing execution boundary is otherwise suitable. Agent inference runs in
+the Phoenix control plane, sessions have a durable owning user, and model role
+mappings identify the provider used for each request. The Rust runner executes
+workspace tools and does not call LLM providers directly. The evaluation runner
+currently calls the LLM adapter without a durable session owner, so this RFD
+must bring that path under an explicit test-user integration as well.
+
+== Decision
+
+Kodo will persist user-owned provider integrations and resolve one for every
+model request. A session role mapping selects an exact model identity and an
+execution route selects the provider and billing path; the authenticated
+session owner selects the credential for that route. ReqLLM receives that
+credential through request-local options so concurrent users never share
+mutable process or application configuration.
+
+Every text, tool-calling, and structured-output generation requires an explicit
+authenticated scope and typed non-secret integration reference before the
+resolver is called. This includes primary, search, review, evaluation, and
+live-provider paths. Only the resolver creates an operation-local credential;
+no production adapter entry point accepts one from a caller or infers an owner
+or credential from ambient configuration.
+
+Kodo is not yet live, so this proposal does not preserve a runtime migration
+fallback to deployment environment keys. Once user-owned integrations land, a
+missing user credential fails closed and links to integration settings. The
+production adapter never looks up `OPENAI_API_KEY` or another provider key from
+the process environment.
+
+The initial provider identities are distinct even when they share a vendor:
+
+* `openai` uses an OpenAI Platform API key and Platform billing.
+* `openai_codex` uses a ChatGPT subscription OAuth credential and the Codex
+  responses service.
+* `anthropic` uses an Anthropic Console API key.
+* `openrouter` uses an OpenRouter API key.
+
+One durable integration row is allowed per user and provider identity in the
+first release. Treating `openai` and `openai_codex` separately lets a user
+connect both and makes billing and model routing explicit. Supporting several
+accounts for one provider may be added later with an explicit integration
+selection in model settings; the first release does not add that complexity.
+
+Model role mappings continue to own model selection. Each session preserves
+the exact primary, search, and review model identities selected at creation. An
+exact identity is Kodo's provider-neutral wire selector, including an immutable
+snapshot or version when both routes expose one; a rolling alias remains that
+exact selector but is not a claim that two billing routes use identical backend
+weights or deployment snapshots. Later user or repository default changes
+affect new sessions only. Mappings do not contain credentials. Their execution
+routes may use different providers, in which case the session owner must have
+every required integration. Kodo preflights every role integration before
+accepting a turn and resolves the current credential again immediately before
+each provider request. Key replacement, token refresh, disconnection, or
+revocation therefore takes effect for requests that have not been admitted,
+without rewriting session history. It does not retroactively cancel an
+admitted provider operation, even if its HTTP request has not yet been sent.
+
+The first release permits an explicit execution-route change between
+`openai` Platform billing and `openai_codex` ChatGPT subscription billing while
+preserving the role's exact model identity. Kodo accepts the change only when
+both routes expose that exact model and satisfy the same role capability
+contract. A versioned compatibility record for the exact selector, source and
+destination routes, and role-contract version must confirm tools, structured
+output, reasoning options, context requirements, and input modalities. Matching
+slugs or ReqLLM catalog fallback alone is insufficient evidence.
+
+Turn acceptance and route changes use the same durable session lock. Accepting
+a turn atomically stores a route revision and complete per-role model, route,
+and capability-contract snapshot. Primary, search, review, tool continuations,
+and execution resumed after a process or node restart use that turn snapshot,
+never the session's then-current mapping. A confirmed route change writes a
+pending revision under the lock and affects only subsequently accepted turns;
+an in-flight turn and all its continuations finish on its old snapshot. Changes
+to multiple affected roles are atomic and Kodo rejects the whole change if any
+role lacks exact-selector compatibility. Quota, disconnection, or provider
+failure never triggers a route change automatically.
+
+After a route change, Kodo replays normalized visible assistant content, tool
+calls, and tool results while omitting provider-specific reasoning signatures,
+encrypted reasoning state, and cache metadata that cannot safely cross the
+boundary. The visible conversation and selected model remain intact, but
+provider-private cache or hidden reasoning continuity is not promised. If the
+destination does not expose the exact model, Kodo rejects the change and keeps
+the current route. Switching to a merely similar model is deferred to a future
+decision backed by behavioral benchmarks and scoring evidence that the quality
+change is acceptable.
+
+Connecting a provider, changing user model defaults, and changing an existing
+session's execution route are separate actions. If the current role mapping
+remains usable, connecting another provider does not prompt for or apply either
+change. If a user has no usable mapping, Kodo presents one recommended
+provider-compatible preset and shows its primary, search, and review models
+with their Platform, subscription, or aggregator billing paths. The preset is
+applied only after the user chooses "Use recommended models".
+
+A mapping is usable when every role resolves to an allowed provider whose
+integration contains a credential, has connection state `connected`, and does
+not have validation state `invalid`. Saved-but-`unverified` credentials and
+credentials whose latest validation is `unavailable` remain usable. Provider
+outages, quota exhaustion, missing model entitlement, and Codex contract
+regressions are request outcomes; they do not mutate credential validity or
+make another billing path eligible.
+
+Confirmed presets affect new sessions and user defaults; they never rewrite an
+existing session's model identities or execution routes. Only the explicit,
+same-model route-change action above can change an existing route. Mapping
+availability is derived from the current model resolution and integration state
+rather than persisted into each mapping. Disconnecting an integration therefore
+makes dependent mappings unavailable and links to model settings without
+rewriting them or silently routing requests through a differently billed
+provider.
+
+== Provider support
+
+=== API-key providers
+
+OpenAI, Anthropic, and OpenRouter use the same integration lifecycle: connect,
+validate, replace, test, and disconnect. Provider endpoints are fixed by Kodo;
+the initial UI does not accept arbitrary base URLs or HTTP headers. This avoids
+turning provider configuration into a server-side request forgery or
+credential-exfiltration path.
+
+Every credential-bearing provider request uses a fixed HTTPS origin and
+disables automatic redirect following. This includes validation, inference,
+device authorization and polling, authorization-code exchange, and token
+refresh. Kodo treats every `3xx` response, including a same-origin redirect, as
+provider unavailable without issuing a second request. A legitimate provider
+endpoint migration therefore requires an explicit code and allowlist update
+rather than risking an API key, bearer token, device code, or authorization
+code being forwarded to an unexpected destination.
+
+This policy is enforced and tested at every concrete transport boundary rather
+than assumed from one shared adapter. The initial transport inventory covers
+buffered Req and ReqLLM requests, Finch streaming, Req-based device
+authorization, polling, exchange and refresh, and the Codex-specific inference
+path. Adding or changing a provider transport requires updating this inventory
+and proving both exact-origin selection and redirect rejection before it can
+carry credentials.
+
+Validation is non-destructive and provider-specific. A transient validation
+failure does not expose or invalidate the credential. Kodo records a bounded
+status and safe error code, while the detailed provider error is redacted
+before logging or display.
+
+Saving or replacing an API key first commits its encrypted payload as
+`connected` and `unverified`, then starts a bounded asynchronous validation task
+under the control-plane task supervisor. Kodo uses non-inference metadata
+endpoints with no currently documented usage charge: OpenAI `GET /v1/models`,
+Anthropic `GET /v1/models`, and OpenRouter `GET /api/v1/key`, with each
+provider's required authentication headers. This wording is not a permanent
+guarantee that providers will never charge for those endpoints; their contract
+and response classification are verified before each provider ships and when
+that integration contract changes.
+
+[cols="1,2,2,3",options="header"]
+|===
+| Provider | Valid | Invalid | Unavailable or configuration required
+
+| OpenAI
+| Successful metadata response
+| Explicit `invalid_api_key` or revoked-key response
+| Other `401` contexts, `403`, network or TLS failure, timeout, redirect,
+  `429`, or `5xx`
+
+| Anthropic
+| Successful metadata response for a standard workspace-scoped Console key
+| Explicit authentication failure for that supported key type
+| `403`, organization/Admin credential requiring workspace selection, network
+  or TLS failure, timeout, redirect, `429`, or `5xx`
+
+| OpenRouter
+| Successful key metadata response
+| Documented invalid/revoked-key `401`
+| Other permission or configuration failure, network or TLS failure, timeout,
+  redirect, `429`, or `5xx`
+|===
+
+Phase 2 supports standard workspace-scoped Anthropic Console API keys only.
+Organization/Admin credentials that require an explicit workspace selector are
+higher privilege than inference needs and return actionable unsupported-
+credential guidance rather than adding workspace selection in this RFD.
+
+A successful probe marks the integration `valid`. Only the provider-specific
+invalid outcomes above mark it `invalid`; Kodo never infers invalidity from a
+status code without the expected safe provider error identifier. Quota,
+billing, and model-entitlement failures remain request outcomes. Every result
+compares the credential generation captured by the task so it cannot update a
+replacement or disconnection. Raw provider bodies are never persisted or
+logged.
+
+Kodo normalizes quota exhaustion and billing-required responses into bounded
+outcomes on the affected invocation. They do not change connection or
+validation state, become persistent integration status, or trigger background
+quota checks. The session or turn that encountered the outcome keeps the user's
+work available, offers retry, and links to the provider's billing page and the
+relevant Kodo integration settings. Integration cards therefore do not show a
+quota badge or imply that one observation applies to every model, provider
+project, or later quota window.
+
+Kodo never runs billed inference automatically. A user may explicitly confirm
+a Test model request after the UI identifies the exact provider and model and
+warns that the request may incur provider charges. Testing requires
+authenticated ownership and confirmation but not renewed sudo mode. Saving
+remains successful during provider outages, and `unverified` or `unavailable`
+credentials remain usable while `invalid` blocks provider requests.
+
+A saved credential is never rendered back to the browser. The UI shows
+provider, billing identity, status, connection and validation times, and an
+explicitly non-secret provider-supplied key or account label where that
+provider contract supplies one. Kodo does not derive, persist, or display an
+API-key hash, suffix, or fingerprint, and never fingerprints an OAuth access or
+refresh token.
+
+API-key entry uses a secret input submitted only with the completed form; it
+does not use `phx-change`. The browser necessarily holds the value while the
+user pastes or types it, but LiveView never copies the key or submitted form
+parameters into socket assigns, renders them back in a diff, or includes them
+in a validation error. The submit handler passes the event value directly to
+the scoped encryption context. After a successful save, Kodo clears the browser
+input and offers no way to reveal or copy the saved key. A user who needs the
+key elsewhere must retain it through the provider's own issuance flow.
+
+OpenRouter is a provider in its own right rather than a transparent fallback
+for direct provider integrations. Models routed through OpenRouter use the
+OpenRouter integration and billing even when the underlying model was produced
+by OpenAI or Anthropic.
+
+=== ChatGPT subscription
+
+ChatGPT subscription support uses OpenAI Codex device authorization. The user
+starts the flow in Kodo, receives an OpenAI verification destination and
+one-time code, and approves the request in a browser. The destination rendered
+by Kodo is a fixed HTTPS URL from the reviewed provider contract. Kodo validates
+that a provider-returned verification URL matches the exact allowlist, but does
+not automatically navigate to it or render an untrusted destination. It shows
+the fixed destination and code separately so a returned URL cannot become a
+phishing or code-exfiltration path. Kodo polls at OpenAI's instructed interval,
+exchanges the resulting authorization code and PKCE verifier, and stores the
+returned access token, refresh token, account identifier, and expiry as
+encrypted credentials.
+
+Authorization attempts are user-scoped, single-use, and expire after the
+provider deadline. Polling continues only while an attempt is active, respects
+provider backoff, and stops on completion, cancellation, expiry, or a terminal
+provider error. Attempt identifiers and one-time codes are treated as secrets
+and are not written to logs or telemetry.
+
+The database permits one active attempt per user and `openai_codex`
+integration. Each attempt records an attempt generation, expected integration
+generation, state, provider deadline and polling interval, encrypted sensitive
+fields with encryption-key and payload-format versions, and a database-time
+claim lease plus monotonically increasing claim epoch. Starting a new attempt
+atomically cancels and supersedes the prior attempt. Cancellation, expiry,
+completion, replacement, and disconnection transitions compare the attempt
+generation; completion installs credentials only while the attempt remains
+active and its claim epoch, attempt generation, and expected integration
+generation still match.
+
+The attempt generation is assigned with its encrypted payload and is immutable
+for that attempt. Attempt ciphertext uses a unique nonce and AEAD associated
+data containing the attempt ID, integration ID, owning user, provider, attempt
+generation, and attempt-payload format version. Moving a valid device code,
+authorization code, PKCE verifier, or polling payload to another attempt, user,
+integration, provider, or generation therefore fails authentication rather
+than linking the wrong provider account.
+
+Device polling is connection-driven rather than replica-driven. The node that
+handles creation or a LiveView mount attempts one conditional claim update that
+increments the claim epoch and returns it to the claimant. On success, it starts
+one finite polling task under `Kodo.ControlPlaneTaskSupervisor`. The task
+conditionally renews its lease before expiry and verifies active state, current
+epoch, and lease ownership before admitting every poll or token exchange. Loss
+of ownership stops all later operations. The claim lease exceeds the hard
+poll-or-exchange HTTP timeout plus a safety margin. Closing the LiveView does
+not cancel the task. After a node failure, a browser reconnect or remount can
+increment the epoch and resume the persisted attempt when the old claim
+expires. Concurrent tabs may contend for the same row, but replicas with no
+connection for that attempt perform no work. Kodo does not run a per-replica
+polling sweeper, so claim traffic is proportional to active device flows rather
+than cluster size.
+
+A poll or exchange admitted before claim ownership changes may finish, but its
+result compares the claim epoch as well as attempt and integration generations
+and cannot persist after takeover. Duplicate or stale results therefore become
+no-ops and cannot replace newer credentials. Expiry is applied lazily when an
+attempt is read, claimed, or superseded. Terminal rows are deleted in bounded
+batches; if periodic cleanup later becomes necessary, one database-elected
+cleanup owner runs it rather than every replica.
+
+The OpenAI Codex source publishes the device flow. The downstream
+`chatgpt.com/backend-api/codex` inference contract is nevertheless less formal
+than the OpenAI Platform API. Kodo labels this integration "ChatGPT
+Subscription (Beta)", identifies its request origin as Kodo in supported
+headers, and does not silently replace it with an OpenAI API key if
+authorization or subscription quota fails. Kodo records the exact upstream
+public OAuth client identity, scopes, endpoints, and headers on which the
+working flow depends and does not describe that compatibility as formal OpenAI
+support without separate confirmation.
+
+ChatGPT Subscription ships as a Beta when its implementation and compatibility
+suite pass for device authorization, a tool-calling turn, structured output
+used by review and search roles, refresh-token rotation, restart recovery, and
+the documented client contract. It does not require a deployment feature flag.
+A provider rejection or contract change is a compatibility regression to fix;
+affected integrations report an actionable unavailable state. Kodo does not
+retry through another client identity or fall back to Platform billing.
+Ordinary transient, quota, and authorization errors remain scoped to the
+affected request.
+
+No provider in this RFD is gated by a deployment feature flag once its required
+phase acceptance checks pass. References to opt-in live-provider or
+compatibility checks describe tests that contact and may bill an external
+provider; they are test controls, not product availability controls.
+
+Anthropic subscription OAuth is outside this RFD. Anthropic permits API keys
+and supported cloud-provider credentials for third-party applications but
+currently prohibits third parties from collecting or intermediating Claude
+subscription credentials. Kodo will not offer Claude subscription login unless
+Anthropic publishes a contract that permits this use.
+
+== Persistence and encryption
+
+Provider integrations store non-secret indexing and operational metadata
+separately from one versioned encrypted credential payload. The durable record
+contains at least:
+
+* a generated identifier, owning user, provider identity, and authentication
+  type;
+* encrypted credentials and the encryption-key version;
+* connection status and token expiry;
+* validation and refresh timestamps plus a bounded safe error code; and
+* normal insertion and update timestamps.
+
+The database enforces ownership references and uniqueness of the user and
+provider pair. Context functions take the authenticated scope as their first
+argument and apply the owning user in the query. Changesets never cast a
+`user_id` supplied by a browser.
+
+Deleting a Kodo user cascades in the database to all of that user's integration
+rows and from each integration to its device-authorization attempts and claim
+state. Provider availability or revocation success never blocks account
+deletion. Any validation, polling, refresh, or rotation task that races with
+deletion and has not crossed its admission boundary observes the missing
+ownership-checked row and terminates without persisting state or issuing a
+provider request. An already admitted operation may still transmit and finish.
+The deletion flow advises the user to revoke credentials at providers where
+Kodo cannot do so, but does not promise provider-side revocation.
+
+Connection and validation are separate state axes. Connection is one of
+`disconnected`, `connected`, or `reauthorization_required`. Validation is one
+of `unverified`, `valid`, `invalid`, or `unavailable`. Their valid combinations
+and request behavior are:
+
+[cols="1,1,1,2", options="header"]
+|===
+| Connection | Validation | Encrypted payload | New provider requests
+
+| `disconnected`
+| `unverified` only
+| absent
+| blocked
+
+| `connected`
+| any validation state
+| present
+| allowed except when validation is `invalid`
+
+| `reauthorization_required`
+| `unverified` only
+| retained provisionally
+| blocked
+|===
+
+Context transition functions enforce this matrix, supplemented by database
+constraints where practical. Connecting or replacing a credential sets
+`connected` plus `unverified` and advances the credential generation. A
+generation-matching validation success produces `connected` plus `valid`; a
+confirmed invalid or revoked key produces `connected` plus `invalid` without
+clearing its payload; and a transient validation failure produces `connected`
+plus `unavailable`, which remains usable. Explicit revalidation may move a
+generation-matching invalid credential to `valid` or `unavailable` without
+requiring replacement.
+
+Disconnecting clears the encrypted payload and validation metadata, sets
+`disconnected` plus `unverified`, and advances the generation while preserving
+the integration row. Refresh `invalid_grant` sets
+`reauthorization_required` plus `unverified` while retaining the provisional
+source-generation payload. A delayed generation-matching refresh success may
+install its refreshed payload as `connected` plus `unverified` and advance the
+generation. Successful OAuth authorization likewise installs the payload as
+`connected` plus `unverified` and advances the generation. A failed or
+cancelled authorization attempt terminates only that attempt and leaves the
+integration's prior connection-validation pair unchanged.
+
+An authentication probe sets validation to `valid` only on success or to
+`invalid` only on a confirmed authentication failure. Network errors, rate
+limits, and provider outages produce `unavailable` without clearing the
+credential or blocking inference. Quota and model-entitlement errors remain
+request outcomes. Every asynchronous validation or provider-derived status
+update compares the credential generation it read so it cannot overwrite a
+replacement, reconnection, or disconnection.
+
+The integrations UI gives connection state precedence and displays validation
+only for a connected integration. It therefore never presents impossible
+combinations such as disconnected plus valid.
+
+Credentials use authenticated encryption with a unique nonce per write. API
+keys, access and refresh tokens, and provider account or workspace identifiers
+remain inside the encrypted payload. Each write binds its ciphertext through
+AEAD associated data containing the integration identifier, owning user,
+provider identity, authentication type, and credential-payload format version.
+A valid payload copied to another integration, user, provider, or
+authentication type therefore fails authentication rather than becoming a
+cross-user credential or billing path.
+
+Kodo requires a deployment-level credential-encryption key ring, supplied
+independently of all LLM providers, and records a key version so ciphertext can
+be rotated. Every production replica validates the complete configured current
+and non-current key ring before becoming ready to serve integration operations.
+Readiness verifies that every key version referenced by an integration or
+authorization-attempt row is present. Production refuses to persist or decrypt
+either payload type when a required key is absent or malformed. An AEAD
+association or authentication failure fails closed with a bounded corruption
+error and never falls back or sends the credential to a provider; recovery
+requires credential replacement, restarting authorization, or an operator
+procedure.
+Database encryption does not remove the need to protect the control-plane
+process; it protects database copies, backups, and read-only database access
+from directly revealing provider credentials.
+
+Kodo is not yet live, so Phase 1 creates a fresh encrypted schema and does not
+import plaintext credentials, legacy provider environment variables, or an
+earlier integration format. Post-launch key rotation is staged. Operators first
+distribute a new non-current key and wait until every replica reports readiness
+with both keys. They then make the new key current for writes and re-encrypt old
+rows in bounded batches. Each rewrite compares the credential generation and
+old key version it read, so replacement or disconnection wins and the batch
+retries or skips the stale row without changing its logical credential
+generation.
+
+The old key remains available for decryption through the documented application
+rollback and backup-retention window. Rollback restores compatible application
+behavior while both keys are still configured; it never removes key material
+first, downgrades ciphertext to plaintext, or enables a provider-environment
+fallback. Routine rotation does not re-encrypt short-lived authorization
+attempts: new attempts use the current key, while old keys remain until attempts
+at those versions expire and are deleted. Operators remove an old key only
+after the database has no integration or attempt payloads at that version, all
+replicas use the new ring, the rollback window has closed, and backups that
+require the old key have expired or remain paired with a separately protected
+copy of that key. Emergency retirement of a compromised key cancels and deletes
+affected attempts and requires those users to restart authorization.
+
+The credential payload is opaque to Ecto query code and never appears in
+session events, model mappings, changeset errors, exception inspection,
+telemetry metadata, or client responses. Disconnecting an integration removes
+its credential payload from the durable database row. Backup retention and
+provider-side revocation remain operational concerns and are documented with
+the deployment procedure.
+
+== Request-time resolution
+
+Kodo combines each accepted turn's preserved model identity and route snapshot
+and resolves that provider-specific model specification through
+`ReqLLM.model/1` before looking up a credential. The `provider` on the resulting
+`LLMDB.Model` is canonical and must equal the selected route; provider text
+derived from a stored model string is display data and cannot select a
+credential. This RFD allows only `openai`, `openai_codex`, `anthropic`, and
+`openrouter`. Unknown, malformed, unsupported, and route-incompatible models
+fail before a provider request.
+
+The provider-independent LLM boundary accepts the authenticated scope, resolved
+model, and a typed non-secret integration reference containing integration and
+provider identity. It fetches the referenced integration under that scope,
+rechecks ownership and current generation, and requires exact equality between
+the resolved model provider, reference provider, and stored integration provider
+before admitting an operation. A forged or cross-user reference therefore
+fails closed. This check applies equally to catalog aliases, inline model
+specifications, and OpenRouter models whose underlying model vendor is OpenAI
+or Anthropic.
+
+Only the scoped resolver decrypts stored payloads and creates the internal,
+operation-local credential consumed by the ReqLLM adapter. Public generation
+callbacks and their callers cannot supply a raw API key, OAuth token, or this
+internal credential value. The adapter translates an API-key credential to
+`:api_key` and a Codex credential to request-local OAuth options. Only the
+current API key or OAuth access token and required decrypted account identifier
+cross into ReqLLM; refresh tokens, expiry, generation, and rotation state remain
+in Kodo. No request uses `System.put_env/2`, `Application.put_env/3`, ReqLLM's
+global key store, or a shared OAuth file.
+
+Transport contract tests deliberately configure sentinel provider environment
+keys, ReqLLM global credentials, and OAuth files while exercising each request
+path. A request with a scoped integration must send only that integration's
+operation-local credential. A request without one must fail before network
+admission instead of selecting any sentinel credential. Redirect tests make
+both same-origin and cross-origin destinations observable and assert that each
+transport issues no follow-up request and forwards no authorization material.
+
+Status pages and turn preflight query only non-secret integration metadata and
+batch all required role providers into one indexed query. Immediately before
+each credential-bearing external operation, Kodo reads the current integration
+or authorization-attempt state through its ownership index and decrypts the
+required fields in the Phoenix process. An operation is one validation,
+inference or streaming call, tool-call continuation, device poll or exchange,
+or token refresh. Kodo does not hold a database transaction or row lock during
+the external request.
+
+This adds a small bounded set of indexed reads per external operation and scales
+with active provider calls rather than the number of Kodo replicas. Since
+provider calls are orders of magnitude slower than the lookup and local AEAD
+decryption, Kodo does not introduce a plaintext credential cache in a
+`GenServer`, ETS, persistent terms, or session state. A future generation-aware
+encrypted cache requires measured database pressure and a separate consistency
+review because stale cache entries weaken immediate replacement and
+disconnection semantics.
+
+The admission boundary is the final successful ownership, state, and generation
+check for the operation-local decrypted payload. For a model call, Kodo rechecks
+that generation while durably persisting the invocation start and billing
+provenance before allowing the HTTP request to proceed. Device polling and
+refresh use their claim and lease fencing at the same boundary. A missing
+integration, a `disconnected` or
+`reauthorization_required` connection, or an `invalid` validation returns a
+domain error naming the provider and required user action without including
+credential material. The session can accept a later turn after the user
+reconnects the provider. Provider errors must not trigger fallback to a
+differently billed integration unless model settings explicitly define such a
+fallback in a future proposal.
+
+Each started invocation records non-secret billing provenance from this
+resolved boundary: canonical provider, authentication type, and billing path
+(`platform`, `subscription`, or `aggregator`). It never records credential
+material. This provenance remains stable even if the integration or mapping is
+later replaced.
+
+Once a provider operation is admitted, replacement, disconnection, or user
+deletion does not alter it. The process may pause before transmission, then send
+and persist a response with the billing provenance captured at admission
+because Kodo cannot atomically coordinate database state with an external
+network write. Each later provider request, including a tool-call continuation
+or another role call in the same turn, resolves and seeks admission again, then
+fails closed if the integration is unusable. A late validation or refresh result
+remains generation-fenced and cannot restore or overwrite a disconnected
+integration.
+
+Kodo classifies Req and ReqLLM failures into bounded domain errors before they
+leave the LLM boundary. Session events, exception inspection, logs, telemetry,
+and browser responses may contain only the provider, operation, bounded outcome
+class, and actionable user guidance; they never contain raw provider bodies,
+headers, request options, URLs with secrets, or inspected credential values.
+
+Model validation remains credential-independent. Provider capability checks
+may resolve model metadata without making a billed request, while connection
+validation and inference use the session owner's integration.
+
+== Refresh and multi-node coordination
+
+API keys do not refresh. Codex access tokens refresh shortly before expiry,
+using the stored refresh token and OpenAI's token endpoint. A successful
+refresh must return a new access token and valid expiry. It atomically writes
+those values, retains the existing refresh token or account identifier when the
+response omits either one, and replaces the refresh token when the response
+rotates it. A different returned account identifier is a contract and billing-
+identity violation: Kodo discards that response and requires reauthorization
+rather than silently changing the linked account.
+
+Refresh is just-in-time, bounded work rather than a long-lived process per
+integration. A request that encounters a near-expiry token starts the external
+HTTP operation under Kodo's existing task supervisor after acquiring the
+database lease. The task decrypts immediately before use, retains references
+only for the bounded operation, and discards them afterward so they become
+eligible for garbage collection. A task or node failure leaves durable
+credential state unchanged and the expired lease available for takeover.
+
+Callers coordinate directly through the database; Kodo does not add a refresh
+coordinator `GenServer`, a `DynamicSupervisor` child, or an in-memory timer per
+integration. A process-local coordinator would not prevent another replica
+from refreshing, while a cluster-wide process would require leader election
+and still need durable fencing during failover. If proactive refresh becomes
+necessary, a single supervised sweeper or durable job system may discover due
+integrations, but it must invoke the same lease-protected refresh operation and
+keep the database as the source of truth.
+
+Kodo admits one lease holder for an integration at a time. It uses a short
+database-backed refresh lease, calculated from database time, so it does not
+hold a database transaction or row lock across an external HTTP request. The
+lease duration exceeds the hard refresh-request timeout plus a safety margin.
+Other callers wait for a bounded interval and reload the integration; an
+expired lease can be taken over, although a paused former holder can briefly
+overlap the replacement after resuming.
+
+Every attempt captures the credential generation it read. A successful
+response may atomically replace the encrypted payload and advance that
+generation even if its lease expired while the task or node was paused, but
+only if no successful refresh, replacement, reauthorization, or disconnection
+has already advanced it. The first successful response wins; later responses
+reload the stored result. User replacement, starting or completing
+reauthorization, and disconnection always advance the generation and
+irrevocably fence every old refresh response. A new authorization attempt
+captures the post-advance integration generation.
+
+An `invalid_grant` or refresh identity mismatch records
+`reauthorization_required` with a bounded refresh-specific reason after its
+generation check succeeds, but does not advance the source credential
+generation or erase the encrypted payload. This state is terminal for new
+requests but provisional in refresh-outcome precedence: a successful response
+already produced from that same generation may replace it and advance the
+generation, even after an arbitrarily long process pause. A successful response
+cannot replace reauthorization initiated or completed by the user, replacement,
+or disconnection because those actions advance the generation.
+
+A stale-lease or takeover attempt that receives `invalid_grant` reloads and may
+wait for a bounded interval before displaying reauthorization so a common late
+success avoids UI churn. The wait is only an optimization and is never the
+correctness boundary. Transient provider or network failures preserve the
+credential, release or expire the lease, and return a retryable
+provider-unavailable error.
+
+This protocol minimizes concurrent refresh but cannot make an external token
+endpoint exactly once. If the provider rotates a refresh token and Kodo
+permanently loses the successful response, the only safe recovery may be user
+reauthorization. Kodo documents and tests this boundary rather than silently
+retrying an ambiguously consumed token.
+
+== User interface and authorization
+
+Integration management lives at `/integrations` inside the existing
+`:require_authenticated_user` LiveView session and browser pipeline. The route
+requires login because every integration is user-owned and its status controls
+that user's model requests. Submitting or replacing an API key, starting OAuth
+or device reauthorization, and disconnecting an integration require sudo mode
+because they change access to a separately billed external account. Kodo checks
+recent authentication again in the server-side handler for each sensitive
+event rather than trusting a LiveView that was mounted while sudo mode was
+active. API-key forms are shown only after that check, before the user enters a
+secret. If reauthentication is nevertheless required at submission, Kodo
+preserves only the provider and intended action, never the key; the user must
+enter it again. After reauthentication, Kodo returns the user to that action
+without requiring them to rediscover the affected integration.
+
+An OAuth or device flow created while sudo mode was active may complete after
+that mode expires only while the same user-owned attempt remains active and its
+generation checks succeed. Cancelling such an attempt requires authenticated
+ownership but not renewed sudo mode. Viewing status, automatic credential
+validation, and ordinary model requests do not require sudo mode. An explicit
+same-model execution-route change uses a clear billing confirmation instead of
+sudo mode so it does not interrupt an active session; the existing turn-boundary
+and exact-model compatibility rules still apply.
+
+The page provides distinct actions for OpenAI API, ChatGPT Subscription,
+Anthropic, and OpenRouter. It explains the billing identity before connection,
+shows progress and expiry for device authorization, and provides actionable
+states for missing credentials, invalid keys, and required reauthorization. It
+does not present request-scoped quota or billing outcomes as integration state.
+Those outcomes appear with retry and billing guidance on the affected session
+or turn. The page never embeds raw scripts; device-flow progress uses normal
+LiveView events and asynchronous server work.
+
+Session creation and model settings identify integrations by provider and
+billing path. If a selected role lacks a connection, the UI links to the
+integration page rather than instructing the operator to restart Kodo with an
+environment variable.
+
+== Settings information architecture and visual direction
+
+The integration work establishes a shared settings experience rather than
+adding another isolated generated form. Account and integration pages keep
+their existing `/users/settings` and `/integrations` paths, but render inside
+one settings shell with consistent navigation, page headings, content width,
+and action placement.
+
+The visual direction uses a quiet neutral canvas, clear sectional navigation,
+subtle separators, rounded surfaces, generous spacing, restrained accent
+color, and controls sized for touch. These principles support settings without
+introducing conversation, project, or composer chrome into the page.
+
+At desktop and tablet widths, settings appear as one framed workspace within
+the authenticated application: a compact persistent rail lists Account and
+Integrations, a subtle divider separates navigation from content, and the
+selected page occupies a balanced detail pane. The frame may use a rounded
+outer surface at larger widths but remains a normal deep-linkable page, not a
+transient modal whose state disappears on refresh. A clear back or close action
+returns to the user's prior application context.
+
+Kodo does not add Personal/Workspace switching, Billing, Usage, Secrets, or
+other placeholder destinations. Only implemented settings are visible. If Kodo
+later gains workspace-owned configuration, its ownership, authorization, and
+navigation require a separate decision rather than overloading user-owned
+integrations.
+
+On narrow phones the frame becomes edge-to-edge and the rail becomes horizontal
+section navigation above the page; it must not create a second off-canvas menu
+inside the existing application navigation. The content pane uses one column
+without shrinking desktop cards into unreadable two-column forms. Focus order,
+selected-state contrast, keyboard navigation, scroll containment, and touch
+target size remain equivalent across layouts.
+
+The Account page groups email and password changes into separately titled
+surfaces with concise security context. Its generated authentication behavior,
+sudo-mode checks, form semantics, and confirmation flow do not change. The
+Integrations page uses one provider card per billing identity. Each card gives
+provider purpose, authentication method, billing path, connection status, and
+one clear primary action before exposing secondary actions such as test,
+replace, reconnect, or disconnect.
+
+Connection forms open within the provider's page context rather than placing
+four permanent secret inputs on the screen. Device authorization emphasizes
+the OpenAI-owned verification destination, the one-time code, remaining time,
+and a cancellable progress state. Because the short-lived code must be entered
+at the provider, it is an intentional display exception and has an accessible
+Copy action; Kodo removes it from the UI when the attempt completes, expires,
+or is cancelled. Success and failure feedback stays attached to the affected
+provider card and is also announced accessibly. Before submission, transient
+loading must not shift unrelated cards or discard the browser-held API key;
+after a successful submission, Kodo clears that input.
+
+== Interface sketches
+
+These sketches communicate hierarchy and responsive behavior, not exact copy,
+dimensions, colors, or component styling.
+
+=== Desktop and tablet
+
+[source,text]
+----
++--------------------------------------------------------------------------+
+|  <- Sessions     Settings                                     darwin67   |
++------------------+-------------------------------------------------------+
+|                  |                                                       |
+|  SETTINGS        |  Provider integrations                                |
+|                  |  Connect each billing identity used by your agents.   |
+|  Account         |                                                       |
+| > Integrations   |  +-------------------------------------------------+  |
+|                  |  | ChatGPT Subscription (Beta)          CONNECTED  |  |
+|                  |  | OpenAI Codex - ChatGPT plan billing             |  |
+|                  |  | Last checked 2 min ago       [Test] [Reconnect] |  |
+|                  |  +-------------------------------------------------+  |
+|                  |                                                       |
+|                  |  +-------------------------------------------------+  |
+|                  |  | OpenAI API                      NOT CONNECTED   |  |
+|                  |  | Platform API usage and billing                  |  |
+|                  |  |                                      [Connect]  |  |
+|                  |  +-------------------------------------------------+  |
+|                  |                                                       |
+|                  |  +----------------------+  +----------------------+   |
+|                  |  | Anthropic API        |  | OpenRouter           |   |
+|                  |  | NOT CONNECTED        |  | CONNECTED            |   |
+|                  |  |          [Connect]   |  | [Test] [Replace]     |   |
+|                  |  +----------------------+  +----------------------+   |
+|                  |                                                       |
++------------------+-------------------------------------------------------+
+----
+
+The detail pane may use a two-column card row only when both cards remain
+readable and actions do not wrap ambiguously. ChatGPT and OpenAI API remain
+separate cards because their authentication, endpoint, model namespace, and
+billing identity differ.
+
+=== Narrow mobile
+
+[source,text]
+----
++--------------------------------------+
+|  <- Settings                         |
++--------------------------------------+
+|  [ Account ] [ Integrations ]        |
++--------------------------------------+
+|                                      |
+|  Provider integrations               |
+|  Connect providers used by agents.   |
+|                                      |
+|  +--------------------------------+  |
+|  | ChatGPT Subscription (Beta)    |  |
+|  | CONNECTED                      |  |
+|  | ChatGPT plan billing           |  |
+|  |                                |  |
+|  | [Test]             [Reconnect] |  |
+|  +--------------------------------+  |
+|                                      |
+|  +--------------------------------+  |
+|  | OpenAI API - NOT CONNECTED     |  |
+|  | Platform API billing           |  |
+|  |                      [Connect] |  |
+|  +--------------------------------+  |
+|                                      |
+|  +--------------------------------+  |
+|  | Anthropic API                  |  |
+|  | NOT CONNECTED        [Connect] |  |
+|  +--------------------------------+  |
+|                                      |
+|  +--------------------------------+  |
+|  | OpenRouter                     |  |
+|  | CONNECTED            [Manage]  |  |
+|  +--------------------------------+  |
+|                                      |
++--------------------------------------+
+----
+
+Cards become a single sequence on mobile. Section navigation remains visible
+without horizontally scrolling provider content, and secondary actions may
+collapse behind one labelled Manage action when width is constrained.
+
+=== ChatGPT device authorization
+
+[source,text]
+----
++-----------------------------------------------------------+
+| ChatGPT Subscription (Beta)                               |
+|                                                           |
+| 1. Open the OpenAI verification page:                     |
+|                                                           |
+|        https://auth.openai.com/codex/device               |
+|                                                           |
+| 2. Enter this one-time code:                              |
+|                                                           |
+|                    ABCD-EFGH                    [Copy]    |
+|                                                           |
+| Waiting for OpenAI authorization...          12:41 left   |
+| [==============================>................]         |
+|                                                           |
+| [Cancel]                                                  |
++-----------------------------------------------------------+
+----
+
+The code is rendered as selectable text with a copy action in the real
+interface. Status updates use a live region, the countdown is not the only
+expiry cue, and cancelling returns the provider card to a stable disconnected
+state.
+
+== Pre-release cutover
+
+Kodo has no production users or stored provider integrations to migrate. The
+integration schema, request-local credential boundary, missing-integration UX,
+and removal of ReqLLM's environment-key path therefore form one pre-release
+cutover spanning Phases 1A and 1B. Phase 1A may deploy to pre-production with
+provider traffic disabled; Phase 1B enables the first usable integration path
+and missing-provider guidance. There is no deployment fallback, automatic
+import, or implicit owner for an existing environment key.
+
+Development, evaluation, and opt-in live-provider runs require an explicit test
+user whose encrypted integrations are provisioned through the Kodo context.
+Ordinary tests use fake adapters plus scoped integration fixtures and non-secret
+references without external provider access. Neither path adds environment
+lookup, caller-supplied plaintext credentials, or owner inference to the
+production adapter.
+
+At the end of this RFD, no LLM API key or OAuth token is read from deployment
+configuration at boot or request time. The credential-encryption key ring is a
+production-readiness requirement because encrypted database secrets need a
+root of trust outside the database. Installations with a valid key ring but no
+connected provider can boot and serve account and integration pages, but cannot
+start a model turn until the user connects every provider required by the
+selected role mapping.
+
+== Security and operations
+
+Kodo applies the following boundaries:
+
+* Provider secrets remain in the Phoenix control plane and are never sent to
+  runners, browsers after submission, or hosted runner environments.
+* Provider endpoints and authorization endpoints are exact HTTPS allowlists in
+  code. Credential-bearing requests never follow redirects, and device
+  verification UI never navigates automatically to a provider-returned URL.
+* Logs and exceptions redact API keys, bearer tokens, refresh tokens, device
+  codes, authorization codes, and encrypted payloads.
+* Metrics use bounded provider, authentication-type, operation, and outcome
+  labels; user, account, integration, and token identifiers stay out of metric
+  labels.
+* API-key submission and replacement, authorization start and completion,
+  cancellation, disconnection, validation outcomes, execution-route changes,
+  refresh outcomes, and required reauthorization produce security-relevant
+  audit logs without credential material. Audit records may contain internal
+  actor and integration identifiers for investigation, but those identifiers
+  never become metric labels.
+* Phoenix parameter filtering covers every provider secret field before the
+  first credential form ships. Audit data excludes API keys, access and refresh
+  tokens, device and authorization codes, encrypted payloads, raw provider
+  responses, and secret-bearing URLs.
+* Credential-derived hashes, suffixes, and fingerprints do not appear in the
+  database, UI, logs, telemetry, or audit records. If a future operational need
+  requires API-key correlation, a separate proposal must use a versioned,
+  domain-separated keyed HMAC restricted to internal access; an unkeyed hash or
+  OAuth-token fingerprint is never acceptable.
+* Kodo minimizes plaintext credential references and does not retain them in
+  long-lived processes, caches, or unnecessary process messages. BEAM immutable
+  binaries, garbage collection, and HTTP client internals do not provide a
+  guarantee of immediate memory zeroization, so tests assert application-level
+  non-retention rather than physical erasure.
+* Encryption-key rotation uses a distribute, activate, CAS-safe re-encrypt, and
+  retire sequence; the old key remains through application rollback and backup
+  retention.
+* Disconnecting instructs the user how to revoke the credential at the
+  provider when Kodo cannot revoke it directly. The confirmation states that
+  disconnect prevents future Kodo requests but cannot guarantee cancellation
+  of an operation already admitted or sent to the provider or its associated
+  billing.
+
+Operational documentation covers initial encryption-key provisioning, backup
+handling, rotation, provider revocation, device-flow failures, refresh failure
+rates, and safe rollback across integration schema and encryption-key changes.
+Encryption keys are backed up and access-controlled separately from database
+backups. User deletion removes live database payloads but cannot selectively
+erase ciphertext already present in retained database backups or write-ahead
+logs; those copies remain governed by the documented backup expiry and key
+retention policy. Production guidance restricts BEAM debugging and memory
+inspection and protects or disables crash dumps, core dumps, and swap according
+to the deployment environment. Guaranteed zeroization would require a separate
+native or isolated secret-handling boundary and is outside this RFD.
+
+== Alternatives considered
+
+=== Continue deployment environment keys
+
+Environment keys are simple but preserve one billing identity for every user,
+require operator involvement, and cannot support user-scoped OAuth refresh.
+Because Kodo is not yet live, retaining them as a migration bridge adds billing
+ambiguity without preserving production compatibility.
+
+=== Write credentials to runner environments
+
+This would let provider clients run near workspaces but expands the secret
+boundary to every runner and subprocess. Kodo already performs inference in the
+control plane, so this adds risk without a corresponding capability.
+
+=== Use ReqLLM global keys or OAuth files
+
+ReqLLM supports process-wide keys and file-backed OAuth refresh for local
+applications. Those stores cannot safely distinguish concurrent Kodo users or
+coordinate refresh across control-plane replicas. Kodo therefore owns the
+database lifecycle and passes only request-local credentials to ReqLLM.
+
+=== Store provider-specific secret columns
+
+Separate API-key, access-token, and refresh-token columns make accidental
+selection and logging easier and require schema changes for every credential
+shape. A versioned encrypted payload with queryable non-secret metadata keeps
+provider details inside the integration boundary.
+
+== Phased delivery
+
+Phases 0 through 3 are independently reviewable and deployable to
+pre-production. Production launch requires Phase 4 as well as every preceding
+phase. Detailed progress is tracked in
+link:IMPLEMENTATION.org[RFD 5 implementation checklist].
+
+=== Phase 0: Implement and verify the Codex contract
+
+Trace and reproduce the working Codex device flow in a bounded Kodo live spike
+against the current ReqLLM `openai_codex` provider. Record the upstream public
+OAuth client identity, scopes, device and token endpoints, PKCE and polling
+rules, account identification, Kodo originator headers, required model
+capabilities, token refresh, and restart recovery. Phase 0 defines the
+production contract and regression diagnostics; it is not a gate for omitting
+the required ChatGPT/Codex integration.
+
+=== Phase 1A: Establish the credential security foundation
+
+Add the user-owned integration schema, authenticated encryption and key
+versioning, scoped context operations, parameter filtering, safe inspection,
+fixed outbound endpoint policy, credential-free audit framework, typed
+request-local credential boundary, and fail-closed resolution. Security tests
+must prove ownership isolation and prevent secret egress to logs, browsers,
+runners, telemetry, or redirected requests. This phase is deployable without a
+credential UI; Kodo must not accept a credential or send a production provider
+request until the complete foundation passes.
+
+=== Phase 1B: Add OpenAI API integration and settings
+
+Add the shared responsive settings shell, improve the existing Account
+presentation without changing its behavior, and ship the authenticated
+integration page with OpenAI Platform API-key connection first. Wire model
+resolution, explicit live-test integrations, validation, lifecycle audit events,
+baseline missing-provider guidance, and request-local ReqLLM options through
+the Phase 1A boundary without a provider-key environment fallback.
+
+=== Phase 2: Add Anthropic and OpenRouter
+
+Reuse the API-key lifecycle for Anthropic and OpenRouter, add provider-specific
+validation, errors, audit events, and missing-provider guidance, and verify
+model-role mappings can use several providers in one session without sharing
+credentials or billing paths.
+
+=== Phase 3: Add ChatGPT device authorization beta
+
+Add durable user-scoped authorization attempts, asynchronous polling, encrypted
+OAuth persistence, refresh leases, rotated-token updates, reauthorization, and
+the ChatGPT Subscription billing identity, settings and missing-provider UX,
+audit events, and exact-model route changes. Require Phase 0's compatibility
+suite to pass through the production path before shipping, retain the Beta
+label, and treat later failures as regressions that leave affected integrations
+unavailable while Kodo fixes the contract.
+
+=== Phase 4: Harden operations
+
+Complete operational hardening, exercise multi-node refresh and key rotation,
+verify audit and telemetry completeness, and publish operator guidance. All
+Phase 4 requirements are production-launch requirements even though they follow
+provider implementation. The encryption key remains the only
+integration-related boot secret.
+
+== Implementation
+
+Progress against this proposal is tracked in the
+link:IMPLEMENTATION.org[RFD 5 implementation checklist].
