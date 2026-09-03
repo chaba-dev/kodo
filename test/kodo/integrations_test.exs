@@ -4,6 +4,7 @@ defmodule Kodo.IntegrationsTest do
   alias Kodo.AccountsFixtures
   alias Kodo.Integrations
   alias Kodo.Integrations.CredentialEncryption
+  alias Kodo.Integrations.Integration
 
   describe "scoped credential lifecycle" do
     setup do
@@ -35,8 +36,13 @@ defmodule Kodo.IntegrationsTest do
 
     test "enforces one integration per user and provider", %{scope: scope} do
       assert {:ok, _integration} = connect(scope)
-      assert {:error, changeset} = connect(scope)
-      assert "has already been taken" in errors_on(changeset).user_id
+      assert {:error, :integration_already_exists} = connect(scope)
+    end
+
+    test "returns a bounded error when connection races account deletion", %{scope: scope} do
+      Repo.delete!(scope.user)
+
+      assert {:error, :integration_owner_not_found} = connect(scope)
     end
 
     test "replaces credentials with a new nonce and advances the generation", %{scope: scope} do
@@ -117,8 +123,10 @@ defmodule Kodo.IntegrationsTest do
     end
 
     test "retains provisional OAuth credentials until a fenced refresh succeeds", %{scope: scope} do
+      integration = oauth_integration(scope)
+
       assert {:ok, integration} =
-               Integrations.connect(scope, "openai_codex", "oauth", %{
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
                  "access_token" => "old-access",
                  "refresh_token" => "old-refresh",
                  "account_id" => "account"
@@ -174,9 +182,35 @@ defmodule Kodo.IntegrationsTest do
                )
     end
 
-    test "installs a generation-fenced OAuth authorization after disconnection", %{scope: scope} do
-      assert {:ok, integration} =
+    test "rejects raw connect and replacement APIs for OAuth credentials", %{scope: scope} do
+      assert {:error, :authentication_type_mismatch} =
                Integrations.connect(scope, "openai_codex", "oauth", %{
+                 "access_token" => "raw-access",
+                 "refresh_token" => "raw-refresh"
+               })
+
+      integration = oauth_integration(scope)
+
+      assert {:ok, connected} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
+                 "access_token" => "authorized",
+                 "refresh_token" => "refresh"
+               })
+
+      assert {:error, :authentication_type_mismatch} =
+               Integrations.replace_credentials(
+                 scope,
+                 connected.id,
+                 connected.credential_generation,
+                 %{"access_token" => "raw-replacement"}
+               )
+    end
+
+    test "installs a generation-fenced OAuth authorization after disconnection", %{scope: scope} do
+      integration = oauth_integration(scope)
+
+      assert {:ok, integration} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
                  "access_token" => "old-access",
                  "refresh_token" => "old-refresh"
                })
@@ -222,5 +256,14 @@ defmodule Kodo.IntegrationsTest do
 
   defp connect(scope) do
     Integrations.connect(scope, "openai", "api_key", %{"api_key" => "provider-secret"})
+  end
+
+  defp oauth_integration(scope) do
+    %Integration{user_id: scope.user.id}
+    |> Integration.create_changeset(%{
+      provider: "openai_codex",
+      authentication_type: "oauth"
+    })
+    |> Repo.insert!()
   end
 end

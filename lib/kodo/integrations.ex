@@ -34,13 +34,15 @@ defmodule Kodo.Integrations do
     end
   end
 
-  def connect(%Scope{user: user}, provider, authentication_type, credentials, opts \\ []) do
+  def connect(scope, provider, authentication_type, credentials, opts \\ [])
+
+  def connect(%Scope{user: user}, provider, "api_key", credentials, opts) do
     integration = %Integration{id: Ecto.UUID.generate(), user_id: user.id}
 
     changeset =
       Integration.create_changeset(integration, %{
         provider: provider,
-        authentication_type: authentication_type
+        authentication_type: "api_key"
       })
 
     with true <- changeset.valid?,
@@ -56,11 +58,15 @@ defmodule Kodo.Integrations do
       )
       |> Integration.constraint_changeset()
       |> Repo.insert()
+      |> normalize_insert_result()
     else
       false -> {:error, changeset}
       {:error, _reason} = error -> error
     end
   end
+
+  def connect(%Scope{}, _provider, _authentication_type, _credentials, _opts),
+    do: {:error, :authentication_type_mismatch}
 
   def replace_credentials(%Scope{} = scope, id, generation, credentials, opts \\ []) do
     install_credentials(
@@ -70,7 +76,7 @@ defmodule Kodo.Integrations do
       credentials,
       opts,
       Integration.connection_statuses(),
-      :any
+      "api_key"
     )
   end
 
@@ -191,8 +197,6 @@ defmodule Kodo.Integrations do
   defp require_generation(%Integration{credential_generation: generation}, generation), do: :ok
   defp require_generation(%Integration{}, _generation), do: {:error, :stale_credential_generation}
 
-  defp require_authentication_type(%Integration{}, :any), do: :ok
-
   defp require_authentication_type(%Integration{authentication_type: type}, type), do: :ok
 
   defp require_authentication_type(%Integration{}, _type),
@@ -226,6 +230,22 @@ defmodule Kodo.Integrations do
       {1, nil} -> Repo.get_by!(Integration, id: id, user_id: user_id)
       {0, nil} -> Repo.rollback(:stale_credential_generation)
     end
+  end
+
+  defp normalize_insert_result({:error, changeset} = error) do
+    cond do
+      constraint_error?(changeset, :foreign) -> {:error, :integration_owner_not_found}
+      constraint_error?(changeset, :unique) -> {:error, :integration_already_exists}
+      true -> error
+    end
+  end
+
+  defp normalize_insert_result(result), do: result
+
+  defp constraint_error?(changeset, type) do
+    Enum.any?(changeset.errors, fn {_field, {_message, metadata}} ->
+      metadata[:constraint] == type
+    end)
   end
 
   defp now, do: DateTime.utc_now()

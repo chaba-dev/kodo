@@ -45,6 +45,7 @@ defmodule Kodo.Integrations.Integration do
   @doc false
   def constraint_changeset(changeset) do
     changeset
+    |> foreign_key_constraint(:user_id)
     |> check_constraint(:provider, name: :provider_integrations_provider_valid)
     |> check_constraint(:authentication_type,
       name: :provider_integrations_authentication_type_valid
