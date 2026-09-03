@@ -45,10 +45,11 @@ credential through request-local options so concurrent users never share
 mutable process or application configuration.
 
 Every text, tool-calling, and structured-output generation requires an explicit
-typed Kodo credential whose owner is known before the adapter is called. This
-includes primary, search, review, evaluation, and live-provider paths. No
-production adapter entry point infers an owner or credential from ambient
-configuration.
+authenticated scope and typed non-secret integration reference before the
+resolver is called. This includes primary, search, review, evaluation, and
+live-provider paths. Only the resolver creates an operation-local credential;
+no production adapter entry point accepts one from a caller or infers an owner
+or credential from ambient configuration.
 
 Kodo is not yet live, so this proposal does not preserve a runtime migration
 fallback to deployment environment keys. Once user-owned integrations land, a
@@ -81,9 +82,9 @@ routes may use different providers, in which case the session owner must have
 every required integration. Kodo preflights every role integration before
 accepting a turn and resolves the current credential again immediately before
 each provider request. Key replacement, token refresh, disconnection, or
-revocation therefore takes effect for requests that have not started, without
-rewriting session history. It does not retroactively cancel a provider request
-to which Kodo has already sent a credential.
+revocation therefore takes effect for requests that have not been admitted,
+without rewriting session history. It does not retroactively cancel an
+admitted provider operation, even if its HTTP request has not yet been sent.
 
 The first release permits an explicit execution-route change between
 `openai` Platform billing and `openai_codex` ChatGPT subscription billing while
@@ -221,11 +222,12 @@ The database permits one active attempt per user and `openai_codex`
 integration. Each attempt records an attempt generation, expected integration
 generation, state, provider deadline and polling interval, encrypted sensitive
 fields with encryption-key and payload-format versions, and a database-time
-claim lease. Starting a new attempt atomically cancels and supersedes the prior
-attempt. Cancellation, expiry, completion, replacement, and disconnection
-transitions compare the attempt generation; completion installs credentials
-only while the attempt remains active and both its attempt and expected
-integration generations still match.
+claim lease plus monotonically increasing claim epoch. Starting a new attempt
+atomically cancels and supersedes the prior attempt. Cancellation, expiry,
+completion, replacement, and disconnection transitions compare the attempt
+generation; completion installs credentials only while the attempt remains
+active and its claim epoch, attempt generation, and expected integration
+generation still match.
 
 The attempt generation is assigned with its encrypted payload and is immutable
 for that attempt. Attempt ciphertext uses a unique nonce and AEAD associated
@@ -236,20 +238,27 @@ integration, provider, or generation therefore fails authentication rather
 than linking the wrong provider account.
 
 Device polling is connection-driven rather than replica-driven. The node that
-handles creation or a LiveView mount attempts one conditional claim update
-against that attempt's row and, on success, starts one finite polling task under
-`Kodo.ControlPlaneTaskSupervisor`. Closing the LiveView does not cancel that
-task. After a node failure, a browser reconnect or remount can resume the
-persisted attempt when the old claim expires. Concurrent tabs may contend for
-the same row, but replicas with no connection for that attempt perform no work.
-Kodo does not run a per-replica polling sweeper, so claim traffic is
-proportional to active device flows rather than cluster size.
+handles creation or a LiveView mount attempts one conditional claim update that
+increments the claim epoch and returns it to the claimant. On success, it starts
+one finite polling task under `Kodo.ControlPlaneTaskSupervisor`. The task
+conditionally renews its lease before expiry and verifies active state, current
+epoch, and lease ownership before admitting every poll or token exchange. Loss
+of ownership stops all later operations. The claim lease exceeds the hard
+poll-or-exchange HTTP timeout plus a safety margin. Closing the LiveView does
+not cancel the task. After a node failure, a browser reconnect or remount can
+increment the epoch and resume the persisted attempt when the old claim
+expires. Concurrent tabs may contend for the same row, but replicas with no
+connection for that attempt perform no work. Kodo does not run a per-replica
+polling sweeper, so claim traffic is proportional to active device flows rather
+than cluster size.
 
-Duplicate or stale polling and code-exchange results become no-ops after their
-generation check and cannot replace newer credentials. Expiry is applied
-lazily when an attempt is read, claimed, or superseded. Terminal rows are
-deleted in bounded batches; if periodic cleanup later becomes necessary, one
-database-elected cleanup owner runs it rather than every replica.
+A poll or exchange admitted before claim ownership changes may finish, but its
+result compares the claim epoch as well as attempt and integration generations
+and cannot persist after takeover. Duplicate or stale results therefore become
+no-ops and cannot replace newer credentials. Expiry is applied lazily when an
+attempt is read, claimed, or superseded. Terminal rows are deleted in bounded
+batches; if periodic cleanup later becomes necessary, one database-elected
+cleanup owner runs it rather than every replica.
 
 The OpenAI Codex source publishes the device flow. The downstream
 `chatgpt.com/backend-api/codex` inference contract is nevertheless less formal
@@ -304,10 +313,11 @@ Deleting a Kodo user cascades in the database to all of that user's integration
 rows and from each integration to its device-authorization attempts and claim
 state. Provider availability or revocation success never blocks account
 deletion. Any validation, polling, refresh, or rotation task that races with
-deletion observes the missing ownership-checked row and terminates without
-persisting state or issuing a later provider request. The deletion flow advises
-the user to revoke credentials at providers where Kodo cannot do so, but does
-not promise provider-side revocation.
+deletion and has not crossed its admission boundary observes the missing
+ownership-checked row and terminates without persisting state or issuing a
+provider request. An already admitted operation may still transmit and finish.
+The deletion flow advises the user to revoke credentials at providers where
+Kodo cannot do so, but does not promise provider-side revocation.
 
 Connection and validation are separate state axes. Connection is one of
 `disconnected`, `connected`, or `reauthorization_required`. Validation is one
@@ -390,20 +400,25 @@ credential. This RFD allows only `openai`, `openai_codex`, `anthropic`, and
 `openrouter`. Unknown, malformed, unsupported, and route-incompatible models
 fail before a provider request.
 
-The provider-independent LLM boundary accepts the resolved model and a typed
-Kodo credential value containing its provider identity. It fetches the
-integration by the canonical provider and requires exact equality between the
-resolved model provider and credential provider before recording an invocation
-or making an HTTP request. This check applies equally to catalog aliases,
-inline model specifications, and OpenRouter models whose underlying model
-vendor is OpenAI or Anthropic.
+The provider-independent LLM boundary accepts the authenticated scope, resolved
+model, and a typed non-secret integration reference containing integration and
+provider identity. It fetches the referenced integration under that scope,
+rechecks ownership and current generation, and requires exact equality between
+the resolved model provider, reference provider, and stored integration provider
+before admitting an operation. A forged or cross-user reference therefore
+fails closed. This check applies equally to catalog aliases, inline model
+specifications, and OpenRouter models whose underlying model vendor is OpenAI
+or Anthropic.
 
-The ReqLLM adapter translates an API-key credential to `:api_key` and a Codex
-credential to request-local OAuth options. Only the current API key or OAuth
-access token and required decrypted account identifier cross into ReqLLM;
-refresh tokens, expiry, generation, and rotation state remain in Kodo. No
-request uses `System.put_env/2`, `Application.put_env/3`, ReqLLM's global key
-store, or a shared OAuth file.
+Only the scoped resolver decrypts stored payloads and creates the internal,
+operation-local credential consumed by the ReqLLM adapter. Public generation
+callbacks and their callers cannot supply a raw API key, OAuth token, or this
+internal credential value. The adapter translates an API-key credential to
+`:api_key` and a Codex credential to request-local OAuth options. Only the
+current API key or OAuth access token and required decrypted account identifier
+cross into ReqLLM; refresh tokens, expiry, generation, and rotation state remain
+in Kodo. No request uses `System.put_env/2`, `Application.put_env/3`, ReqLLM's
+global key store, or a shared OAuth file.
 
 Status pages and turn preflight query only non-secret integration metadata and
 batch all required role providers into one indexed query. Immediately before
@@ -423,8 +438,12 @@ encrypted cache requires measured database pressure and a separate consistency
 review because stale cache entries weaken immediate replacement and
 disconnection semantics.
 
-Credential resolution occurs before Kodo persists a model invocation as
-started. A missing integration, a `disconnected` or
+The admission boundary is the final successful ownership, state, and generation
+check for the operation-local decrypted payload. For a model call, Kodo rechecks
+that generation while durably persisting the invocation start and billing
+provenance before allowing the HTTP request to proceed. Device polling and
+refresh use their claim and lease fencing at the same boundary. A missing
+integration, a `disconnected` or
 `reauthorization_required` connection, or an `invalid` validation returns a
 domain error naming the provider and required user action without including
 credential material. The session can accept a later turn after the user
@@ -438,15 +457,15 @@ resolved boundary: canonical provider, authentication type, and billing path
 material. This provenance remains stable even if the integration or mapping is
 later replaced.
 
-Once a provider request has resolved its credential and begun the external HTTP
-operation, replacement or disconnection does not alter that request. Its
-response may complete and be persisted with the billing provenance captured at
-start because Kodo cannot reliably retract transmitted credentials, stop
-provider computation, or prevent already-incurred billing. Each later provider
-request, including a tool-call continuation or another role call in the same
-turn, resolves again and fails closed if the integration is then unusable. A
-late validation or refresh result remains generation-fenced and cannot restore
-or overwrite a disconnected integration.
+Once a provider operation is admitted, replacement, disconnection, or user
+deletion does not alter it. The process may pause before transmission, then send
+and persist a response with the billing provenance captured at admission
+because Kodo cannot atomically coordinate database state with an external
+network write. Each later provider request, including a tool-call continuation
+or another role call in the same turn, resolves and seeks admission again, then
+fails closed if the integration is unusable. A late validation or refresh result
+remains generation-fenced and cannot restore or overwrite a disconnected
+integration.
 
 Kodo classifies Req and ReqLLM failures into bounded domain errors before they
 leave the LLM boundary. Session events, exception inspection, logs, telemetry,
@@ -785,7 +804,8 @@ Kodo applies the following boundaries:
 * Disconnecting instructs the user how to revoke the credential at the
   provider when Kodo cannot revoke it directly. The confirmation states that
   disconnect prevents future Kodo requests but cannot guarantee cancellation
-  of a request already sent to the provider or its associated billing.
+  of an operation already admitted or sent to the provider or its associated
+  billing.
 
 Operational documentation covers initial encryption-key provisioning, backup
 handling, rotation, provider revocation, device-flow failures, refresh failure

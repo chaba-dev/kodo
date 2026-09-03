@@ -54,13 +54,14 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   connecting, replacing, validating, and disconnecting credentials without
   accepting browser-supplied ownership; disconnect clears the encrypted payload
   but preserves the row, and every credential change advances its generation.
-- [ ] Add ~Kodo.LLM~ credential values and translate them into request-local
-  ReqLLM options without mutating process environment, application config, or
-  shared credential files; include the canonical provider identity in every
-  typed credential.
-- [ ] Require an explicitly owned typed credential in the ~Kodo.LLM~ text/tool
-  and structured-output generation callbacks and update primary, search,
-  review, and every direct adapter caller to supply one.
+- [ ] Add a typed, non-secret ~Kodo.LLM~ integration reference containing
+  integration and provider identity. Require authenticated scope plus that
+  reference in text/tool and structured-output callbacks, and update primary,
+  search, review, and every direct adapter caller to supply them.
+- [ ] Make the scoped resolver the only component that rechecks reference
+  ownership and generation, decrypts the payload, and constructs the private
+  operation-local credential translated into ReqLLM options; public callers
+  cannot supply raw API keys, OAuth tokens, or internal credential values.
 - [ ] Resolve each model through ~ReqLLM.model/1~, allow only ~openai~,
   ~openai_codex~, ~anthropic~, and ~openrouter~, and fetch the session owner's
   integration using the resulting ~LLMDB.Model.provider~; replace model-string
@@ -99,10 +100,12 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   references after use without claiming BEAM memory zeroization. Do not add an
   encrypted cache without measured database pressure and a separate consistency
   review.
-- [ ] Snapshot credential generation and billing provenance when each external
-  provider request starts; allow that request to complete after replacement or
-  disconnection, but require every later call and tool continuation to resolve
-  again and fail closed when the integration is unusable.
+- [ ] Define operation admission as the final successful ownership, state, and
+  generation check for the operation-local decrypted payload. For model calls,
+  recheck generation while durably recording invocation start and billing
+  provenance before permitting HTTP; allow admitted operations to complete
+  after replacement, disconnection, or deletion, but require every later call
+  and continuation to seek admission again.
 - [ ] Centralize exact HTTPS provider-origin allowlists and disable automatic
   redirects for every credential-bearing validation, inference, authorization,
   polling, exchange, and refresh request; classify every ~3xx~, including
@@ -125,7 +128,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   an environment-key fallback. Assert credential-derived identifiers are absent
   from persistence, UI, logs, telemetry, and audit records. Delete a user with
   API-key integrations and racing validation work, then assert all owned rows
-  are gone and the late task performs no state write or provider request. Test
+  are gone, pre-admission work sends no request, and admitted work cannot
+  recreate or mutate deleted integration state after completion. Test pauses
+  before and after admission, forged and cross-user references, and
   application-level non-retention in process state and messages without
   asserting physical memory erasure.
 - [ ] Do not expose a credential form or permit a production provider request
@@ -159,8 +164,9 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   request only after explicit confirmation identifies the exact provider and
   model and warns of possible charges; require ownership but not fresh sudo.
 - [ ] State in disconnect confirmation that future Kodo requests stop while an
-  already-sent provider request and its billing may continue, and link to
-  provider-side revocation when Kodo cannot revoke the credential directly.
+  already-admitted or sent provider operation and its billing may continue, and
+  link to provider-side revocation when Kodo cannot revoke the credential
+  directly.
 - [ ] Permit an active generation-fenced authorization attempt to complete
   after sudo expiry, require authenticated ownership but not fresh sudo for
   cancellation, and keep status viewing, automatic validation, and ordinary
@@ -221,7 +227,8 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   device authorization attempt per ~openai_codex~ integration, including
   encrypted sensitive fields, encryption-key and payload-format versions,
   immutable attempt and expected integration generations, provider deadline and
-  polling interval, database-time claim state, and bounded cleanup.
+  polling interval, database-time claim lease, monotonically increasing claim
+  epoch, and bounded cleanup.
 - [ ] Encrypt every attempt payload with a unique nonce and AEAD associated data
   binding attempt ID, integration ID, user ID, provider, immutable attempt
   generation, and payload-format version; fail closed on swaps, tampering,
@@ -233,9 +240,16 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   code separately, reject a provider-returned verification URL that does not
   match the exact allowlist, and never automatically navigate to that URL.
 - [ ] Trigger claims only from attempt creation or LiveView mount/remount, use
-  one conditional update against the exact attempt row, and run a successful
-  claim as a finite task under ~Kodo.ControlPlaneTaskSupervisor~ that survives
-  the originating LiveView closing.
+  one conditional update against the exact attempt row that increments and
+  returns its claim epoch, and run a successful claim as a finite task under
+  ~Kodo.ControlPlaneTaskSupervisor~ that survives the originating LiveView
+  closing.
+- [ ] Conditionally renew the claim lease before expiry and verify active state,
+  current claim epoch, and lease ownership before admitting every poll or token
+  exchange. Make its duration exceed the hard HTTP timeout plus a safety margin.
+  Stop future work immediately on ownership loss; fence completion by claim
+  epoch plus attempt and expected integration generations, while allowing an
+  already admitted network operation to finish without persisting stale results.
 - [ ] Do not run a device-polling sweeper on every replica; expire attempts
   lazily and delete terminal rows in bounded batches, using one database-elected
   cleanup owner only if periodic cleanup becomes necessary.
@@ -290,9 +304,11 @@ Implements [[file:README.adoc][RFD 5: Store user-owned LLM provider integrations
   through the user's ChatGPT integration and prohibit silent fallback to OpenAI
   API billing.
 - [ ] Test authorization ownership and expiry, polling backoff, two-node refresh
-  contention, multi-node and concurrent-tab device claims, duplicate exchange
-  and completion, LiveView closure and remount, node restart, superseded and
-  stale attempts, cancellation/replacement/disconnection races, late refresh
+  contention, multi-node and concurrent-tab device claims, claim epoch takeover
+  and conditional renewal, stale claimant polling and completion, pauses before
+  and after poll admission, duplicate exchange and completion, LiveView closure
+  and remount, node restart, superseded and stale attempts,
+  cancellation/replacement/disconnection races, late refresh
   success after lease expiry, takeover ~invalid_grant~, terminal-first success
   after a pause longer than every waiter timeout, node pause, replacement during
   refresh, omitted and rotated refresh tokens, omitted and changed account IDs,
