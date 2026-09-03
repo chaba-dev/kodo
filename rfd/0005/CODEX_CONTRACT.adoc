@@ -259,9 +259,13 @@ OpenAI catalog and are not evidence that a ChatGPT subscription exposes the
 same exact model, immutable snapshot, capabilities, or reasoning values as the
 Platform route.
 
-No `openai` to `openai_codex` compatibility record is approved yet. A record
-may be created only after one exact provider-neutral selector passes both
-routes for the same role-contract version. It must capture:
+No `openai` to `openai_codex` compatibility record is approved. The live
+`gpt-5.4` candidate is recorded as rejected in
+link:COMPATIBILITY-gpt-5.4-alpha-v1.adoc[`COMPATIBILITY-gpt-5.4-alpha-v1.adoc`]:
+the Platform route reported `gpt-5.4-2026-03-05`, while the subscription route
+reported the rolling `gpt-5.4` identity. A future approval may be created only
+after one exact provider-neutral selector passes both routes for the same
+role-contract version. It must capture:
 
 * exact source and destination model IDs returned by each route;
 * whether the selector is immutable or a rolling alias;
@@ -278,11 +282,13 @@ and review, and object output for review. Current role mappings use reasoning
 
 == Live compatibility spike
 
-The remaining Phase 0 spike requires an explicitly authorized ChatGPT test
-account. It must run through Kodo's eventual scoped integration boundary, not a
-shared Codex or ReqLLM OAuth file. Do not commit or attach tokens, device codes,
-authorization codes, account IDs, raw provider responses, or secret-bearing
-logs.
+The Phase 0 spike used an explicitly authorized ChatGPT account and a private,
+ignored credential file created by `scripts/openai_codex_contract.exs`. Device
+authorization, polling, exchange, refresh, and inference used this isolated
+credential rather than a shared Codex or ReqLLM OAuth file. The file was loaded
+by a new BEAM instance to simulate control-plane restart recovery. Tokens,
+device codes, authorization codes, account IDs, raw provider responses, and
+secret-bearing logs are not part of the compatibility record.
 
 For each exact candidate selector, record only bounded, credential-free
 outcomes for:
@@ -298,10 +304,22 @@ outcomes for:
 . same-origin and cross-origin redirect canaries proving no follow-up request
   and no forwarded authorization material.
 
-This live work remains incomplete. In particular, source and catalog inspection
-cannot establish subscription entitlement, accepted Kodo headers, model
-identity equivalence, server token rotation, quota semantics, or revocation
-behavior.
+The bounded run established subscription entitlement for `gpt-5.4`, acceptance
+of `originator: kodo`, text generation, strict tool calling and continuation,
+strict object output, and the current mappings' omitted `none` reasoning
+effort. The same behavioral checks passed through the Platform route. Refresh
+returned a distinct replacement refresh token, atomically replaced the
+spike-owned file, and a new inference process succeeded afterward.
+
+The candidate nevertheless failed the exact-identity rule above, so Phase 0
+ends with a no-go for cross-route switching. Deliberately exhausting a user's
+subscription or replaying a rotated token, which can revoke its token family,
+would add destructive cost without changing that decision. Quota was not
+present on the test account. Safe negative controls established HTTP 401 for a
+malformed bearer token and HTTP 401 with provider code `token_expired` for a
+malformed refresh token. Production quota and revocation behavior remains a
+bounded request outcome, not durable credential state, and requires regression
+evidence only if a future exact-identity candidate passes.
 
 == Phase 0 implementation consequences
 
@@ -319,5 +337,6 @@ The trace establishes these requirements for later implementation:
   token or enable OAuth-file fallback.
 * ReqLLM exceptions and stream events require bounded redaction before any
   persistence, logging, telemetry, or browser rendering.
-* Kodo cannot enable an `openai`/`openai_codex` route switch until a versioned
-  live compatibility record exists for the exact selector and role contract.
+* Kodo cannot enable an `openai`/`openai_codex` route switch until an approved
+  versioned live compatibility record exists for the exact selector and role
+  contract. The current `gpt-5.4` record is explicitly rejected.
