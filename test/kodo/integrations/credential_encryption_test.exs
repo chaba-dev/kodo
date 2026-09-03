@@ -117,6 +117,25 @@ defmodule Kodo.Integrations.CredentialEncryptionTest do
              CredentialEncryption.encrypt(%Integration{}, %{"api_key" => "secret"})
   end
 
+  test "rejects malformed payloads without raising or exposing them in diagnostics" do
+    sentinel = "plaintext-provider-secret"
+
+    assert result = {:error, :credential_payload_invalid}
+    assert ^result = CredentialEncryption.encrypt(integration(), sentinel)
+    refute inspect(result) =~ sentinel
+  end
+
+  test "rejects key versions that cannot be persisted" do
+    invalid_versions = ["contains spaces", "é", String.duplicate("a", 65)]
+
+    for version <- invalid_versions do
+      put_config(version, %{version => :binary.copy(<<1>>, 32)})
+
+      assert {:error, :credential_encryption_config_invalid} =
+               CredentialEncryption.validate_config()
+    end
+  end
+
   defp integration do
     %Integration{
       id: Ecto.UUID.generate(),

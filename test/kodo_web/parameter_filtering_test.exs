@@ -9,12 +9,15 @@ defmodule KodoWeb.ParameterFilteringTest do
       "refresh_token",
       "id_token",
       "device_code",
+      "device_auth_id",
       "user_code",
+      "code_verifier",
       "client_secret",
       "authorization",
       "encrypted_credentials",
       "account_id",
       "chatgpt_account_id",
+      "chatgpt_user_id",
       "organization_id",
       "workspace_id"
     ]

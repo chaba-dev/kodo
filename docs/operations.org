@@ -108,7 +108,8 @@ Generate key material with a cryptographically secure generator, store it in
 the deployment secret manager, and inject the same ring into every replica. Do
 not derive it from ~SECRET_KEY_BASE~ or any provider credential. For example,
 the shape is ~{"2026-09-v1":"<base64-encoded 32-byte key>"}~; never commit the
-real value.
+real value. Key versions must be 1–64 ASCII letters, digits, dots, underscores,
+or hyphens, and must begin with a letter or digit.
 
 Startup validates every configured key and refuses to proceed unless the
 current version exists. After PostgreSQL starts, Kodo also verifies that every
