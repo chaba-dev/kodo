@@ -17,9 +17,9 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClient do
 
   @doc false
   def get_models(api_key, req_options) when is_binary(api_key) and is_list(req_options) do
-    # Tests may replace only the transport plug; the credential-bearing origin
-    # and redirect policy remain immutable even through this test seam.
-    req_options = Keyword.take(req_options, [:plug])
+    # Tests may replace only the transport boundary; the credential-bearing
+    # origin and redirect policy remain immutable even through these seams.
+    req_options = Keyword.take(req_options, [:plug, :finch_request])
 
     options =
       [
@@ -29,8 +29,10 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClient do
         retry: false,
         receive_timeout: @timeout,
         request_timeout: @timeout,
-        finch: [pool_timeout: @timeout],
-        connect_options: [timeout: @timeout]
+        finch: [
+          pool_timeout: @timeout,
+          conn_opts: [transport_opts: [timeout: @timeout]]
+        ]
       ] ++ req_options
 
     try do
@@ -47,9 +49,19 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClient do
         {:error, _error} ->
           {:error, :network_error}
       end
-    catch
-      :exit, {_reason, {NimblePool, :checkout, _arguments}} ->
-        {:error, :network_error}
+    rescue
+      exception in RuntimeError ->
+        # Finch currently turns its structured checkout timeout into a
+        # RuntimeError. Normalize only that dependency-owned failure here;
+        # unrelated programming errors must remain visible.
+        if String.starts_with?(
+             Exception.message(exception),
+             "Finch was unable to provide a connection within the timeout"
+           ) do
+          {:error, :timeout}
+        else
+          reraise exception, __STACKTRACE__
+        end
     end
   end
 

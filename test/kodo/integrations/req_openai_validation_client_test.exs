@@ -1,6 +1,8 @@
 defmodule Kodo.Integrations.ReqOpenAIValidationClientTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureIO
+
   alias Kodo.Integrations.ReqOpenAIValidationClient
 
   test "sends the key only to the fixed OpenAI HTTPS models endpoint" do
@@ -40,11 +42,39 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClientTest do
     end
   end
 
-  test "normalizes a transport pool checkout exit" do
-    plug = fn _conn -> exit({:timeout, {NimblePool, :checkout, []}}) end
+  test "builds the production Finch request with bounded transport options" do
+    test_pid = self()
 
-    assert {:error, :network_error} =
-             ReqOpenAIValidationClient.get_models("pool-timeout-secret", plug: plug)
+    finch_request = fn request, finch_request, _finch_name, options ->
+      send(test_pid, {:finch_request, finch_request, options})
+      {request, %Req.Response{status: 200, body: %{"data" => []}}}
+    end
+
+    capture_io(:stderr, fn ->
+      assert {:ok, 200, %{"data" => []}} =
+               ReqOpenAIValidationClient.get_models("finch-options-secret",
+                 finch_request: finch_request
+               )
+    end)
+
+    assert_receive {:finch_request, request, options}
+    assert request.host == "api.openai.com"
+    assert options[:pool_timeout] == 5_000
+    assert options[:receive_timeout] == 5_000
+    assert options[:request_timeout] == 5_000
+  end
+
+  test "normalizes Finch's pool checkout exception" do
+    finch_request = fn _request, _finch_request, _finch_name, _options ->
+      raise "Finch was unable to provide a connection within the timeout due to excess queuing"
+    end
+
+    capture_io(:stderr, fn ->
+      assert {:error, :timeout} =
+               ReqOpenAIValidationClient.get_models("pool-timeout-secret",
+                 finch_request: finch_request
+               )
+    end)
   end
 
   test "does not retry provider failures" do
