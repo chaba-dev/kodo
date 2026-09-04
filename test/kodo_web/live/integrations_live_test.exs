@@ -126,6 +126,12 @@ defmodule KodoWeb.IntegrationsLiveTest do
     {:ok, view, _html} = live(conn, ~p"/integrations?action=disconnect")
 
     assert has_element?(view, "#openai-disconnect-panel", "already admitted or sent")
+
+    assert has_element?(
+             view,
+             "#openai-revoke-key-link[href='https://platform.openai.com/api-keys'][target='_blank']"
+           )
+
     view |> element("#openai-confirm-disconnect") |> render_click()
 
     assert {:ok, disconnected} = Integrations.get_integration_by_provider(scope, "openai")

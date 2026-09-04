@@ -357,7 +357,17 @@ defmodule KodoWeb.IntegrationsLive do
             >
               <h4 class="font-semibold text-zinc-950 dark:text-white">Disconnect OpenAI?</h4>
               <p class="mt-1 max-w-2xl text-sm leading-6 text-zinc-700 dark:text-zinc-300">
-                Future Kodo requests will stop. A provider operation already admitted or sent may finish and may still incur charges. Revoke the key in OpenAI if it must stop outside Kodo.
+                Future Kodo requests will stop. A provider operation already admitted or sent may finish and may still incur charges.
+                <.link
+                  id="openai-revoke-key-link"
+                  href="https://platform.openai.com/api-keys"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="font-semibold text-red-800 underline decoration-red-300 underline-offset-2 hover:text-red-950 dark:text-red-300 dark:hover:text-red-200"
+                >
+                  Revoke the key in OpenAI
+                </.link>
+                if it must stop outside Kodo.
               </p>
               <div class="mt-4 flex flex-wrap justify-end gap-2">
                 <.link
