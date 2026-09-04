@@ -185,6 +185,7 @@ defmodule Kodo.Agent.Loop do
              review,
              contract,
              capability_validation,
+             request,
              context.ownership
            ),
          {:ok, diff} <-
@@ -249,6 +250,7 @@ defmodule Kodo.Agent.Loop do
          review,
          contract,
          capability_validation,
+         request,
          ownership
        ) do
     invocation_id = Ecto.UUID.generate()
@@ -260,15 +262,18 @@ defmodule Kodo.Agent.Loop do
              "invocation_id" => invocation_id,
              "primary_invocation_id" => primary_invocation_id,
              "role" => "review",
-             "provider" => review["provider"],
+             "provider" => canonical_provider(request),
              "model" => review["model"],
+             "model_identity" => request.model.id,
+             "authentication_type" => request.reference.authentication_type,
+             "billing_path" => Atom.to_string(request.reference.billing_path),
              "reasoning" => review["reasoning"],
              "role_contract" => contract.id,
              "toolset_version" => contract.toolset_version,
              "capability_validation" => capability_validation,
              "model_mapping" => mapping
            },
-           version: 1,
+           version: 2,
            parent_id: primary_invocation_id,
            ownership: ownership
          ) do
@@ -476,6 +481,7 @@ defmodule Kodo.Agent.Loop do
              mapping,
              primary,
              capability_validation,
+             request,
              ownership
            ),
          :ok <- rehoming_boundary(),
@@ -559,6 +565,7 @@ defmodule Kodo.Agent.Loop do
          mapping,
          primary,
          capability_validation,
+         request,
          ownership
        ) do
     invocation_id = Ecto.UUID.generate()
@@ -570,15 +577,18 @@ defmodule Kodo.Agent.Loop do
              "invocation_id" => invocation_id,
              "continuation" => continuation,
              "role" => "primary",
-             "provider" => primary["provider"],
+             "provider" => canonical_provider(request),
              "model" => primary["model"],
+             "model_identity" => request.model.id,
+             "authentication_type" => request.reference.authentication_type,
+             "billing_path" => Atom.to_string(request.reference.billing_path),
              "reasoning" => primary["reasoning"],
              "role_contract" => primary["role_contract"],
              "toolset_version" => primary["toolset_version"],
              "capability_validation" => capability_validation,
              "model_mapping" => mapping
            },
-           version: 3,
+           version: 4,
            ownership: ownership
          ) do
       {:ok, _event} -> {:ok, invocation_id}
@@ -927,6 +937,7 @@ defmodule Kodo.Agent.Loop do
              state.contract,
              state.capability_validation,
              continuation,
+             request,
              state.context
            ),
          :ok <- rehoming_boundary(),
@@ -1045,6 +1056,7 @@ defmodule Kodo.Agent.Loop do
          contract,
          capability_validation,
          continuation,
+         request,
          context
        ) do
     invocation_id = Ecto.UUID.generate()
@@ -1057,15 +1069,18 @@ defmodule Kodo.Agent.Loop do
              "delegation_tool_call_id" => parent_call["id"],
              "continuation" => continuation,
              "role" => "search",
-             "provider" => search["provider"],
+             "provider" => canonical_provider(request),
              "model" => search["model"],
+             "model_identity" => request.model.id,
+             "authentication_type" => request.reference.authentication_type,
+             "billing_path" => Atom.to_string(request.reference.billing_path),
              "reasoning" => search["reasoning"],
              "role_contract" => contract.id,
              "toolset_version" => contract.toolset_version,
              "capability_validation" => capability_validation,
              "model_mapping" => context.mapping
            },
-           version: 1,
+           version: 2,
            parent_id: context.invocation_id,
            ownership: context.ownership
          ) do
@@ -1632,6 +1647,8 @@ defmodule Kodo.Agent.Loop do
       Keyword.put(opts, :adapter, adapter)
     )
   end
+
+  defp canonical_provider(request), do: Atom.to_string(request.model.provider)
 
   defp within_budget(invocations, tokens, budgets) do
     cond do

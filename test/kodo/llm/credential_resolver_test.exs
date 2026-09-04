@@ -183,6 +183,18 @@ defmodule Kodo.LLM.CredentialResolverTest do
              CredentialResolver.resolve(context.scope, unsupported_model, context.reference)
   end
 
+  test "rejects forged authentication and billing provenance", context do
+    forged_authentication = %{context.reference | authentication_type: "oauth"}
+
+    assert {:error, :integration_authentication_mismatch} =
+             resolve(%{context | reference: forged_authentication})
+
+    forged_billing = %{context.reference | billing_path: :subscription}
+
+    assert {:error, :integration_billing_mismatch} =
+             resolve(%{context | reference: forged_billing})
+  end
+
   test "rejects malformed decrypted payloads with a bounded error" do
     other_scope = AccountsFixtures.user_scope_fixture()
 

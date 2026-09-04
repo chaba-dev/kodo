@@ -114,7 +114,10 @@ defmodule Kodo.Agent.LoopTest do
     assert invocation.payload["provider"] == "openai"
     assert invocation.payload["model"] == "openai:gpt-4o-mini"
     assert invocation.payload["reasoning"] == "none"
-    assert invocation.version == 3
+    assert invocation.version == 4
+    assert invocation.payload["model_identity"] == "gpt-4o-mini"
+    assert invocation.payload["authentication_type"] == "api_key"
+    assert invocation.payload["billing_path"] == "platform"
     assert invocation.payload["role_contract"] == "alpha-v1"
     refute Map.has_key?(invocation.payload, "role_prompt_version")
     assert invocation.payload["toolset_version"] == "workspace-v5"
@@ -177,7 +180,7 @@ defmodule Kodo.Agent.LoopTest do
     invocation =
       Enum.find(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
 
-    assert invocation.version == 3
+    assert invocation.version == 4
     assert invocation.payload["model"] == "openai:gpt-4o-mini"
     assert invocation.payload["role_contract"] == "alpha-v1"
     assert invocation.payload["toolset_version"] == "workspace-v5"
