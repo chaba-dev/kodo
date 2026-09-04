@@ -45,9 +45,8 @@ defmodule Kodo.LLM.CredentialResolver do
          :ok <- require_provider(reference.provider, provider),
          :ok <- require_provider(integration.provider, provider),
          :ok <- require_usable(integration),
-         {:ok, payload} <- CredentialEncryption.decrypt(integration),
-         {:ok, credential} <- build_credential(integration, payload) do
-      {:ok, credential}
+         {:ok, payload} <- CredentialEncryption.decrypt(integration) do
+      build_credential(integration, payload)
     end
   end
 
