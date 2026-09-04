@@ -3,6 +3,7 @@ defmodule KodoWeb.IntegrationsLive do
 
   alias Kodo.Accounts
   alias Kodo.Integrations
+  alias Kodo.Integrations.OpenAIValidation
 
   @provider "openai"
   @sensitive_actions ~w(connect replace disconnect)
@@ -10,6 +11,10 @@ defmodule KodoWeb.IntegrationsLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{socket.assigns.current_scope.user.id}")
+    end
+
     {:ok,
      socket
      |> assign(:action, nil)
@@ -39,9 +44,10 @@ defmodule KodoWeb.IntegrationsLive do
     with true <- socket.assigns.action in ~w(connect replace),
          true <- sudo_mode?(socket),
          :ok <- validate_api_key(api_key),
-         {:ok, _integration} <- save_api_key(socket, api_key) do
+         {:ok, integration} <- save_api_key(socket, api_key) do
       {:noreply,
        socket
+       |> start_validation(integration)
        |> put_flash(:info, "OpenAI API key saved. Validation is pending.")
        |> push_patch(to: ~p"/integrations")}
     else
@@ -87,6 +93,23 @@ defmodule KodoWeb.IntegrationsLive do
     end
   end
 
+  @impl true
+  def handle_info({reference, _result}, %{assigns: %{validation_ref: reference}} = socket) do
+    Process.demonitor(reference, [:flush])
+    {:noreply, socket |> assign(:validation_ref, nil) |> load_integration()}
+  end
+
+  def handle_info(
+        {:DOWN, reference, :process, _pid, _reason},
+        %{assigns: %{validation_ref: reference}} = socket
+      ) do
+    {:noreply, socket |> assign(:validation_ref, nil) |> load_integration()}
+  end
+
+  def handle_info({:integration_validation_finished, _id, _generation}, socket) do
+    {:noreply, load_integration(socket)}
+  end
+
   defp save_api_key(%{assigns: %{integration: nil}} = socket, api_key) do
     Integrations.connect(socket.assigns.current_scope, @provider, "api_key", %{
       "api_key" => api_key
@@ -107,11 +130,30 @@ defmodule KodoWeb.IntegrationsLive do
   defp load_integration(socket) do
     integration =
       case Integrations.get_integration_by_provider(socket.assigns.current_scope, @provider) do
-        {:ok, integration} -> integration
+        {:ok, integration} -> integration_metadata(integration)
         {:error, :integration_not_found} -> nil
       end
 
     assign(socket, :integration, integration)
+  end
+
+  # Browser-facing state needs lifecycle metadata only. In particular, keeping
+  # ciphertext in the LiveView would widen credential retention for no benefit.
+  defp integration_metadata(integration) do
+    Map.take(integration, [
+      :id,
+      :provider,
+      :connection_status,
+      :validation_status,
+      :credential_generation,
+      :validated_at,
+      :validation_error_code
+    ])
+  end
+
+  defp start_validation(socket, integration) do
+    task = OpenAIValidation.start(socket.assigns.current_scope, integration)
+    assign(socket, :validation_ref, task.ref)
   end
 
   defp validate_api_key(api_key)
@@ -190,6 +232,16 @@ defmodule KodoWeb.IntegrationsLive do
               Connecting a provider does not change existing model routes or billing choices.
             </p>
           </div>
+
+          <p
+            :if={assigns[:validation_ref]}
+            id="openai-validation-progress"
+            class="flex items-center gap-2 text-xs font-medium text-zinc-500"
+            role="status"
+          >
+            <span class="size-2 animate-pulse rounded-full bg-amber-500"></span>
+            Checking OpenAI connection…
+          </p>
 
           <section
             id="openai-integration"

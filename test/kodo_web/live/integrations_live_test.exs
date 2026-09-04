@@ -40,6 +40,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
   end
 
   test "connects without assigning or rendering the submitted key", %{conn: conn, scope: scope} do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
     {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
 
     assert has_element?(view, "#openai-api-key-form")
@@ -51,14 +52,30 @@ defmodule KodoWeb.IntegrationsLiveTest do
     |> form("#openai-api-key-form", %{"integration" => %{"api_key" => secret}})
     |> render_submit()
 
+    assert_receive {:integration_validation_finished, _id, _generation}
+    _ = :sys.get_state(view.pid)
     refute render(view) =~ secret
     refute inspect(:sys.get_state(view.pid)) =~ secret
     refute has_element?(view, "#openai-api-key-panel")
     assert has_element?(view, "#openai-status", "Connected")
-    assert has_element?(view, "#openai-status", "Pending validation")
+    assert has_element?(view, "#openai-status", "Validation unavailable")
 
     assert {:ok, integration} = Integrations.get_integration_by_provider(scope, "openai")
     assert {:ok, %{"api_key" => ^secret}} = CredentialEncryption.decrypt(integration)
+  end
+
+  test "updates the displayed status after asynchronous validation", %{conn: conn, scope: scope} do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
+    {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
+
+    view
+    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "valid-live-secret"}})
+    |> render_submit()
+
+    assert_receive {:integration_validation_finished, _id, _generation}
+    _ = :sys.get_state(view.pid)
+    assert has_element?(view, "#openai-status", "Validated")
+    refute has_element?(view, "#openai-validation-progress")
   end
 
   test "replaces a key and clears the form after success", %{conn: conn, scope: scope} do
