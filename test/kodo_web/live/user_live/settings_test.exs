@@ -15,6 +15,7 @@ defmodule KodoWeb.UserLive.SettingsTest do
       assert has_element?(lv, "#settings-shell")
       assert has_element?(lv, "#settings-sections[aria-label='Settings sections']")
       assert has_element?(lv, "#settings-nav-account[aria-current='page']")
+      assert has_element?(lv, "#settings-nav-integrations[href='/integrations']")
       assert has_element?(lv, "#settings-return[href='/sessions']")
       assert has_element?(lv, "#settings-detail #email-settings #email_form")
       assert has_element?(lv, "#settings-detail #password-settings #password_form")

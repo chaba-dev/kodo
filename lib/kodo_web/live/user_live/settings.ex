@@ -26,6 +26,12 @@ defmodule KodoWeb.UserLive.Settings do
           navigate={~p"/users/settings"}
           current
         />
+        <:section
+          id="settings-nav-integrations"
+          label="Integrations"
+          icon="hero-link"
+          navigate={~p"/integrations"}
+        />
 
         <div id="account-settings" class="space-y-5">
           <section

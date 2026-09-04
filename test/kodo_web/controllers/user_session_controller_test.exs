@@ -72,6 +72,31 @@ defmodule KodoWeb.UserSessionControllerTest do
     end
   end
 
+  describe "GET /users/reauthenticate/:provider/:action" do
+    test "preserves only the allowlisted OpenAI action for reauthentication", %{
+      conn: conn,
+      user: user
+    } do
+      conn =
+        conn
+        |> log_in_user(user)
+        |> get(~p"/users/reauthenticate/openai/replace")
+
+      assert redirected_to(conn) == ~p"/users/log-in"
+      assert get_session(conn, :user_return_to) == ~p"/integrations?action=replace"
+    end
+
+    test "rejects unsupported providers and actions", %{conn: conn, user: user} do
+      conn =
+        conn
+        |> log_in_user(user)
+        |> get(~p"/users/reauthenticate/other/reveal")
+
+      assert redirected_to(conn) == ~p"/integrations"
+      refute get_session(conn, :user_return_to)
+    end
+  end
+
   describe "POST /users/log-in - magic link" do
     test "logs the user in", %{conn: conn, user: user} do
       {token, _hashed_token} = generate_user_magic_link_token(user)

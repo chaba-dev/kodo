@@ -4,6 +4,16 @@ defmodule KodoWeb.UserSessionController do
   alias Kodo.Accounts
   alias KodoWeb.UserAuth
 
+  def reauthenticate(conn, %{"provider" => "openai", "action" => action})
+      when action in ~w(connect replace disconnect) do
+    conn
+    |> put_session(:user_return_to, ~p"/integrations?action=#{action}")
+    |> put_flash(:info, "Re-authenticate to continue managing your OpenAI integration.")
+    |> redirect(to: ~p"/users/log-in")
+  end
+
+  def reauthenticate(conn, _params), do: redirect(conn, to: ~p"/integrations")
+
   def create(conn, %{"_action" => "confirmed"} = params) do
     create(conn, params, "User confirmed successfully.")
   end
