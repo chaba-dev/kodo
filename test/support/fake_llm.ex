@@ -32,7 +32,7 @@ defmodule Kodo.Test.FakeLLM do
   end
 
   @impl true
-  def generate(model, messages, tools, opts) do
+  def generate(model, messages, tools, _credential, opts) do
     last = List.last(messages)
 
     force_final_turn? =
@@ -61,7 +61,7 @@ defmodule Kodo.Test.FakeLLM do
   end
 
   @impl true
-  def generate_object(_model, messages, _schema, _opts) do
+  def generate_object(_model, messages, _schema, _credential, _opts) do
     if test_pid = Application.get_env(:kodo, :fake_llm_review_pid) do
       send(test_pid, {:review_messages, messages})
     end

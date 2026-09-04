@@ -3,6 +3,17 @@ defmodule Kodo.Agent.EvaluationRunnerTest do
 
   alias Kodo.Agent.EvaluationRunner
 
+  test "evaluation runs require an explicit authenticated user scope" do
+    scope = %Kodo.Accounts.Scope{user: %Kodo.Accounts.User{id: 123}}
+    suite = %{"name" => "empty", "version" => 1, "tasks" => []}
+
+    report = EvaluationRunner.run(scope, suite: suite)
+
+    assert report["suite"]["name"] == "empty"
+    assert report["tasks"] == []
+    refute function_exported?(EvaluationRunner, :run, 0)
+  end
+
   test "search scoring is deterministic and penalizes irrelevant files" do
     expected = %{
       "relevant_files" => ["lib/a.ex"],

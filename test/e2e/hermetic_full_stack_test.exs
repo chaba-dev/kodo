@@ -2,6 +2,7 @@ defmodule Kodo.E2E.HermeticFullStackTest do
   use Kodo.DataCase, async: false
 
   alias Kodo.Sessions
+  alias Kodo.Integrations
   alias Kodo.Test.FullStackCase, as: Stack
 
   import Kodo.AccountsFixtures
@@ -9,7 +10,7 @@ defmodule Kodo.E2E.HermeticFullStackTest do
   @moduletag timeout: 120_000
 
   @prompt "KODO_HERMETIC_FULL_STACK_FIX_GREETING"
-  @model "test:hermetic-full-stack"
+  @model "openai:gpt-4o-mini"
   @required_tools ["apply_patch", "read_file", "git_diff"]
   @http_created_status 201
   @http_accepted_status 202
@@ -26,7 +27,13 @@ defmodule Kodo.E2E.HermeticFullStackTest do
 
     stack = Stack.start_stack!()
     workspace = Stack.fixture!()
-    token = user_fixture() |> Kodo.Accounts.generate_user_agent_token()
+    user = user_fixture()
+    scope = Kodo.Accounts.Scope.for_user(user)
+
+    {:ok, _integration} =
+      Integrations.connect(scope, "openai", "api_key", %{"api_key" => "e2e-test-key"})
+
+    token = Kodo.Accounts.generate_user_agent_token(user)
     runner = Stack.start_runner!(stack.base_url, workspace, token)
     %{stack: stack, workspace: workspace, runner: runner, token: token}
   end

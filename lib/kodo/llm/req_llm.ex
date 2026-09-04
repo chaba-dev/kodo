@@ -4,6 +4,7 @@ defmodule Kodo.LLM.ReqLLM do
   @behaviour Kodo.LLM
 
   alias Kodo.Agent.ModelCapabilities
+  alias Kodo.LLM.Credential
   alias ReqLLM.Context
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
@@ -30,13 +31,13 @@ defmodule Kodo.LLM.ReqLLM do
   end
 
   @impl true
-  def generate(model, messages, tools, opts) do
+  def generate(model, messages, tools, %Credential{} = credential, opts) do
     context = build_context(messages)
-    request(model, context, tools, opts)
+    request(model, context, tools, credential, opts)
   end
 
   @impl true
-  def generate_object(model, messages, schema, opts) do
+  def generate_object(model, messages, schema, %Credential{} = credential, opts) do
     request_opts =
       [
         receive_timeout: Keyword.fetch!(opts, :timeout),
@@ -44,6 +45,7 @@ defmodule Kodo.LLM.ReqLLM do
         output_validation: :strict
       ]
       |> put_reasoning_effort(opts[:reasoning])
+      |> put_credential(credential)
 
     with {:ok, response} <-
            ReqLLM.generate_object(model, build_context(messages), schema, request_opts) do
@@ -59,6 +61,13 @@ defmodule Kodo.LLM.ReqLLM do
       total_timeout: Keyword.fetch!(opts, :timeout)
     ]
     |> put_reasoning_effort(opts[:reasoning])
+  end
+
+  @doc false
+  def request_options(tools, %Credential{} = credential, opts) do
+    tools
+    |> request_options(opts)
+    |> put_credential(credential)
   end
 
   @doc false
@@ -81,8 +90,8 @@ defmodule Kodo.LLM.ReqLLM do
     end)
   end
 
-  defp request(model, context, tools, opts) do
-    request_opts = request_options(tools, opts)
+  defp request(model, context, tools, credential, opts) do
+    request_opts = request_options(tools, credential, opts)
 
     with {:ok, response} <- ReqLLM.generate_text(model, context, request_opts) do
       classified = Response.classify(response)
@@ -103,6 +112,21 @@ defmodule Kodo.LLM.ReqLLM do
 
   defp put_reasoning_effort(opts, reasoning) do
     Keyword.put(opts, :reasoning_effort, Map.fetch!(@reasoning_efforts, reasoning))
+  end
+
+  defp put_credential(opts, %Credential{authentication_type: "api_key", token: token}) do
+    Keyword.put(opts, :api_key, token)
+  end
+
+  defp put_credential(opts, %Credential{
+         authentication_type: "oauth",
+         token: token,
+         account_id: account_id
+       }) do
+    opts
+    |> Keyword.put(:auth_mode, :oauth)
+    |> Keyword.put(:access_token, token)
+    |> Keyword.put(:chatgpt_account_id, account_id)
   end
 
   defp resolve_dispatchable_model(model) do

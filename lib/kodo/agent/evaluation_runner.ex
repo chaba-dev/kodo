@@ -2,18 +2,20 @@ defmodule Kodo.Agent.EvaluationRunner do
   @moduledoc "Runs the pinned MVP evaluation suite against a live LLM adapter."
 
   alias Kodo.Agent.{EvaluationSuite, ModelMapping, ReviewResult, Roles, Tools}
+  alias Kodo.Accounts.Scope
+  alias Kodo.LLM
 
   @timeout 120_000
   @max_output 32_000
 
   @doc "Runs every task and returns a JSON-safe report. Errors are isolated per task."
-  def run(opts \\ []) do
+  def run(%Scope{} = scope, opts \\ []) do
     started_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
     suite = Keyword.get_lazy(opts, :suite, &EvaluationSuite.load!/0)
     adapter = Keyword.get(opts, :adapter, Kodo.LLM.ReqLLM)
     mapping = Keyword.get(opts, :mapping, ModelMapping.balanced())
 
-    tasks = Enum.map(suite["tasks"], &safe_task(&1, adapter, mapping))
+    tasks = Enum.map(suite["tasks"], &safe_task(&1, scope, adapter, mapping))
 
     %{
       "run" => %{"started_at" => started_at, "revision" => revision()},
@@ -79,12 +81,12 @@ defmodule Kodo.Agent.EvaluationRunner do
     }
   end
 
-  defp safe_task(task, adapter, mapping) do
+  defp safe_task(task, scope, adapter, mapping) do
     started = System.monotonic_time(:millisecond)
 
     result =
       try do
-        execute(task, adapter, mapping)
+        execute(task, scope, adapter, mapping)
       rescue
         exception -> %{"error" => Exception.message(exception), "trace" => [], "usage" => %{}}
       catch
@@ -102,12 +104,14 @@ defmodule Kodo.Agent.EvaluationRunner do
     |> Map.put("latency_ms", System.monotonic_time(:millisecond) - started)
   end
 
-  defp execute(%{"type" => "search"} = task, adapter, mapping) do
+  defp execute(%{"type" => "search"} = task, scope, adapter, mapping) do
     with_workspace(task["fixture"]["files"], fn root ->
       role = ModelMapping.role!(mapping, :search)
       contract = Roles.fetch!(:search, role["role_contract"])
       prompt = task["prompt"] <> " Cite each finding as path:line and quote evidence."
-      {answer, trace, usage} = tool_loop(adapter, role, contract, prompt, root, [], [], mapping)
+
+      {answer, trace, usage} =
+        tool_loop(scope, adapter, role, contract, prompt, root, [], mapping)
 
       %{
         "answer" => answer,
@@ -118,17 +122,13 @@ defmodule Kodo.Agent.EvaluationRunner do
     end)
   end
 
-  defp execute(%{"type" => "review"} = task, adapter, mapping) do
+  defp execute(%{"type" => "review"} = task, scope, adapter, mapping) do
     role = ModelMapping.role!(mapping, :review)
     contract = Roles.fetch!(:review, role["role_contract"])
     messages = messages(contract.prompt, task["prompt"] <> "\n\n" <> task["fixture"]["diff"])
     started = System.monotonic_time(:millisecond)
 
-    {:ok, response} =
-      adapter.generate_object(role["model"], messages, ReviewResult.schema(),
-        timeout: @timeout,
-        reasoning: role["reasoning"]
-      )
+    {:ok, response} = generate_object(scope, adapter, role, messages, ReviewResult.schema())
 
     %{
       "object" => response.object,
@@ -138,7 +138,7 @@ defmodule Kodo.Agent.EvaluationRunner do
     }
   end
 
-  defp execute(%{"type" => "implementation"} = task, adapter, mapping) do
+  defp execute(%{"type" => "implementation"} = task, scope, adapter, mapping) do
     with_workspace(task["fixture"]["files"], fn root ->
       System.cmd("git", ["init", "-q"], cd: root, stderr_to_stdout: true)
       System.cmd("git", ["add", "."], cd: root, stderr_to_stdout: true)
@@ -149,10 +149,10 @@ defmodule Kodo.Agent.EvaluationRunner do
       prompt = implementation_prompt(task, checks)
 
       {answer, trace, usage} =
-        tool_loop(adapter, role, contract, prompt, root, checks, [], mapping)
+        tool_loop(scope, adapter, role, contract, prompt, root, checks, mapping)
 
       {diff, 0} = System.cmd("git", ["diff", "--no-ext-diff"], cd: root, stderr_to_stdout: true)
-      initial_review = structured_review(adapter, mapping, task["prompt"], diff)
+      initial_review = structured_review(scope, adapter, mapping, task["prompt"], diff)
 
       {answer, trace, usage, review} =
         if initial_review.object["clean"] do
@@ -162,12 +162,22 @@ defmodule Kodo.Agent.EvaluationRunner do
             correction_prompt(task, checks, initial_review.object["findings"])
 
           {corrected_answer, correction_trace, correction_usage} =
-            tool_loop(adapter, role, contract, correction_prompt, root, checks, [], mapping)
+            tool_loop(
+              scope,
+              adapter,
+              role,
+              contract,
+              correction_prompt,
+              root,
+              checks,
+              mapping
+            )
 
           {corrected_diff, 0} =
             System.cmd("git", ["diff", "--no-ext-diff"], cd: root, stderr_to_stdout: true)
 
-          corrected_review = structured_review(adapter, mapping, task["prompt"], corrected_diff)
+          corrected_review =
+            structured_review(scope, adapter, mapping, task["prompt"], corrected_diff)
 
           {corrected_answer,
            trace ++
@@ -201,12 +211,13 @@ defmodule Kodo.Agent.EvaluationRunner do
     end)
   end
 
-  defp tool_loop(adapter, role, contract, prompt, root, commands, trace, mapping) do
+  defp tool_loop(scope, adapter, role, contract, prompt, root, commands, mapping) do
     state = %{
+      scope: scope,
       root: root,
       commands: commands,
       history: messages(contract.prompt, prompt),
-      trace: trace,
+      trace: [],
       usage: %{},
       mapping: mapping
     }
@@ -220,16 +231,16 @@ defmodule Kodo.Agent.EvaluationRunner do
     else
       started = System.monotonic_time(:millisecond)
 
-      case adapter.generate(
-             role["model"],
+      case generate(
+             state.scope,
+             adapter,
+             role,
              state.history,
              tool_definitions_for_turn(
                contract.toolset_version,
                step + 1,
                contract.budget.max_continuations
-             ),
-             timeout: @timeout,
-             reasoning: role["reasoning"]
+             )
            ) do
         {:ok, response} ->
           continue_loop(adapter, role, contract, state, response, started, step)
@@ -287,7 +298,13 @@ defmodule Kodo.Agent.EvaluationRunner do
     Enum.map_reduce(calls, [], fn call, trace ->
       output =
         if call.name == "delegate_search" do
-          delegated_search(adapter, state.mapping, state.root, call.arguments["question"])
+          delegated_search(
+            state.scope,
+            adapter,
+            state.mapping,
+            state.root,
+            call.arguments["question"]
+          )
         else
           execute_tool(call.name, call.arguments, state.root, state.commands)
         end
@@ -440,33 +457,53 @@ defmodule Kodo.Agent.EvaluationRunner do
     end
   end
 
-  defp delegated_search(adapter, mapping, root, question) do
+  defp delegated_search(scope, adapter, mapping, root, question) do
     role = ModelMapping.role!(mapping, :search)
     contract = Roles.fetch!(:search, role["role_contract"])
 
     {answer, trace, usage} =
-      tool_loop(adapter, role, contract, question, root, [], [], mapping)
+      tool_loop(scope, adapter, role, contract, question, root, [], mapping)
 
     %{"question" => question, "evidence" => answer, "trace" => trace, "usage" => usage}
   end
 
-  defp structured_review(adapter, mapping, task, diff) do
+  defp structured_review(scope, adapter, mapping, task, diff) do
     role = ModelMapping.role!(mapping, :review)
     contract = Roles.fetch!(:review, role["role_contract"])
 
     {:ok, response} =
-      adapter.generate_object(
-        role["model"],
+      generate_object(
+        scope,
+        adapter,
+        role,
         messages(
           contract.prompt,
           "Original task:\n#{task}\n\nReview this final diff:\n\n#{diff}"
         ),
-        ReviewResult.schema(),
-        timeout: @timeout,
-        reasoning: role["reasoning"]
+        ReviewResult.schema()
       )
 
     %{response | object: ReviewResult.actionable(response.object, diff)}
+  end
+
+  defp generate(scope, adapter, role, messages, tools) do
+    with {:ok, model, reference} <- LLM.resolve_integration(scope, role["model"]) do
+      LLM.generate(scope, model, reference, messages, tools,
+        adapter: adapter,
+        timeout: @timeout,
+        reasoning: role["reasoning"]
+      )
+    end
+  end
+
+  defp generate_object(scope, adapter, role, messages, schema) do
+    with {:ok, model, reference} <- LLM.resolve_integration(scope, role["model"]) do
+      LLM.generate_object(scope, model, reference, messages, schema,
+        adapter: adapter,
+        timeout: @timeout,
+        reasoning: role["reasoning"]
+      )
+    end
   end
 
   @doc false
