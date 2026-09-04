@@ -21,7 +21,7 @@ defmodule KodoWeb.IntegrationsLive do
      |> assign(:action_target, nil)
      |> assign(:max_api_key_bytes, @max_api_key_bytes)
      |> assign(:api_key_form, to_form(%{"api_key" => ""}, as: :integration))
-     |> assign(:validation_refs, MapSet.new())
+     |> assign(:validation_tasks, %{})
      |> load_integration()}
   end
 
@@ -110,17 +110,17 @@ defmodule KodoWeb.IntegrationsLive do
 
   @impl true
   def handle_info({reference, _result}, socket) when is_reference(reference) do
-    if MapSet.member?(socket.assigns.validation_refs, reference) do
+    if Map.has_key?(socket.assigns.validation_tasks, reference) do
       Process.demonitor(reference, [:flush])
-      {:noreply, socket |> drop_validation_ref(reference) |> load_integration()}
+      {:noreply, socket |> drop_validation_task(reference) |> load_integration()}
     else
       {:noreply, socket}
     end
   end
 
   def handle_info({:DOWN, reference, :process, _pid, _reason}, socket) do
-    if MapSet.member?(socket.assigns.validation_refs, reference) do
-      {:noreply, socket |> drop_validation_ref(reference) |> load_integration()}
+    if Map.has_key?(socket.assigns.validation_tasks, reference) do
+      {:noreply, socket |> drop_validation_task(reference) |> load_integration()}
     else
       {:noreply, socket}
     end
@@ -209,11 +209,14 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp start_validation(socket, integration) do
     task = OpenAIValidation.start(socket.assigns.current_scope, integration)
-    update(socket, :validation_refs, &MapSet.put(&1, task.ref))
+
+    update(socket, :validation_tasks, fn tasks ->
+      Map.put(tasks, task.ref, {integration.id, integration.credential_generation})
+    end)
   end
 
-  defp drop_validation_ref(socket, reference) do
-    update(socket, :validation_refs, &MapSet.delete(&1, reference))
+  defp drop_validation_task(socket, reference) do
+    update(socket, :validation_tasks, &Map.delete(&1, reference))
   end
 
   defp validate_api_key(api_key)
@@ -259,7 +262,11 @@ defmodule KodoWeb.IntegrationsLive do
     Map.take(integration, [:id, :credential_generation, :connection_status])
   end
 
-  defp validation_running?(refs), do: MapSet.size(refs) > 0
+  defp validation_running?(tasks, %{id: id, credential_generation: generation}) do
+    Enum.any?(tasks, fn {_ref, target} -> target == {id, generation} end)
+  end
+
+  defp validation_running?(_tasks, _integration), do: false
 
   defp integration_connected?(%{connection_status: "connected"}), do: true
   defp integration_connected?(_integration), do: false
@@ -311,7 +318,7 @@ defmodule KodoWeb.IntegrationsLive do
           </div>
 
           <p
-            :if={validation_running?(@validation_refs)}
+            :if={validation_running?(@validation_tasks, @integration)}
             id="openai-validation-progress"
             class="flex items-center gap-2 text-xs font-medium text-zinc-500"
             role="status"
@@ -447,8 +454,7 @@ defmodule KodoWeb.IntegrationsLive do
                   rel="noopener noreferrer"
                   class="font-semibold text-red-800 underline decoration-red-300 underline-offset-2 hover:text-red-950 dark:text-red-300 dark:hover:text-red-200"
                 >
-                  Revoke the key in OpenAI
-                  <span class="sr-only">(opens in a new tab)</span>
+                  Revoke the key in OpenAI <span class="sr-only">(opens in a new tab)</span>
                 </.link>
                 if it must stop outside Kodo.
               </p>

@@ -240,7 +240,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "blocking-first"}})
     |> render_submit()
 
-    assert_receive {:validation_probe_started, first_probe}
+    assert_receive {:validation_probe_started, first_probe, first_validation}
     render_patch(view, ~p"/integrations?action=replace")
 
     view
@@ -248,9 +248,46 @@ defmodule KodoWeb.IntegrationsLiveTest do
     |> render_submit()
 
     send(first_probe, {:finish_validation_probe, {:ok, 200, %{"data" => []}}})
+    first_validation_ref = Process.monitor(first_validation)
     view_ref = Process.monitor(view.pid)
+    assert_receive {:DOWN, ^first_validation_ref, :process, ^first_validation, _reason}
     _ = :sys.get_state(view.pid)
     refute_receive {:DOWN, ^view_ref, :process, _, _reason}
+  end
+
+  test "does not show obsolete validation progress for the current generation", %{
+    conn: conn,
+    scope: scope
+  } do
+    Application.put_env(:kodo, :fake_openai_validation_test_pid, self())
+
+    on_exit(fn -> Application.delete_env(:kodo, :fake_openai_validation_test_pid) end)
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
+
+    {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
+
+    view
+    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "blocking-first"}})
+    |> render_submit()
+
+    assert_receive {:validation_probe_started, first_probe, first_validation}
+    render_patch(view, ~p"/integrations?action=replace")
+
+    view
+    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "blocking-second"}})
+    |> render_submit()
+
+    assert_receive {:validation_probe_started, second_probe, _second_validation}
+    send(second_probe, {:finish_validation_probe, {:ok, 200, %{"data" => []}}})
+    assert_receive {:integration_validation_finished, _id, _generation}
+    _ = :sys.get_state(view.pid)
+
+    assert has_element?(view, "#openai-status", "Validated")
+    refute has_element?(view, "#openai-validation-progress")
+
+    first_validation_ref = Process.monitor(first_validation)
+    send(first_probe, {:finish_validation_probe, {:ok, 200, %{"data" => []}}})
+    assert_receive {:DOWN, ^first_validation_ref, :process, ^first_validation, _reason}
   end
 
   test "requires fresh sudo again when submitting without retaining the key", %{
@@ -268,6 +305,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
 
     assert_redirect(view, ~p"/users/reauthenticate/openai/connect")
     refute inspect(response) =~ secret
+
     assert {:error, :integration_not_found} =
              Integrations.get_integration_by_provider(scope, "openai")
   end

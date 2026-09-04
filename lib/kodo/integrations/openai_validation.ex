@@ -73,13 +73,25 @@ defmodule Kodo.Integrations.OpenAIValidation do
   defp bounded_probe(client, api_key, timeout) when is_integer(timeout) and timeout > 0 do
     task =
       Task.Supervisor.async_nolink(Kodo.ControlPlaneTaskSupervisor, fn ->
-        client.get_models(api_key)
+        safe_probe(client, api_key)
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
-      {:ok, response} -> classify_response(response)
+      {:ok, outcome} -> outcome
       {:exit, _reason} -> {:unavailable, "provider_unavailable"}
       nil -> {:unavailable, "timeout"}
+    end
+  end
+
+  # Normalize inside the supervised task so its crash logger can never inspect
+  # a provider exception or response containing operation-local credentials.
+  defp safe_probe(client, api_key) do
+    try do
+      client.get_models(api_key) |> classify_response()
+    rescue
+      _exception -> {:unavailable, "provider_unavailable"}
+    catch
+      _kind, _reason -> {:unavailable, "provider_unavailable"}
     end
   end
 

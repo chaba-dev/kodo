@@ -21,9 +21,14 @@ defmodule Kodo.Test.FakeOpenAIValidationClient do
   def get_models("rate-limited-" <> _rest), do: {:ok, 429, %{}}
   def get_models("provider-error-" <> _rest), do: {:ok, 503, %{}}
 
+  def get_models("raising-" <> secret) do
+    raise "validation client exposed #{secret}"
+  end
+
   def get_models("blocking-" <> _rest) do
     test_pid = Application.fetch_env!(:kodo, :fake_openai_validation_test_pid)
-    send(test_pid, {:validation_probe_started, self()})
+    [caller | _callers] = Process.get(:"$callers")
+    send(test_pid, {:validation_probe_started, self(), caller})
 
     receive do
       {:finish_validation_probe, result} -> result

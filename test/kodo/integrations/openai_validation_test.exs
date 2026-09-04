@@ -1,6 +1,8 @@
 defmodule Kodo.Integrations.OpenAIValidationTest do
   use Kodo.DataCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias Kodo.AccountsFixtures
   alias Kodo.Integrations
   alias Kodo.Integrations.OpenAIValidation
@@ -78,7 +80,7 @@ defmodule Kodo.Integrations.OpenAIValidationTest do
         )
       end)
 
-    assert_receive {:validation_probe_started, probe}
+    assert_receive {:validation_probe_started, probe, _caller}
 
     {:ok, replacement} =
       Integrations.replace_credentials(
@@ -110,7 +112,7 @@ defmodule Kodo.Integrations.OpenAIValidationTest do
         )
       end)
 
-    assert_receive {:validation_probe_started, probe}
+    assert_receive {:validation_probe_started, probe, _caller}
 
     {:ok, disconnected} =
       Integrations.disconnect(scope, original.id, original.credential_generation)
@@ -137,11 +139,32 @@ defmodule Kodo.Integrations.OpenAIValidationTest do
                timeout: 10
              )
 
-    assert_receive {:validation_probe_started, probe}
+    assert_receive {:validation_probe_started, probe, _caller}
     probe_ref = Process.monitor(probe)
     assert_receive {:DOWN, ^probe_ref, :process, ^probe, _reason}
     assert validated.validation_status == "unavailable"
     assert validated.validation_error_code == "timeout"
+  end
+
+  test "normalizes client exceptions before task logging", %{scope: scope} do
+    secret = "must-not-reach-logs"
+    {:ok, integration} = connect(scope, "raising-#{secret}")
+
+    log =
+      capture_log(fn ->
+        assert {:ok, validated} =
+                 OpenAIValidation.validate(
+                   scope,
+                   integration.id,
+                   integration.credential_generation,
+                   client: FakeOpenAIValidationClient
+                 )
+
+        assert validated.validation_status == "unavailable"
+        assert validated.validation_error_code == "provider_unavailable"
+      end)
+
+    refute log =~ secret
   end
 
   test "enforces ownership before decrypting or probing", %{scope: scope} do
