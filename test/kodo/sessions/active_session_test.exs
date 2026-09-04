@@ -5,6 +5,7 @@ defmodule Kodo.Sessions.ActiveSessionTest do
   alias Kodo.Cluster.Discovery
   alias Kodo.Cluster.InstanceManager
   alias Kodo.Cluster.Instances
+  alias Kodo.Integrations
   alias Kodo.Sessions
   alias Kodo.Sessions.ActiveSession
   alias Kodo.Sessions.Recovery
@@ -18,6 +19,9 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     Application.put_env(:kodo, :fake_llm_test_pid, self())
 
     scope = user_scope_fixture()
+
+    {:ok, _integration} =
+      Integrations.connect(scope, "openai", "api_key", %{"api_key" => "active-test-key"})
 
     {:ok, runner} =
       Runners.register(scope, %{

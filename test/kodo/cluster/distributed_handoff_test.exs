@@ -6,6 +6,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
   alias Kodo.Cluster.InstanceManager
   alias Kodo.Cluster.Instances
   alias Kodo.Cluster.Placement
+  alias Kodo.Integrations
   alias Kodo.Repo
   alias Kodo.Runners
   alias Kodo.Sessions
@@ -59,6 +60,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
 
     user = user_fixture()
     scope = Scope.for_user(user)
+    {:ok, _integration} = connect_integration(scope)
 
     {:ok, runner} =
       Runners.register(scope, %{
@@ -74,7 +76,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
       Sessions.create_session(scope, %{
         runner_id: runner.id,
         title: "Distributed handoff",
-        model: "test:model",
+        model: "openai:gpt-4o-mini",
         approval_policy: "safe"
       })
 
@@ -142,6 +144,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
 
     user = user_fixture()
     scope = Scope.for_user(user)
+    {:ok, _integration} = connect_integration(scope)
 
     {:ok, runner} =
       Runners.register(scope, %{
@@ -159,7 +162,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
       Sessions.create_session(scope, %{
         runner_id: runner.id,
         title: "Node-loss replay",
-        model: "test:model",
+        model: "openai:gpt-4o-mini",
         approval_policy: "safe"
       })
 
@@ -202,6 +205,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
   defp assert_competing_claims_are_fenced(source, target, peer_node) do
     user = user_fixture()
     scope = Scope.for_user(user)
+    {:ok, _integration} = connect_integration(scope)
 
     {:ok, runner} =
       Runners.register(scope, %{
@@ -217,7 +221,7 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
       Sessions.create_session(scope, %{
         runner_id: runner.id,
         title: "Competing distributed claims",
-        model: "test:model"
+        model: "openai:gpt-4o-mini"
       })
 
     local_claim = Task.async(fn -> Sessions.claim_ownership(session.id, source.boot_id) end)
@@ -321,11 +325,15 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
     options = instance_options(revision, generation, Atom.to_string(peer_node))
     agent_budgets = Application.fetch_env!(:kodo, :agent_budgets)
 
+    credential_encryption =
+      Application.fetch_env!(:kodo, Kodo.Integrations.CredentialEncryption)
+
     {:ok, supervisor} =
       :erpc.call(peer_node, Kodo.Test.ClusterPeer, :start, [
         repo_config,
         options,
         agent_budgets,
+        credential_encryption,
         self()
       ])
 
@@ -353,6 +361,10 @@ defmodule Kodo.Cluster.DistributedHandoffTest do
       heartbeat_interval: :infinity,
       drain_timeout: 5_000
     ]
+  end
+
+  defp connect_integration(scope) do
+    Integrations.connect(scope, "openai", "api_key", %{"api_key" => "distributed-test-key"})
   end
 
   defp cleanup_cluster_rows do

@@ -10,6 +10,7 @@ defmodule Kodo.Sessions do
   alias Kodo.Cluster.Placement
   alias Kodo.ControlPlaneTelemetry
   alias Kodo.Agent.ModelSettings
+  alias Kodo.Accounts.User
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
@@ -53,6 +54,23 @@ defmodule Kodo.Sessions do
   end
 
   def get_session!(id), do: Repo.get!(Session, id)
+
+  @doc false
+  def owner_scope(session_id) do
+    case Ecto.UUID.cast(session_id) do
+      {:ok, session_id} ->
+        user =
+          User
+          |> join(:inner, [user], session in Session, on: session.user_id == user.id)
+          |> where([_user, session], session.id == ^session_id)
+          |> Repo.one()
+
+        if user, do: {:ok, Scope.for_user(user)}, else: {:error, :session_not_found}
+
+      :error ->
+        {:error, :session_not_found}
+    end
+  end
 
   def list_sessions(%Scope{user: user}) do
     Session

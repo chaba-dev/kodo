@@ -3,6 +3,7 @@ defmodule Kodo.Agent.LoopTest do
 
   alias Kodo.Agent.Loop
   alias Kodo.Agent.Tools
+  alias Kodo.Integrations
   alias Kodo.Runners
   alias Kodo.Sessions
 
@@ -10,6 +11,9 @@ defmodule Kodo.Agent.LoopTest do
 
   setup do
     scope = user_scope_fixture()
+
+    {:ok, _integration} =
+      Integrations.connect(scope, "openai", "api_key", %{"api_key" => "loop-test-key"})
 
     {:ok, runner} =
       Runners.register(scope, %{
@@ -25,12 +29,12 @@ defmodule Kodo.Agent.LoopTest do
       Sessions.create_session(scope, %{
         runner_id: runner.id,
         title: "Budgeted turn",
-        model: "test:model"
+        model: "openai:gpt-4o-mini"
       })
 
     {:ok, ownership} = Sessions.claim_ownership(session.id, nil)
 
-    %{runner: runner, session: session, ownership: ownership}
+    %{runner: runner, session: session, ownership: ownership, scope: scope}
   end
 
   test "stops before accepting a response that exceeds the token budget", %{
@@ -56,6 +60,34 @@ defmodule Kodo.Agent.LoopTest do
              )
   end
 
+  test "fails before recording an invocation when the required integration is disconnected", %{
+    session: session,
+    ownership: ownership,
+    scope: scope
+  } do
+    {:ok, integration} = Integrations.get_integration_by_provider(scope, "openai")
+
+    assert {:ok, _disconnected} =
+             Integrations.disconnect(scope, integration.id, integration.credential_generation)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "final answer"},
+        ownership: ownership
+      )
+
+    assert {:error, :integration_disconnected} =
+             Loop.run(session.id,
+               adapter: Kodo.Test.FakeLLM,
+               budgets: budgets([]),
+               ownership: ownership
+             )
+
+    refute Enum.any?(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
+  end
+
   test "records the resolved role and model mapping for an invocation", %{
     session: session,
     ownership: ownership
@@ -79,8 +111,8 @@ defmodule Kodo.Agent.LoopTest do
       Enum.find(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
 
     assert invocation.payload["role"] == "primary"
-    assert invocation.payload["provider"] == "test"
-    assert invocation.payload["model"] == "test:model"
+    assert invocation.payload["provider"] == "openai"
+    assert invocation.payload["model"] == "openai:gpt-4o-mini"
     assert invocation.payload["reasoning"] == "none"
     assert invocation.version == 3
     assert invocation.payload["role_contract"] == "alpha-v1"
@@ -126,7 +158,7 @@ defmodule Kodo.Agent.LoopTest do
         )
       end)
 
-    assert_receive {:llm_request, "test:model", system, tools, opts}
+    assert_receive {:llm_request, %LLMDB.Model{provider: :openai}, system, tools, opts}, 5_000
     assert system["content"] == Kodo.Agent.Roles.fetch!(:primary).prompt
     assert tools == Tools.definitions("workspace-v5")
     assert opts[:reasoning] == "none"
@@ -146,7 +178,7 @@ defmodule Kodo.Agent.LoopTest do
       Enum.find(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
 
     assert invocation.version == 3
-    assert invocation.payload["model"] == "test:model"
+    assert invocation.payload["model"] == "openai:gpt-4o-mini"
     assert invocation.payload["role_contract"] == "alpha-v1"
     assert invocation.payload["toolset_version"] == "workspace-v5"
 
@@ -200,7 +232,7 @@ defmodule Kodo.Agent.LoopTest do
         )
       end)
 
-    assert_receive {:llm_request, "test:model", system, tools, opts}
+    assert_receive {:llm_request, %LLMDB.Model{provider: :openai}, system, tools, opts}, 5_000
     assert system["content"] == Kodo.Agent.Roles.fetch!(:primary).prompt
     assert tools == Tools.definitions("workspace-v5")
     assert opts[:reasoning] == "none"
@@ -218,7 +250,7 @@ defmodule Kodo.Agent.LoopTest do
     invocation =
       Enum.find(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
 
-    assert invocation.payload["model"] == "test:model"
+    assert invocation.payload["model"] == "openai:gpt-4o-mini"
     assert invocation.payload["role_contract"] == "alpha-v1"
     assert invocation.payload["toolset_version"] == "workspace-v5"
   end

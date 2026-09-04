@@ -3,6 +3,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
 
   alias Kodo.AccountsFixtures
   alias Kodo.Integrations
+  alias Kodo.LLM
   alias Kodo.LLM.CredentialResolver
   alias Kodo.LLM.IntegrationRef
 
@@ -29,6 +30,42 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert credential.token == "scoped-secret"
     assert credential.account_id == nil
     refute inspect(credential) =~ "scoped-secret"
+  end
+
+  test "the public facade rejects credential options and stale preflight references", context do
+    assert {:ok, resolved_model, reference} =
+             LLM.resolve_integration(context.scope, "openai:gpt-4o-mini")
+
+    assert {:error, :credential_options_not_allowed} =
+             LLM.generate(
+               context.scope,
+               resolved_model,
+               reference,
+               [%{"role" => "user", "content" => "final answer"}],
+               [],
+               adapter: Kodo.Test.FakeLLM,
+               timeout: 1_000,
+               api_key: "caller-secret"
+             )
+
+    assert {:ok, _replaced} =
+             Integrations.replace_credentials(
+               context.scope,
+               context.integration.id,
+               context.integration.credential_generation,
+               %{"api_key" => "replacement"}
+             )
+
+    assert {:error, :stale_credential_generation} =
+             LLM.generate(
+               context.scope,
+               resolved_model,
+               reference,
+               [%{"role" => "user", "content" => "final answer"}],
+               [],
+               adapter: Kodo.Test.FakeLLM,
+               timeout: 1_000
+             )
   end
 
   test "rejects forged and cross-user references", context do

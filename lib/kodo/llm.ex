@@ -12,6 +12,8 @@ defmodule Kodo.LLM do
   alias Kodo.LLM.CredentialResolver
   alias Kodo.LLM.IntegrationRef
 
+  @credential_option_keys ~w(api_key access_token auth_mode oauth_file auth_file provider_options chatgpt_account_id)a
+
   @type tool :: %{
           required(:name) => String.t(),
           required(:description) => String.t(),
@@ -54,7 +56,8 @@ defmodule Kodo.LLM do
     adapter = Keyword.get(opts, :adapter, adapter())
     adapter_opts = Keyword.delete(opts, :adapter)
 
-    with {:ok, credential} <- CredentialResolver.resolve(scope, model, reference) do
+    with :ok <- reject_credential_options(adapter_opts),
+         {:ok, credential} <- CredentialResolver.resolve(scope, model, reference) do
       adapter.generate(model, messages, tools, credential, adapter_opts)
     end
   end
@@ -71,7 +74,8 @@ defmodule Kodo.LLM do
     adapter = Keyword.get(opts, :adapter, adapter())
     adapter_opts = Keyword.delete(opts, :adapter)
 
-    with {:ok, credential} <- CredentialResolver.resolve(scope, model, reference) do
+    with :ok <- reject_credential_options(adapter_opts),
+         {:ok, credential} <- CredentialResolver.resolve(scope, model, reference) do
       adapter.generate_object(model, messages, schema, credential, adapter_opts)
     end
   end
@@ -83,5 +87,11 @@ defmodule Kodo.LLM do
       {:ok, %LLMDB.Model{} = resolved} -> {:ok, resolved}
       {:error, _reason} -> {:error, :malformed_model}
     end
+  end
+
+  defp reject_credential_options(opts) do
+    if Enum.any?(@credential_option_keys, &Keyword.has_key?(opts, &1)),
+      do: {:error, :credential_options_not_allowed},
+      else: :ok
   end
 end

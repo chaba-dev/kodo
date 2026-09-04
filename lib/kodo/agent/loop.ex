@@ -169,6 +169,7 @@ defmodule Kodo.Agent.Loop do
 
     with {:ok, capability_validation} <-
            context.adapter.validate_model(review["model"], review, contract),
+         {:ok, request} <- resolve_request(context.session_id, review),
          :ok <-
            Phoenix.PubSub.subscribe(
              Kodo.PubSub,
@@ -201,8 +202,9 @@ defmodule Kodo.Agent.Loop do
            Sessions.dispatch_if_owner(context.ownership, fn ->
              task = original_task(context.events)
 
-             context.adapter.generate_object(
-               review["model"],
+             generate_object(
+               context.adapter,
+               request,
                [
                  %{"role" => "system", "content" => contract.prompt},
                  %{
@@ -466,6 +468,7 @@ defmodule Kodo.Agent.Loop do
     with :ok <- within_budget(invocation, usage(current_turn(events)), budgets),
          {:ok, capability_validation} <-
            adapter.validate_model(primary["model"], primary, contract),
+         {:ok, request} <- resolve_request(session_id, primary),
          {:ok, invocation_id} <-
            start_invocation(
              session_id,
@@ -478,7 +481,7 @@ defmodule Kodo.Agent.Loop do
          :ok <- rehoming_boundary(),
          {:ok, response} <-
            Sessions.dispatch_if_owner(ownership, fn ->
-             adapter.generate(primary["model"], transcript(events, contract), tools,
+             generate(adapter, request, transcript(events, contract), tools,
                timeout: budgets[:model_timeout],
                reasoning: primary["reasoning"]
              )
@@ -916,6 +919,7 @@ defmodule Kodo.Agent.Loop do
   defp run_search_continuation(messages, continuation, tokens, state) do
     with :ok <- within_budget(continuation, tokens, state.contract.budget),
          :ok <- rehoming_boundary(),
+         {:ok, request} <- resolve_request(state.context.session_id, state.search),
          {:ok, invocation_id} <-
            start_subagent_invocation(
              state.parent_call,
@@ -928,8 +932,9 @@ defmodule Kodo.Agent.Loop do
          :ok <- rehoming_boundary(),
          {:ok, response} <-
            Sessions.dispatch_if_owner(state.context.ownership, fn ->
-             state.context.adapter.generate(
-               state.search["model"],
+             generate(
+               state.context.adapter,
+               request,
                messages,
                Tools.definitions_for_turn(
                  state.contract.toolset_version,
@@ -1598,6 +1603,35 @@ defmodule Kodo.Agent.Loop do
 
   defp token_count(nil), do: 0
   defp token_count(usage), do: usage[:total_tokens] || usage["total_tokens"] || 0
+
+  defp resolve_request(session_id, role) do
+    with {:ok, scope} <- Sessions.owner_scope(session_id),
+         {:ok, model, reference} <- LLM.resolve_integration(scope, role["model"]) do
+      {:ok, %{scope: scope, model: model, reference: reference}}
+    end
+  end
+
+  defp generate(adapter, request, messages, tools, opts) do
+    LLM.generate(
+      request.scope,
+      request.model,
+      request.reference,
+      messages,
+      tools,
+      Keyword.put(opts, :adapter, adapter)
+    )
+  end
+
+  defp generate_object(adapter, request, messages, schema, opts) do
+    LLM.generate_object(
+      request.scope,
+      request.model,
+      request.reference,
+      messages,
+      schema,
+      Keyword.put(opts, :adapter, adapter)
+    )
+  end
 
   defp within_budget(invocations, tokens, budgets) do
     cond do

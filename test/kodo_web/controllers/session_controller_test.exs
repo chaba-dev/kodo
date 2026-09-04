@@ -3,6 +3,7 @@ defmodule KodoWeb.SessionControllerTest do
 
   alias Kodo.Runners
   alias Kodo.Sessions
+  alias Kodo.Integrations
 
   import Kodo.AccountsFixtures
 
@@ -28,6 +29,9 @@ defmodule KodoWeb.SessionControllerTest do
 
     user = user_fixture()
     scope = Kodo.Accounts.Scope.for_user(user)
+
+    {:ok, _integration} =
+      Integrations.connect(scope, "openai", "api_key", %{"api_key" => "controller-test-key"})
 
     {:ok, runner} =
       Runners.register(scope, %{
@@ -76,7 +80,7 @@ defmodule KodoWeb.SessionControllerTest do
 
     assert response == %{"status" => "running"}
 
-    assert_receive {:tool_request, request}
+    assert_receive {:tool_request, request}, 5_000
     assert request["request"]["tool"] == "apply_patch"
     assert request["authority"]["session_id"] == session["id"]
     assert request["authority"]["ownership_epoch"] > 0
@@ -146,7 +150,7 @@ defmodule KodoWeb.SessionControllerTest do
            |> post_json(~p"/api/sessions/#{session["id"]}/messages", %{content: "wait"})
            |> json_response(202)
 
-    assert_receive :fake_llm_waiting
+    assert_receive :fake_llm_waiting, 5_000
 
     response =
       conn
@@ -182,7 +186,8 @@ defmodule KodoWeb.SessionControllerTest do
                     %{
                       type: "approval_requested",
                       payload: %{"approval_id" => approval_id, "name" => "apply_patch"}
-                    }}
+                    }},
+                   5_000
 
     refute_received {:tool_request, _request}
 
@@ -195,7 +200,7 @@ defmodule KodoWeb.SessionControllerTest do
       |> json_response(200)
 
     assert response == %{"decision" => "approved", "status" => "running"}
-    assert_receive {:tool_request, request}
+    assert_receive {:tool_request, request}, 5_000
 
     assert conn
            |> recycle(["accept", "authorization"])
@@ -240,7 +245,8 @@ defmodule KodoWeb.SessionControllerTest do
            |> json_response(202)
 
     assert_receive {:session_event,
-                    %{type: "session_status_changed", payload: %{"status" => "failed"}}}
+                    %{type: "session_status_changed", payload: %{"status" => "failed"}}},
+                   5_000
 
     assert Enum.any?(Sessions.events_after(session["id"]), &(&1.type == "session_failed"))
   end
@@ -286,7 +292,7 @@ defmodule KodoWeb.SessionControllerTest do
       |> post_json(~p"/api/sessions", %{
         runner_id: runner.id,
         title: "Fix greeting",
-        model: "test:model",
+        model: "openai:gpt-4o-mini",
         approval_policy: Keyword.get(opts, :approval_policy, "standard")
       })
       |> json_response(201)
@@ -309,7 +315,7 @@ defmodule KodoWeb.SessionControllerTest do
   end
 
   defp respond_to_review(runner_id) do
-    assert_receive {:tool_request, request}
+    assert_receive {:tool_request, request}, 5_000
     assert request["request"]["tool"] == "git_diff"
 
     Phoenix.PubSub.broadcast(
