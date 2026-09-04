@@ -44,9 +44,11 @@ defmodule Kodo.LLM.CredentialResolver do
          :ok <- require_generation(integration, reference.credential_generation),
          :ok <- require_provider(reference.provider, provider),
          :ok <- require_provider(integration.provider, provider),
+         :ok <- require_authentication_type(integration, reference),
+         :ok <- require_billing_path(integration, reference),
          :ok <- require_usable(integration),
          {:ok, payload} <- CredentialEncryption.decrypt(integration) do
-      build_credential(integration, payload)
+      build_credential(integration, reference, payload)
     end
   end
 
@@ -58,10 +60,13 @@ defmodule Kodo.LLM.CredentialResolver do
   defp require_reference(%IntegrationRef{
          integration_id: id,
          provider: provider,
-         credential_generation: generation
+         authentication_type: authentication_type,
+         credential_generation: generation,
+         billing_path: billing_path
        })
-       when is_binary(provider) and provider in @providers and is_integer(generation) and
-              generation >= 0 do
+       when is_binary(provider) and provider in @providers and
+              authentication_type in ["api_key", "oauth"] and is_integer(generation) and
+              generation >= 0 and billing_path in [:platform, :subscription, :aggregator] do
     case Ecto.UUID.cast(id) do
       {:ok, _id} -> :ok
       :error -> {:error, :invalid_integration_reference}
@@ -78,6 +83,34 @@ defmodule Kodo.LLM.CredentialResolver do
   defp require_generation(%Integration{}, _generation),
     do: {:error, :stale_credential_generation}
 
+  defp require_authentication_type(
+         %Integration{authentication_type: authentication_type},
+         %IntegrationRef{authentication_type: authentication_type}
+       ),
+       do: :ok
+
+  defp require_authentication_type(%Integration{}, %IntegrationRef{}),
+    do: {:error, :integration_authentication_mismatch}
+
+  defp require_billing_path(%Integration{provider: "openai_codex"}, %IntegrationRef{
+         billing_path: :subscription
+       }),
+       do: :ok
+
+  defp require_billing_path(%Integration{provider: "openrouter"}, %IntegrationRef{
+         billing_path: :aggregator
+       }),
+       do: :ok
+
+  defp require_billing_path(%Integration{provider: provider}, %IntegrationRef{
+         billing_path: :platform
+       })
+       when provider in ~w(openai anthropic),
+       do: :ok
+
+  defp require_billing_path(%Integration{}, %IntegrationRef{}),
+    do: {:error, :integration_billing_mismatch}
+
   defp require_usable(%Integration{connection_status: "disconnected"}),
     do: {:error, :integration_disconnected}
 
@@ -89,32 +122,37 @@ defmodule Kodo.LLM.CredentialResolver do
 
   defp require_usable(%Integration{connection_status: "connected"}), do: :ok
 
-  defp build_credential(%Integration{authentication_type: "api_key"} = integration, payload) do
+  defp build_credential(
+         %Integration{authentication_type: "api_key"} = integration,
+         reference,
+         payload
+       ) do
     with {:ok, api_key} <- fetch_secret(payload, "api_key") do
-      {:ok, credential(integration, api_key, nil)}
+      {:ok, credential(integration, reference, api_key, nil)}
     end
   end
 
   defp build_credential(
          %Integration{provider: "openai_codex", authentication_type: "oauth"} = integration,
+         reference,
          payload
        ) do
     with {:ok, access_token} <- fetch_secret(payload, "access_token"),
          {:ok, account_id} <- fetch_secret(payload, "account_id") do
-      {:ok, credential(integration, access_token, account_id)}
+      {:ok, credential(integration, reference, access_token, account_id)}
     end
   end
 
-  defp build_credential(%Integration{}, _payload),
+  defp build_credential(%Integration{}, %IntegrationRef{}, _payload),
     do: {:error, :credential_payload_invalid}
 
-  defp credential(integration, token, account_id) do
+  defp credential(integration, reference, token, account_id) do
     %Credential{
       integration_id: integration.id,
       provider: integration.provider,
       authentication_type: integration.authentication_type,
       credential_generation: integration.credential_generation,
-      billing_path: billing_path(integration.provider),
+      billing_path: reference.billing_path,
       token: token,
       account_id: account_id
     }
@@ -126,8 +164,4 @@ defmodule Kodo.LLM.CredentialResolver do
       _missing -> {:error, :credential_payload_invalid}
     end
   end
-
-  defp billing_path("openai_codex"), do: :subscription
-  defp billing_path("openrouter"), do: :aggregator
-  defp billing_path(_provider), do: :platform
 end

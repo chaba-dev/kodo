@@ -51,4 +51,11 @@ defmodule Kodo.Agent.ModelMappingTest do
     assert search["reasoning"] == "high"
     assert search["sources"] == %{"model" => "repository", "reasoning" => "session"}
   end
+
+  test "derives display providers from resolved models rather than string splitting" do
+    mapping = ModelMapping.balanced([{"user", %{search: %{model: "not-a-model"}}}])
+
+    assert mapping["roles"]["search"]["model"] == "not-a-model"
+    assert mapping["roles"]["search"]["provider"] == nil
+  end
 end

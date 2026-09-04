@@ -8,13 +8,27 @@ defmodule Kodo.LLM.IntegrationRef do
 
   alias Kodo.Integrations.Integration
 
-  @enforce_keys [:integration_id, :provider, :credential_generation]
-  defstruct [:integration_id, :provider, :credential_generation]
+  @enforce_keys [
+    :integration_id,
+    :provider,
+    :authentication_type,
+    :credential_generation,
+    :billing_path
+  ]
+  defstruct [
+    :integration_id,
+    :provider,
+    :authentication_type,
+    :credential_generation,
+    :billing_path
+  ]
 
   @opaque t :: %__MODULE__{
             integration_id: Ecto.UUID.t(),
             provider: String.t(),
-            credential_generation: non_neg_integer()
+            authentication_type: String.t(),
+            credential_generation: non_neg_integer(),
+            billing_path: :platform | :subscription | :aggregator
           }
 
   @doc "Builds a reference from scoped integration metadata."
@@ -22,7 +36,13 @@ defmodule Kodo.LLM.IntegrationRef do
     %__MODULE__{
       integration_id: integration.id,
       provider: integration.provider,
-      credential_generation: integration.credential_generation
+      authentication_type: integration.authentication_type,
+      credential_generation: integration.credential_generation,
+      billing_path: billing_path(integration.provider)
     }
   end
+
+  defp billing_path("openai_codex"), do: :subscription
+  defp billing_path("openrouter"), do: :aggregator
+  defp billing_path(_provider), do: :platform
 end
