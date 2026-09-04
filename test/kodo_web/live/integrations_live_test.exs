@@ -53,7 +53,8 @@ defmodule KodoWeb.IntegrationsLiveTest do
     |> form("#openai-api-key-form", %{"integration" => %{"api_key" => secret}})
     |> render_submit()
 
-    assert_receive {:integration_validation_finished, _id, _generation}
+    assert_receive message = {:integration_validation_finished, _id, _generation}
+    send(view.pid, message)
     _ = :sys.get_state(view.pid)
     refute render(view) =~ secret
     refute inspect(:sys.get_state(view.pid)) =~ secret
@@ -73,7 +74,8 @@ defmodule KodoWeb.IntegrationsLiveTest do
     |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "valid-live-secret"}})
     |> render_submit()
 
-    assert_receive {:integration_validation_finished, _id, _generation}
+    assert_receive message = {:integration_validation_finished, _id, _generation}
+    send(view.pid, message)
     _ = :sys.get_state(view.pid)
     assert has_element?(view, "#openai-status", "Validated")
     refute has_element?(view, "#openai-validation-progress")
@@ -279,7 +281,8 @@ defmodule KodoWeb.IntegrationsLiveTest do
 
     assert_receive {:validation_probe_started, second_probe, _second_validation}
     send(second_probe, {:finish_validation_probe, {:ok, 200, %{"data" => []}}})
-    assert_receive {:integration_validation_finished, _id, _generation}
+    assert_receive message = {:integration_validation_finished, _id, _generation}
+    send(view.pid, message)
     _ = :sys.get_state(view.pid)
 
     assert has_element?(view, "#openai-status", "Validated")
