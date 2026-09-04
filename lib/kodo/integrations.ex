@@ -5,6 +5,7 @@ defmodule Kodo.Integrations do
   import Ecto.Query
 
   alias Kodo.Accounts.Scope
+  alias Kodo.Integrations.AuditEvent
   alias Kodo.Integrations.CredentialEncryption
   alias Kodo.Integrations.Integration
   alias Kodo.Repo
@@ -34,6 +35,13 @@ defmodule Kodo.Integrations do
     end
   end
 
+  def list_audit_events(%Scope{user: user}) do
+    AuditEvent
+    |> where([event], event.actor_user_id == ^user.id)
+    |> order_by([event], asc: event.inserted_at, asc: event.id)
+    |> Repo.all()
+  end
+
   def connect(scope, provider, authentication_type, credentials, opts \\ [])
 
   def connect(%Scope{user: user}, provider, "api_key", credentials, opts) do
@@ -57,8 +65,7 @@ defmodule Kodo.Integrations do
         })
       )
       |> Integration.constraint_changeset()
-      |> Repo.insert()
-      |> normalize_insert_result()
+      |> insert_with_audit(user.id, "api_key_submitted")
     else
       false -> {:error, changeset}
       {:error, _reason} = error -> error
@@ -76,7 +83,8 @@ defmodule Kodo.Integrations do
       credentials,
       opts,
       Integration.connection_statuses(),
-      "api_key"
+      "api_key",
+      "api_key_replaced"
     )
   end
 
@@ -88,7 +96,8 @@ defmodule Kodo.Integrations do
       credentials,
       opts,
       Integration.connection_statuses(),
-      "oauth"
+      "oauth",
+      "oauth_succeeded"
     )
   end
 
@@ -100,12 +109,13 @@ defmodule Kodo.Integrations do
       credentials,
       opts,
       ~w(connected reauthorization_required),
-      "oauth"
+      "oauth",
+      "refresh_succeeded"
     )
   end
 
   def validation_succeeded(%Scope{} = scope, id, generation) do
-    update_fenced(scope, id, generation, ["connected"], %{
+    update_fenced(scope, id, generation, ["connected"], "validation_succeeded", %{
       validation_status: "valid",
       validated_at: now(),
       validation_error_code: nil
@@ -113,7 +123,7 @@ defmodule Kodo.Integrations do
   end
 
   def validation_invalid(%Scope{} = scope, id, generation) do
-    update_fenced(scope, id, generation, ["connected"], %{
+    update_fenced(scope, id, generation, ["connected"], "validation_invalid", %{
       validation_status: "invalid",
       validated_at: now(),
       validation_error_code: "invalid_credentials"
@@ -122,7 +132,7 @@ defmodule Kodo.Integrations do
 
   def validation_unavailable(%Scope{} = scope, id, generation, error_code)
       when error_code in @safe_validation_errors do
-    update_fenced(scope, id, generation, ["connected"], %{
+    update_fenced(scope, id, generation, ["connected"], "validation_unavailable", %{
       validation_status: "unavailable",
       validated_at: now(),
       validation_error_code: error_code
@@ -135,7 +145,7 @@ defmodule Kodo.Integrations do
   def refresh_invalid_grant(%Scope{} = scope, id, generation) do
     with {:ok, integration} <- get_integration(scope, id),
          true <- integration.authentication_type == "oauth" do
-      update_fenced(scope, id, generation, ["connected"], %{
+      update_fenced(scope, id, generation, ["connected"], "refresh_invalid_grant", %{
         connection_status: "reauthorization_required",
         validation_status: "unverified",
         validated_at: nil,
@@ -148,18 +158,25 @@ defmodule Kodo.Integrations do
   end
 
   def disconnect(%Scope{} = scope, id, generation) do
-    update_fenced(scope, id, generation, Integration.connection_statuses(), %{
-      connection_status: "disconnected",
-      validation_status: "unverified",
-      encrypted_credentials: nil,
-      encryption_key_version: nil,
-      credential_format_version: nil,
-      credential_generation: generation + 1,
-      expires_at: nil,
-      validated_at: nil,
-      refreshed_at: nil,
-      validation_error_code: nil
-    })
+    update_fenced(
+      scope,
+      id,
+      generation,
+      Integration.connection_statuses(),
+      "integration_disconnected",
+      %{
+        connection_status: "disconnected",
+        validation_status: "unverified",
+        encrypted_credentials: nil,
+        encryption_key_version: nil,
+        credential_format_version: nil,
+        credential_generation: generation + 1,
+        expires_at: nil,
+        validated_at: nil,
+        refreshed_at: nil,
+        validation_error_code: nil
+      }
+    )
   end
 
   def safe_validation_errors, do: @safe_validation_errors
@@ -171,7 +188,8 @@ defmodule Kodo.Integrations do
          credentials,
          opts,
          allowed_connections,
-         authentication_type
+         authentication_type,
+         audit_event_type
        ) do
     with {:ok, integration} <- get_integration(scope, id),
          :ok <- require_generation(integration, generation),
@@ -188,7 +206,7 @@ defmodule Kodo.Integrations do
           validation_error_code: nil
         })
 
-      update_fenced(scope, id, generation, allowed_connections, changes)
+      update_fenced(scope, id, generation, allowed_connections, audit_event_type, changes)
     else
       {:error, _reason} = error -> error
     end
@@ -202,12 +220,23 @@ defmodule Kodo.Integrations do
   defp require_authentication_type(%Integration{}, _type),
     do: {:error, :authentication_type_mismatch}
 
-  defp update_fenced(%Scope{user: user}, id, generation, allowed_connections, changes)
+  defp update_fenced(
+         %Scope{user: user},
+         id,
+         generation,
+         allowed_connections,
+         audit_event_type,
+         changes
+       )
        when is_integer(generation) and generation >= 0 do
     case Ecto.UUID.cast(id) do
       {:ok, id} ->
         Repo.transaction(fn ->
-          execute_fenced_update(user.id, id, generation, allowed_connections, changes)
+          integration =
+            execute_fenced_update(user.id, id, generation, allowed_connections, changes)
+
+          audit!(user.id, integration, audit_event_type)
+          integration
         end)
 
       :error ->
@@ -215,8 +244,15 @@ defmodule Kodo.Integrations do
     end
   end
 
-  defp update_fenced(%Scope{}, _id, _generation, _allowed_connections, _changes),
-    do: {:error, :stale_credential_generation}
+  defp update_fenced(
+         %Scope{},
+         _id,
+         _generation,
+         _allowed_connections,
+         _audit_event_type,
+         _changes
+       ),
+       do: {:error, :stale_credential_generation}
 
   defp execute_fenced_update(user_id, id, generation, allowed_connections, changes) do
     query =
@@ -241,6 +277,29 @@ defmodule Kodo.Integrations do
   end
 
   defp normalize_insert_result(result), do: result
+
+  defp insert_with_audit(changeset, actor_user_id, event_type) do
+    Repo.transaction(fn ->
+      case changeset |> Repo.insert() |> normalize_insert_result() do
+        {:ok, integration} ->
+          audit!(actor_user_id, integration, event_type)
+          integration
+
+        {:error, reason} ->
+          Repo.rollback(reason)
+      end
+    end)
+  end
+
+  defp audit!(actor_user_id, integration, event_type) do
+    %AuditEvent{actor_user_id: actor_user_id, integration_id: integration.id}
+    |> AuditEvent.changeset(%{
+      provider: integration.provider,
+      event_type: event_type,
+      credential_generation: integration.credential_generation
+    })
+    |> Repo.insert!()
+  end
 
   defp constraint_error?(changeset, type) do
     Enum.any?(changeset.errors, fn {_field, {_message, metadata}} ->
