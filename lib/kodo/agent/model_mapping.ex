@@ -118,5 +118,10 @@ defmodule Kodo.Agent.ModelMapping do
 
   defp maybe_update_provider(mapping, :reasoning, _reasoning), do: mapping
 
-  defp provider(model), do: model |> String.split(~r/[:\/]/, parts: 2) |> hd()
+  defp provider(model) do
+    case ReqLLM.model(model) do
+      {:ok, %LLMDB.Model{provider: provider}} -> Atom.to_string(provider)
+      {:error, _reason} -> nil
+    end
+  end
 end
