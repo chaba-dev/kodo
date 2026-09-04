@@ -18,6 +18,19 @@ defmodule Kodo.LLM.CredentialResolver do
   @providers ~w(openai openai_codex anthropic openrouter)
 
   @doc false
+  def reference(%Scope{} = scope, %LLMDB.Model{provider: model_provider}) do
+    provider = Atom.to_string(model_provider)
+
+    with :ok <- require_supported_provider(provider),
+         {:ok, integration} <- Integrations.get_integration_by_provider(scope, provider),
+         :ok <- require_usable(integration) do
+      {:ok, IntegrationRef.from_integration(integration)}
+    end
+  end
+
+  def reference(_scope, _model), do: {:error, :invalid_integration_reference}
+
+  @doc false
   def resolve(
         %Scope{} = scope,
         %LLMDB.Model{provider: model_provider},

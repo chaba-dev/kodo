@@ -3,6 +3,15 @@ defmodule Kodo.LLM.ReqLLMTest do
 
   alias Kodo.LLM.ReqLLM, as: Adapter
 
+  @credential %Kodo.LLM.Credential{
+    integration_id: "00000000-0000-0000-0000-000000000001",
+    provider: "openai",
+    authentication_type: "api_key",
+    credential_generation: 1,
+    billing_path: :platform,
+    token: "request-local-key"
+  }
+
   test "translates Kodo tool definitions into strict ReqLLM tools" do
     [tool] =
       Adapter.build_tools([
@@ -27,7 +36,7 @@ defmodule Kodo.LLM.ReqLLMTest do
     adapter = Kodo.LLM.adapter()
 
     assert Code.ensure_loaded?(adapter)
-    assert function_exported?(adapter, :generate, 4)
+    assert function_exported?(adapter, :generate, 5)
   end
 
   test "applies the model budget to provider receive and total timeouts" do
@@ -35,6 +44,35 @@ defmodule Kodo.LLM.ReqLLMTest do
 
     assert options[:receive_timeout] == 12_345
     assert options[:total_timeout] == 12_345
+  end
+
+  test "overrides ambient API keys with the operation-local credential" do
+    options =
+      Adapter.request_options([], @credential,
+        timeout: 12_345,
+        reasoning: "none",
+        api_key: "caller-supplied-key"
+      )
+
+    assert options[:api_key] == "request-local-key"
+  end
+
+  test "passes only current Codex access and account credentials" do
+    credential = %{
+      @credential
+      | provider: "openai_codex",
+        authentication_type: "oauth",
+        billing_path: :subscription,
+        token: "request-local-access",
+        account_id: "request-local-account"
+    }
+
+    options = Adapter.request_options([], credential, timeout: 12_345, reasoning: "none")
+
+    assert options[:auth_mode] == :oauth
+    assert options[:access_token] == "request-local-access"
+    assert options[:chatgpt_account_id] == "request-local-account"
+    refute Keyword.has_key?(options, :refresh_token)
   end
 
   test "rejects catalog models whose provider cannot be dispatched" do

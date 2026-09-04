@@ -112,6 +112,23 @@ defmodule Kodo.LLM.CredentialResolverTest do
              resolve(%{context | reference: IntegrationRef.from_integration(unavailable)})
   end
 
+  test "captures only usable integration metadata during preflight", context do
+    assert {:ok, reference} = CredentialResolver.reference(context.scope, model())
+    assert reference == context.reference
+
+    assert {:ok, invalid} =
+             Integrations.validation_invalid(
+               context.scope,
+               context.integration.id,
+               context.integration.credential_generation
+             )
+
+    assert {:error, :integration_invalid} =
+             CredentialResolver.reference(context.scope, model())
+
+    assert invalid.credential_generation == reference.credential_generation
+  end
+
   test "requires exact model, reference, and stored providers", context do
     anthropic_model = LLMDB.Model.new!(%{id: "claude", provider: :anthropic})
 

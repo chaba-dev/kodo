@@ -1,5 +1,16 @@
 defmodule Kodo.LLM do
-  @moduledoc "Provider-independent boundary for one explicit primary-agent model step."
+  @moduledoc """
+  Provider-independent boundary for one explicit agent model step.
+
+  Generation goes through this facade rather than directly through ReqLLM so a
+  request must resolve a user-owned integration before ReqLLM can consult its
+  process-wide or environment credential fallbacks.
+  """
+
+  alias Kodo.Accounts.Scope
+  alias Kodo.LLM.Credential
+  alias Kodo.LLM.CredentialResolver
+  alias Kodo.LLM.IntegrationRef
 
   @type tool :: %{
           required(:name) => String.t(),
@@ -15,13 +26,62 @@ defmodule Kodo.LLM do
           optional(:assistant) => map()
         }
 
-  @callback generate(String.t(), [map()], [tool()], keyword()) ::
+  @callback generate(LLMDB.Model.t(), [map()], [tool()], Credential.t(), keyword()) ::
               {:ok, result()} | {:error, term()}
 
-  @callback generate_object(String.t(), [map()], map(), keyword()) ::
+  @callback generate_object(LLMDB.Model.t(), [map()], map(), Credential.t(), keyword()) ::
               {:ok, %{object: map(), usage: map() | nil}} | {:error, term()}
 
   @callback validate_model(String.t(), map(), map()) :: {:ok, map()} | {:error, term()}
 
+  @doc "Resolves a model and captures non-secret integration metadata for later admission."
+  def resolve_integration(%Scope{} = scope, model) do
+    with {:ok, resolved_model} <- resolve_model(model),
+         {:ok, reference} <- CredentialResolver.reference(scope, resolved_model) do
+      {:ok, resolved_model, reference}
+    end
+  end
+
+  @doc "Generates text after rechecking and decrypting the referenced credential."
+  def generate(
+        %Scope{} = scope,
+        %LLMDB.Model{} = model,
+        %IntegrationRef{} = reference,
+        messages,
+        tools,
+        opts
+      ) do
+    adapter = Keyword.get(opts, :adapter, adapter())
+    adapter_opts = Keyword.delete(opts, :adapter)
+
+    with {:ok, credential} <- CredentialResolver.resolve(scope, model, reference) do
+      adapter.generate(model, messages, tools, credential, adapter_opts)
+    end
+  end
+
+  @doc "Generates a structured object after scoped credential admission."
+  def generate_object(
+        %Scope{} = scope,
+        %LLMDB.Model{} = model,
+        %IntegrationRef{} = reference,
+        messages,
+        schema,
+        opts
+      ) do
+    adapter = Keyword.get(opts, :adapter, adapter())
+    adapter_opts = Keyword.delete(opts, :adapter)
+
+    with {:ok, credential} <- CredentialResolver.resolve(scope, model, reference) do
+      adapter.generate_object(model, messages, schema, credential, adapter_opts)
+    end
+  end
+
   def adapter, do: Application.get_env(:kodo, :llm_adapter, Kodo.LLM.ReqLLM)
+
+  defp resolve_model(model) do
+    case ReqLLM.model(model) do
+      {:ok, %LLMDB.Model{} = resolved} -> {:ok, resolved}
+      {:error, _reason} -> {:error, :malformed_model}
+    end
+  end
 end
