@@ -7,12 +7,13 @@ defmodule Kodo.Integrations.CredentialEncryption do
   @nonce_bytes 12
   @tag_bytes 16
   @key_bytes 32
+  @key_version ~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/
 
   @doc "Encrypts a credential payload using the configured current key."
   def encrypt(%Integration{} = integration, payload) when is_map(payload) do
     with {:ok, ring} <- key_ring(),
          {:ok, associated_data} <- associated_data(integration, @format_version),
-         {:ok, plaintext} <- Jason.encode(payload) do
+         {:ok, plaintext} <- encode_payload(payload) do
       nonce = :crypto.strong_rand_bytes(@nonce_bytes)
       key = Map.fetch!(ring.keys, ring.current_key_version)
 
@@ -34,9 +35,12 @@ defmodule Kodo.Integrations.CredentialEncryption do
          credential_format_version: @format_version
        }}
     else
+      {:error, :credential_payload_invalid} = error -> error
       _error -> {:error, :credential_encryption_unavailable}
     end
   end
+
+  def encrypt(_integration, _payload), do: {:error, :credential_payload_invalid}
 
   @doc "Decrypts and authenticates an integration's credential payload."
   def decrypt(%Integration{credential_format_version: version}) when version != @format_version,
@@ -101,7 +105,18 @@ defmodule Kodo.Integrations.CredentialEncryption do
 
   defp valid_keys?(_keys), do: false
 
-  defp valid_version?(version), do: is_binary(version) and version != ""
+  defp valid_version?(version), do: is_binary(version) and Regex.match?(@key_version, version)
+
+  defp encode_payload(payload) do
+    try do
+      case Jason.encode(payload) do
+        {:ok, encoded} -> {:ok, encoded}
+        {:error, _reason} -> {:error, :credential_payload_invalid}
+      end
+    rescue
+      _exception -> {:error, :credential_payload_invalid}
+    end
+  end
 
   defp associated_data(integration, format_version) do
     values = [

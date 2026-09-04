@@ -71,8 +71,15 @@ end
 if config_env() == :prod do
   current_key_version =
     case System.get_env("KODO_CREDENTIAL_ENCRYPTION_CURRENT_KEY_VERSION") do
-      version when is_binary(version) and version != "" -> version
-      _invalid -> raise "KODO_CREDENTIAL_ENCRYPTION_CURRENT_KEY_VERSION must be set"
+      version when is_binary(version) ->
+        if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/, version) do
+          version
+        else
+          raise "KODO_CREDENTIAL_ENCRYPTION_CURRENT_KEY_VERSION is invalid"
+        end
+
+      _invalid ->
+        raise "KODO_CREDENTIAL_ENCRYPTION_CURRENT_KEY_VERSION must be set"
     end
 
   encoded_key_ring =
@@ -85,13 +92,19 @@ if config_env() == :prod do
          {:ok, keys} <-
            Enum.reduce_while(encoded_keys, {:ok, %{}}, fn
              {version, encoded_key}, {:ok, keys}
-             when is_binary(version) and version != "" and is_binary(encoded_key) ->
-               case Base.decode64(encoded_key) do
-                 {:ok, key} when byte_size(key) == 32 ->
-                   {:cont, {:ok, Map.put(keys, version, key)}}
+             when is_binary(version) and is_binary(encoded_key) ->
+               with true <-
+                      Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z/, version),
+                    {:ok, key} <- Base.decode64(encoded_key) do
+                 case key do
+                   key when byte_size(key) == 32 ->
+                     {:cont, {:ok, Map.put(keys, version, key)}}
 
-                 _invalid ->
-                   {:halt, :error}
+                   _invalid ->
+                     {:halt, :error}
+                 end
+               else
+                 _invalid -> {:halt, :error}
                end
 
              _invalid_entry, _keys ->

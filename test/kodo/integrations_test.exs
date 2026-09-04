@@ -4,6 +4,8 @@ defmodule Kodo.IntegrationsTest do
   alias Kodo.AccountsFixtures
   alias Kodo.Integrations
   alias Kodo.Integrations.CredentialEncryption
+  alias Kodo.Integrations.Integration
+  alias Kodo.Test.BlockingJSONValue
 
   describe "scoped credential lifecycle" do
     setup do
@@ -35,8 +37,13 @@ defmodule Kodo.IntegrationsTest do
 
     test "enforces one integration per user and provider", %{scope: scope} do
       assert {:ok, _integration} = connect(scope)
-      assert {:error, changeset} = connect(scope)
-      assert "has already been taken" in errors_on(changeset).user_id
+      assert {:error, :integration_already_exists} = connect(scope)
+    end
+
+    test "returns a bounded error when connection races account deletion", %{scope: scope} do
+      Repo.delete!(scope.user)
+
+      assert {:error, :integration_owner_not_found} = connect(scope)
     end
 
     test "replaces credentials with a new nonce and advances the generation", %{scope: scope} do
@@ -117,8 +124,10 @@ defmodule Kodo.IntegrationsTest do
     end
 
     test "retains provisional OAuth credentials until a fenced refresh succeeds", %{scope: scope} do
+      integration = oauth_integration(scope)
+
       assert {:ok, integration} =
-               Integrations.connect(scope, "openai_codex", "oauth", %{
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
                  "access_token" => "old-access",
                  "refresh_token" => "old-refresh",
                  "account_id" => "account"
@@ -174,9 +183,35 @@ defmodule Kodo.IntegrationsTest do
                )
     end
 
-    test "installs a generation-fenced OAuth authorization after disconnection", %{scope: scope} do
-      assert {:ok, integration} =
+    test "rejects raw connect and replacement APIs for OAuth credentials", %{scope: scope} do
+      assert {:error, :authentication_type_mismatch} =
                Integrations.connect(scope, "openai_codex", "oauth", %{
+                 "access_token" => "raw-access",
+                 "refresh_token" => "raw-refresh"
+               })
+
+      integration = oauth_integration(scope)
+
+      assert {:ok, connected} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
+                 "access_token" => "authorized",
+                 "refresh_token" => "refresh"
+               })
+
+      assert {:error, :authentication_type_mismatch} =
+               Integrations.replace_credentials(
+                 scope,
+                 connected.id,
+                 connected.credential_generation,
+                 %{"access_token" => "raw-replacement"}
+               )
+    end
+
+    test "installs a generation-fenced OAuth authorization after disconnection", %{scope: scope} do
+      integration = oauth_integration(scope)
+
+      assert {:ok, integration} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
                  "access_token" => "old-access",
                  "refresh_token" => "old-refresh"
                })
@@ -218,9 +253,224 @@ defmodule Kodo.IntegrationsTest do
       assert {:ok, current} = Integrations.get_integration(scope, integration.id)
       assert current.connection_status == "connected"
     end
+
+    test "admits exactly one of two replacements at the same generation", %{scope: scope} do
+      assert {:ok, integration} = connect(scope)
+      supervisor = start_supervised!(Task.Supervisor)
+      owner = self()
+
+      tasks =
+        for suffix <- ["first", "second"] do
+          ref = make_ref()
+
+          task =
+            async_operation(supervisor, fn ->
+              Integrations.replace_credentials(
+                scope,
+                integration.id,
+                integration.credential_generation,
+                %{"api_key" => blocking_value(owner, ref, "replacement-#{suffix}")}
+              )
+            end)
+
+          {task, ref}
+        end
+
+      Enum.each(tasks, fn {task, ref} -> assert_encoding_blocked(task, ref) end)
+      Enum.each(tasks, fn {task, ref} -> send(task.pid, {:continue_json_encoding, ref}) end)
+
+      results = Enum.map(tasks, fn {task, _ref} -> Task.await(task) end)
+
+      assert Enum.count(results, &match?({:ok, _integration}, &1)) == 1
+
+      assert Enum.count(results, &(&1 == {:error, :stale_credential_generation})) == 1
+
+      assert {:ok, current} = Integrations.get_integration(scope, integration.id)
+      assert current.credential_generation == integration.credential_generation + 1
+    end
+
+    test "delayed credential and validation results cannot undo disconnection", %{scope: scope} do
+      assert {:ok, api_integration} = connect(scope)
+      api_generation = api_integration.credential_generation
+      supervisor = start_supervised!(Task.Supervisor)
+      owner = self()
+      replace_ref = make_ref()
+
+      replace_task =
+        async_operation(supervisor, fn ->
+          Integrations.replace_credentials(
+            scope,
+            api_integration.id,
+            api_generation,
+            %{"api_key" => blocking_value(owner, replace_ref, "delayed")}
+          )
+        end)
+
+      assert_encoding_blocked(replace_task, replace_ref)
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(scope, api_integration.id, api_generation)
+
+      send(replace_task.pid, {:continue_json_encoding, replace_ref})
+
+      assert {:error, :stale_credential_generation} =
+               Task.await(replace_task)
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.validation_invalid(scope, api_integration.id, api_generation)
+
+      oauth = oauth_integration(scope)
+      oauth_ref = make_ref()
+
+      oauth_task =
+        async_operation(supervisor, fn ->
+          Integrations.oauth_succeeded(scope, oauth.id, 0, %{
+            "access_token" => blocking_value(owner, oauth_ref, "access"),
+            "refresh_token" => "refresh"
+          })
+        end)
+
+      assert_encoding_blocked(oauth_task, oauth_ref)
+      assert {:ok, oauth_disconnected} = Integrations.disconnect(scope, oauth.id, 0)
+      send(oauth_task.pid, {:continue_json_encoding, oauth_ref})
+
+      assert {:error, :stale_credential_generation} = Task.await(oauth_task)
+      assert oauth_disconnected.connection_status == "disconnected"
+
+      refresh_scope = AccountsFixtures.user_scope_fixture()
+      refresh = oauth_integration(refresh_scope)
+
+      assert {:ok, refresh} =
+               Integrations.oauth_succeeded(refresh_scope, refresh.id, 0, %{
+                 "access_token" => "access",
+                 "refresh_token" => "refresh"
+               })
+
+      refresh_ref = make_ref()
+
+      refresh_task =
+        async_operation(supervisor, fn ->
+          Integrations.refresh_succeeded(
+            refresh_scope,
+            refresh.id,
+            refresh.credential_generation,
+            %{
+              "access_token" => blocking_value(owner, refresh_ref, "new-access"),
+              "refresh_token" => "new-refresh"
+            }
+          )
+        end)
+
+      assert_encoding_blocked(refresh_task, refresh_ref)
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(
+                 refresh_scope,
+                 refresh.id,
+                 refresh.credential_generation
+               )
+
+      send(refresh_task.pid, {:continue_json_encoding, refresh_ref})
+      assert {:error, :stale_credential_generation} = Task.await(refresh_task)
+
+      assert {:ok, current} = Integrations.get_integration(refresh_scope, refresh.id)
+      assert current.connection_status == "disconnected"
+      assert is_nil(current.encrypted_credentials)
+    end
+
+    test "deletion after credential lookup cannot recreate integration state", %{scope: scope} do
+      assert {:ok, integration} = connect(scope)
+      supervisor = start_supervised!(Task.Supervisor)
+      owner = self()
+      ref = make_ref()
+
+      task =
+        async_operation(supervisor, fn ->
+          Integrations.replace_credentials(
+            scope,
+            integration.id,
+            integration.credential_generation,
+            %{"api_key" => blocking_value(owner, ref, "late-replacement")}
+          )
+        end)
+
+      assert_encoding_blocked(task, ref)
+      Repo.delete!(scope.user)
+      send(task.pid, {:continue_json_encoding, ref})
+
+      assert {:error, :stale_credential_generation} = Task.await(task)
+
+      refute Repo.get(Integration, integration.id)
+    end
+
+    test "rejects validation and refresh transitions from illegal connection states", %{
+      scope: scope
+    } do
+      oauth = oauth_integration(scope)
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.validation_succeeded(scope, oauth.id, 0)
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.refresh_succeeded(scope, oauth.id, 0, %{
+                 "access_token" => "access",
+                 "refresh_token" => "refresh"
+               })
+
+      assert {:ok, connected} =
+               Integrations.oauth_succeeded(scope, oauth.id, 0, %{
+                 "access_token" => "access",
+                 "refresh_token" => "refresh"
+               })
+
+      assert {:ok, reauthorization} =
+               Integrations.refresh_invalid_grant(
+                 scope,
+                 connected.id,
+                 connected.credential_generation
+               )
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.validation_succeeded(
+                 scope,
+                 reauthorization.id,
+                 reauthorization.credential_generation
+               )
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.refresh_invalid_grant(
+                 scope,
+                 reauthorization.id,
+                 reauthorization.credential_generation
+               )
+    end
   end
 
   defp connect(scope) do
     Integrations.connect(scope, "openai", "api_key", %{"api_key" => "provider-secret"})
+  end
+
+  defp oauth_integration(scope) do
+    %Integration{user_id: scope.user.id}
+    |> Integration.create_changeset(%{
+      provider: "openai_codex",
+      authentication_type: "oauth"
+    })
+    |> Repo.insert!()
+  end
+
+  defp async_operation(supervisor, operation) do
+    task = Task.Supervisor.async_nolink(supervisor, operation)
+    Ecto.Adapters.SQL.Sandbox.allow(Repo, self(), task.pid)
+    task
+  end
+
+  defp blocking_value(owner, ref, value) do
+    %BlockingJSONValue{owner: owner, ref: ref, value: value}
+  end
+
+  defp assert_encoding_blocked(task, ref) do
+    task_pid = task.pid
+    assert_receive {:json_encoding_blocked, ^ref, ^task_pid}
   end
 end
