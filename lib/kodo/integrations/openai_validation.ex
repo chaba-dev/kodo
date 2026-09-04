@@ -13,6 +13,7 @@ defmodule Kodo.Integrations.OpenAIValidation do
   alias Kodo.Integrations.Integration
 
   @provider "openai"
+  @probe_timeout 5_000
 
   def start(
         %Scope{} = scope,
@@ -29,12 +30,13 @@ defmodule Kodo.Integrations.OpenAIValidation do
   @doc false
   def validate(%Scope{} = scope, id, generation, opts \\ []) do
     client = Keyword.get(opts, :client, configured_client())
+    timeout = Keyword.get(opts, :timeout, @probe_timeout)
 
     with {:ok, integration} <- Integrations.get_integration(scope, id),
          :ok <- admit(integration, generation),
          {:ok, payload} <- CredentialEncryption.decrypt(integration),
          {:ok, api_key} <- fetch_api_key(payload),
-         outcome <- probe(client, api_key) do
+         outcome <- bounded_probe(client, api_key, timeout) do
       persist(scope, integration, outcome)
     end
   end
@@ -65,7 +67,21 @@ defmodule Kodo.Integrations.OpenAIValidation do
 
   defp fetch_api_key(_payload), do: {:error, :credential_payload_invalid}
 
-  defp probe(client, api_key), do: client.get_models(api_key) |> classify_response()
+  # The HTTP client's timeouts bound individual transport phases. This outer
+  # deadline also bounds response decoding and misbehaving client adapters so a
+  # validation task cannot retain an operation-local key indefinitely.
+  defp bounded_probe(client, api_key, timeout) when is_integer(timeout) and timeout > 0 do
+    task =
+      Task.Supervisor.async_nolink(Kodo.ControlPlaneTaskSupervisor, fn ->
+        client.get_models(api_key)
+      end)
+
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, response} -> classify_response(response)
+      {:exit, _reason} -> {:unavailable, "provider_unavailable"}
+      nil -> {:unavailable, "timeout"}
+    end
+  end
 
   defp classify_response({:ok, status, _body}) when status in 200..299, do: :valid
   defp classify_response({:ok, 401, body}), do: classify_unauthorized(body)

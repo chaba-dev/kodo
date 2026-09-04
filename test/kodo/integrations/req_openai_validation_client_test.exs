@@ -39,4 +39,28 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClientTest do
       assert Agent.get(counter, & &1) == 1
     end
   end
+
+  test "normalizes a transport pool checkout exit" do
+    plug = fn _conn -> exit({:timeout, {NimblePool, :checkout, []}}) end
+
+    assert {:error, :network_error} =
+             ReqOpenAIValidationClient.get_models("pool-timeout-secret", plug: plug)
+  end
+
+  test "does not retry provider failures" do
+    counter = start_supervised!({Agent, fn -> 0 end})
+
+    plug = fn conn ->
+      Agent.update(counter, &(&1 + 1))
+
+      conn
+      |> Plug.Conn.put_status(503)
+      |> Req.Test.json(%{"error" => "unavailable"})
+    end
+
+    assert {:ok, 503, %{"error" => "unavailable"}} =
+             ReqOpenAIValidationClient.get_models("no-retry-secret", plug: plug)
+
+    assert Agent.get(counter, & &1) == 1
+  end
 end

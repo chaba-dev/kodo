@@ -1,5 +1,5 @@
 defmodule KodoWeb.IntegrationsLiveTest do
-  use KodoWeb.ConnCase, async: true
+  use KodoWeb.ConnCase, async: false
 
   import Kodo.AccountsFixtures
   import Phoenix.LiveViewTest
@@ -21,6 +21,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert has_element?(view, "#openai-integration #openai-connect")
     assert has_element?(view, "#openai-status", "Not connected")
     refute has_element?(view, "#openai-status", "Validation")
+    assert has_element?(view, "#openai-status[aria-live='polite'][aria-atomic='true']")
   end
 
   test "requires authentication", %{conn: _conn} do
@@ -95,6 +96,29 @@ defmodule KodoWeb.IntegrationsLiveTest do
     refute has_element?(view, "#openai-api-key-panel")
   end
 
+  test "reconnects a disconnected integration through the connect action", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, original} = connect_openai(scope, "first-secret")
+
+    {:ok, disconnected} =
+      Integrations.disconnect(scope, original.id, original.credential_generation)
+
+    {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
+
+    view
+    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "valid-reconnected"}})
+    |> render_submit()
+
+    assert {:ok, reconnected} = Integrations.get_integration(scope, original.id)
+    assert reconnected.connection_status == "connected"
+    assert reconnected.credential_generation == disconnected.credential_generation + 1
+
+    assert {:ok, %{"api_key" => "valid-reconnected"}} =
+             CredentialEncryption.decrypt(reconnected)
+  end
+
   test "generation-fences a stale replacement form", %{conn: conn, scope: scope} do
     {:ok, original} = connect_openai(scope, "first-secret")
     {:ok, view, _html} = live(conn, ~p"/integrations?action=replace")
@@ -118,6 +142,148 @@ defmodule KodoWeb.IntegrationsLiveTest do
              CredentialEncryption.decrypt(persisted)
   end
 
+  test "does not adopt a replacement generation after a validation refresh", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, original} = connect_openai(scope, "first-secret")
+    {:ok, view, _html} = live(conn, ~p"/integrations?action=replace")
+
+    {:ok, current} =
+      Integrations.replace_credentials(
+        scope,
+        original.id,
+        original.credential_generation,
+        %{"api_key" => "concurrent-secret"}
+      )
+
+    send(
+      view.pid,
+      {:integration_validation_finished, current.id, current.credential_generation}
+    )
+
+    _ = :sys.get_state(view.pid)
+
+    view
+    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "stale-secret"}})
+    |> render_submit()
+
+    assert {:ok, persisted} = Integrations.get_integration(scope, original.id)
+    assert persisted.credential_generation == current.credential_generation
+
+    assert {:ok, %{"api_key" => "concurrent-secret"}} =
+             CredentialEncryption.decrypt(persisted)
+  end
+
+  test "does not turn an open connect form into replacement after another tab connects", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
+    {:ok, current} = connect_openai(scope, "concurrent-secret")
+
+    send(
+      view.pid,
+      {:integration_validation_finished, current.id, current.credential_generation}
+    )
+
+    _ = :sys.get_state(view.pid)
+
+    view
+    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "stale-secret"}})
+    |> render_submit()
+
+    assert {:ok, persisted} = Integrations.get_integration(scope, current.id)
+
+    assert {:ok, %{"api_key" => "concurrent-secret"}} =
+             CredentialEncryption.decrypt(persisted)
+  end
+
+  test "does not disconnect a newer credential after a validation refresh", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, original} = connect_openai(scope, "first-secret")
+    {:ok, view, _html} = live(conn, ~p"/integrations?action=disconnect")
+
+    {:ok, current} =
+      Integrations.replace_credentials(
+        scope,
+        original.id,
+        original.credential_generation,
+        %{"api_key" => "concurrent-secret"}
+      )
+
+    send(
+      view.pid,
+      {:integration_validation_finished, current.id, current.credential_generation}
+    )
+
+    _ = :sys.get_state(view.pid)
+    view |> element("#openai-confirm-disconnect") |> render_click()
+
+    assert {:ok, persisted} = Integrations.get_integration(scope, original.id)
+    assert persisted.connection_status == "connected"
+    assert persisted.credential_generation == current.credential_generation
+  end
+
+  test "remains alive when an older validation finishes after a newer task", %{
+    conn: conn
+  } do
+    Application.put_env(:kodo, :fake_openai_validation_test_pid, self())
+
+    on_exit(fn -> Application.delete_env(:kodo, :fake_openai_validation_test_pid) end)
+
+    {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
+
+    view
+    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "blocking-first"}})
+    |> render_submit()
+
+    assert_receive {:validation_probe_started, first_probe}
+    render_patch(view, ~p"/integrations?action=replace")
+
+    view
+    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "valid-second"}})
+    |> render_submit()
+
+    send(first_probe, {:finish_validation_probe, {:ok, 200, %{"data" => []}}})
+    view_ref = Process.monitor(view.pid)
+    _ = :sys.get_state(view.pid)
+    refute_receive {:DOWN, ^view_ref, :process, _, _reason}
+  end
+
+  test "requires fresh sudo again when submitting without retaining the key", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
+    expire_sudo(view)
+    secret = "expired-sudo-secret"
+
+    response =
+      view
+      |> form("#openai-api-key-form", %{"integration" => %{"api_key" => secret}})
+      |> render_submit()
+
+    assert_redirect(view, ~p"/users/reauthenticate/openai/connect")
+    refute inspect(response) =~ secret
+    assert {:error, :integration_not_found} =
+             Integrations.get_integration_by_provider(scope, "openai")
+  end
+
+  test "requires fresh sudo again before disconnecting", %{conn: conn, scope: scope} do
+    {:ok, integration} = connect_openai(scope, "disconnect-secret")
+    {:ok, view, _html} = live(conn, ~p"/integrations?action=disconnect")
+    expire_sudo(view)
+
+    view |> element("#openai-confirm-disconnect") |> render_click()
+
+    assert_redirect(view, ~p"/users/reauthenticate/openai/disconnect")
+    assert {:ok, persisted} = Integrations.get_integration(scope, integration.id)
+    assert persisted.connection_status == "connected"
+  end
+
   test "disconnect confirmation explains admitted requests and clears credentials", %{
     conn: conn,
     scope: scope
@@ -131,6 +297,8 @@ defmodule KodoWeb.IntegrationsLiveTest do
              view,
              "#openai-revoke-key-link[href='https://platform.openai.com/api-keys'][target='_blank']"
            )
+
+    assert has_element?(view, "#openai-revoke-key-link .sr-only", "opens in a new tab")
 
     view |> element("#openai-confirm-disconnect") |> render_click()
 
@@ -154,5 +322,14 @@ defmodule KodoWeb.IntegrationsLiveTest do
 
   defp connect_openai(scope, key) do
     Integrations.connect(scope, "openai", "api_key", %{"api_key" => key})
+  end
+
+  defp expire_sudo(view) do
+    :sys.replace_state(view.pid, fn state ->
+      put_in(
+        state.socket.assigns.current_scope.user.authenticated_at,
+        DateTime.add(DateTime.utc_now(:second), -11, :minute)
+      )
+    end)
   end
 end

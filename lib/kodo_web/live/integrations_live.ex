@@ -18,15 +18,25 @@ defmodule KodoWeb.IntegrationsLive do
     {:ok,
      socket
      |> assign(:action, nil)
+     |> assign(:action_target, nil)
      |> assign(:max_api_key_bytes, @max_api_key_bytes)
      |> assign(:api_key_form, to_form(%{"api_key" => ""}, as: :integration))
+     |> assign(:validation_refs, MapSet.new())
      |> load_integration()}
   end
 
   @impl true
   def handle_params(%{"action" => action}, _uri, socket) when action in @sensitive_actions do
     if sudo_mode?(socket) do
-      {:noreply, socket |> assign(:action, action) |> load_integration()}
+      socket = load_integration(socket)
+
+      case action_target(action, socket.assigns.integration) do
+        {:ok, target} ->
+          {:noreply, socket |> assign(:action, action) |> assign(:action_target, target)}
+
+        :error ->
+          stale_action(socket)
+      end
     else
       {:noreply,
        socket
@@ -36,7 +46,11 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   def handle_params(_params, _uri, socket) do
-    {:noreply, socket |> assign(:action, nil) |> load_integration()}
+    {:noreply,
+     socket
+     |> assign(:action, nil)
+     |> assign(:action_target, nil)
+     |> load_integration()}
   end
 
   @impl true
@@ -71,7 +85,8 @@ defmodule KodoWeb.IntegrationsLive do
   def handle_event("disconnect", _params, socket) do
     with true <- socket.assigns.action == "disconnect",
          true <- sudo_mode?(socket),
-         %{id: id, credential_generation: generation} <- socket.assigns.integration,
+         %{id: id, credential_generation: generation, connection_status: "connected"} <-
+           socket.assigns.action_target,
          {:ok, _integration} <-
            Integrations.disconnect(socket.assigns.current_scope, id, generation) do
       {:noreply,
@@ -94,38 +109,79 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   @impl true
-  def handle_info({reference, _result}, %{assigns: %{validation_ref: reference}} = socket) do
-    Process.demonitor(reference, [:flush])
-    {:noreply, socket |> assign(:validation_ref, nil) |> load_integration()}
+  def handle_info({reference, _result}, socket) when is_reference(reference) do
+    if MapSet.member?(socket.assigns.validation_refs, reference) do
+      Process.demonitor(reference, [:flush])
+      {:noreply, socket |> drop_validation_ref(reference) |> load_integration()}
+    else
+      {:noreply, socket}
+    end
   end
 
-  def handle_info(
-        {:DOWN, reference, :process, _pid, _reason},
-        %{assigns: %{validation_ref: reference}} = socket
-      ) do
-    {:noreply, socket |> assign(:validation_ref, nil) |> load_integration()}
+  def handle_info({:DOWN, reference, :process, _pid, _reason}, socket) do
+    if MapSet.member?(socket.assigns.validation_refs, reference) do
+      {:noreply, socket |> drop_validation_ref(reference) |> load_integration()}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info({:integration_validation_finished, _id, _generation}, socket) do
     {:noreply, load_integration(socket)}
   end
 
-  defp save_api_key(%{assigns: %{integration: nil}} = socket, api_key) do
+  defp save_api_key(
+         %{assigns: %{action: "connect", action_target: :missing}} = socket,
+         api_key
+       ) do
     Integrations.connect(socket.assigns.current_scope, @provider, "api_key", %{
       "api_key" => api_key
     })
   end
 
-  defp save_api_key(socket, api_key) do
-    integration = socket.assigns.integration
-
-    Integrations.replace_credentials(
+  defp save_api_key(
+         %{
+           assigns: %{
+             action: "connect",
+             action_target: %{
+               id: id,
+               credential_generation: generation,
+               connection_status: "disconnected"
+             }
+           }
+         } = socket,
+         api_key
+       ) do
+    Integrations.reconnect_api_key(
       socket.assigns.current_scope,
-      integration.id,
-      integration.credential_generation,
+      id,
+      generation,
       %{"api_key" => api_key}
     )
   end
+
+  defp save_api_key(
+         %{
+           assigns: %{
+             action: "replace",
+             action_target: %{
+               id: id,
+               credential_generation: generation,
+               connection_status: "connected"
+             }
+           }
+         } = socket,
+         api_key
+       ) do
+    Integrations.replace_credentials(
+      socket.assigns.current_scope,
+      id,
+      generation,
+      %{"api_key" => api_key}
+    )
+  end
+
+  defp save_api_key(_socket, _api_key), do: {:error, :stale_credential_generation}
 
   defp load_integration(socket) do
     integration =
@@ -153,7 +209,11 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp start_validation(socket, integration) do
     task = OpenAIValidation.start(socket.assigns.current_scope, integration)
-    assign(socket, :validation_ref, task.ref)
+    update(socket, :validation_refs, &MapSet.put(&1, task.ref))
+  end
+
+  defp drop_validation_ref(socket, reference) do
+    update(socket, :validation_refs, &MapSet.delete(&1, reference))
   end
 
   defp validate_api_key(api_key)
@@ -183,6 +243,23 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp reauthentication_path(action),
     do: ~p"/users/reauthenticate/#{@provider}/#{action}"
+
+  defp action_target("connect", nil), do: {:ok, :missing}
+
+  defp action_target("connect", %{connection_status: "disconnected"} = integration),
+    do: {:ok, target_metadata(integration)}
+
+  defp action_target(action, %{connection_status: "connected"} = integration)
+       when action in ~w(replace disconnect),
+       do: {:ok, target_metadata(integration)}
+
+  defp action_target(_action, _integration), do: :error
+
+  defp target_metadata(integration) do
+    Map.take(integration, [:id, :credential_generation, :connection_status])
+  end
+
+  defp validation_running?(refs), do: MapSet.size(refs) > 0
 
   defp integration_connected?(%{connection_status: "connected"}), do: true
   defp integration_connected?(_integration), do: false
@@ -234,7 +311,7 @@ defmodule KodoWeb.IntegrationsLive do
           </div>
 
           <p
-            :if={assigns[:validation_ref]}
+            :if={validation_running?(@validation_refs)}
             id="openai-validation-progress"
             class="flex items-center gap-2 text-xs font-medium text-zinc-500"
             role="status"
@@ -262,7 +339,12 @@ defmodule KodoWeb.IntegrationsLive do
                   <p class="mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
                     Use a user-owned OpenAI Platform API key for compatible model requests.
                   </p>
-                  <dl id="openai-status" class="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs">
+                  <dl
+                    id="openai-status"
+                    aria-live="polite"
+                    aria-atomic="true"
+                    class="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs"
+                  >
                     <div>
                       <dt class="text-zinc-500">Connection</dt>
                       <dd class="mt-0.5 font-semibold text-zinc-900 dark:text-zinc-100">
@@ -366,6 +448,7 @@ defmodule KodoWeb.IntegrationsLive do
                   class="font-semibold text-red-800 underline decoration-red-300 underline-offset-2 hover:text-red-950 dark:text-red-300 dark:hover:text-red-200"
                 >
                   Revoke the key in OpenAI
+                  <span class="sr-only">(opens in a new tab)</span>
                 </.link>
                 if it must stop outside Kodo.
               </p>

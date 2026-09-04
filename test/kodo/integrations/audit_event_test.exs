@@ -61,6 +61,58 @@ defmodule Kodo.Integrations.AuditEventTest do
     assert Repo.aggregate(AuditEvent, :count) == 0
   end
 
+  test "records reconnect as a submission with the new generation" do
+    scope = AccountsFixtures.user_scope_fixture()
+    {:ok, integration} = connect_openai(scope)
+
+    {:ok, disconnected} =
+      Integrations.disconnect(scope, integration.id, integration.credential_generation)
+
+    assert {:ok, _reconnected} =
+             Integrations.reconnect_api_key(
+               scope,
+               disconnected.id,
+               disconnected.credential_generation,
+               %{"api_key" => "reconnected-secret"}
+             )
+
+    assert Enum.map(Integrations.list_audit_events(scope), fn event ->
+             {event.event_type, event.credential_generation}
+           end) == [
+             {"api_key_submitted", 1},
+             {"integration_disconnected", 2},
+             {"api_key_submitted", 3}
+           ]
+  end
+
+  test "records bounded invalid and unavailable validation outcomes" do
+    scope = AccountsFixtures.user_scope_fixture()
+    {:ok, integration} = connect_openai(scope)
+
+    assert {:ok, invalid} =
+             Integrations.validation_invalid(
+               scope,
+               integration.id,
+               integration.credential_generation
+             )
+
+    assert {:ok, _unavailable} =
+             Integrations.validation_unavailable(
+               scope,
+               invalid.id,
+               invalid.credential_generation,
+               "rate_limited"
+             )
+
+    assert Enum.map(Integrations.list_audit_events(scope), fn event ->
+             {event.event_type, event.credential_generation}
+           end) == [
+             {"api_key_submitted", 1},
+             {"validation_invalid", 1},
+             {"validation_unavailable", 1}
+           ]
+  end
+
   defp connect_openai(scope) do
     Integrations.connect(scope, "openai", "api_key", %{"api_key" => "audit-cascade-secret"})
   end

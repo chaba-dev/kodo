@@ -82,9 +82,22 @@ defmodule Kodo.Integrations do
       generation,
       credentials,
       opts,
-      Integration.connection_statuses(),
+      ["connected"],
       "api_key",
       "api_key_replaced"
+    )
+  end
+
+  def reconnect_api_key(%Scope{} = scope, id, generation, credentials, opts \\ []) do
+    install_credentials(
+      scope,
+      id,
+      generation,
+      credentials,
+      opts,
+      ["disconnected"],
+      "api_key",
+      "api_key_submitted"
     )
   end
 

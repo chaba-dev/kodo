@@ -28,20 +28,27 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClient do
         max_redirects: 0,
         retry: false,
         receive_timeout: @timeout,
+        request_timeout: @timeout,
+        finch: [pool_timeout: @timeout],
         connect_options: [timeout: @timeout]
       ] ++ req_options
 
-    case Req.get(options) do
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:ok, status, body}
+    try do
+      case Req.get(options) do
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:ok, status, body}
 
-      {:error, %Req.TooManyRedirectsError{}} ->
-        {:error, :redirect}
+        {:error, %Req.TooManyRedirectsError{}} ->
+          {:error, :redirect}
 
-      {:error, %Req.TransportError{reason: reason}} ->
-        {:error, transport_error(reason)}
+        {:error, %Req.TransportError{reason: reason}} ->
+          {:error, transport_error(reason)}
 
-      {:error, _error} ->
+        {:error, _error} ->
+          {:error, :network_error}
+      end
+    catch
+      :exit, {_reason, {NimblePool, :checkout, _arguments}} ->
         {:error, :network_error}
     end
   end
