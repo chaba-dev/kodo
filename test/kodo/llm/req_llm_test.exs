@@ -612,6 +612,63 @@ defmodule Kodo.LLM.ReqLLMTest do
     refute inspect(error) =~ secret
   end
 
+  test "rejects credentials reconstructed by tool argument JSON repair" do
+    secret = "request-local-key"
+    arguments = ~S({"path":"\u0072equest-local-key",})
+
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body: %{
+            "id" => "chat_repaired_key",
+            "model" => "anthropic/claude-sonnet-4",
+            "choices" => [
+              %{
+                "index" => 0,
+                "message" => %{
+                  "role" => "assistant",
+                  "content" => nil,
+                  "tool_calls" => [
+                    %{
+                      "id" => "call-1",
+                      "type" => "function",
+                      "function" => %{"name" => "read_file", "arguments" => arguments}
+                    }
+                  ]
+                },
+                "finish_reason" => "tool_calls"
+              }
+            ],
+            "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+          }
+        }
+      ])
+
+    previous = Application.get_env(:req_llm, :openrouter)
+    Application.put_env(:req_llm, :openrouter, base_url: server.base_url)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:req_llm, :openrouter, previous),
+        else: Application.delete_env(:req_llm, :openrouter)
+    end)
+
+    credential = %{@credential | provider: "openrouter", billing_path: :aggregator}
+
+    assert {:error, %Kodo.LLM.ProviderError{kind: :request_failed} = error} =
+             Adapter.generate(
+               ReqLLM.model!("openrouter:anthropic/claude-sonnet-4"),
+               [%{"role" => "user", "content" => "use read_file"}],
+               [],
+               credential,
+               timeout: 5_000,
+               reasoning: "none"
+             )
+
+    refute inspect(error) =~ secret
+  end
+
   test "rejects credentials reconstructed from sibling text parts" do
     secret = "request-local-key"
 
@@ -764,6 +821,96 @@ defmodule Kodo.LLM.ReqLLMTest do
     refute inspect(assistant) =~ "unreviewed metadata"
   end
 
+  test "drops unreviewed content metadata and rejects malformed reasoning fields" do
+    private_detail = "private-provider-detail"
+
+    responses = [
+      %{
+        "id" => "chat_image_metadata",
+        "model" => "anthropic/claude-sonnet-4",
+        "choices" => [
+          %{
+            "index" => 0,
+            "message" => %{
+              "role" => "assistant",
+              "content" => [
+                %{
+                  "type" => "image_url",
+                  "image_url" => %{
+                    "url" => "https://example.invalid/image.png",
+                    "detail" => "high",
+                    "debug" => %{"request_dump" => private_detail}
+                  }
+                }
+              ]
+            },
+            "finish_reason" => "stop"
+          }
+        ],
+        "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+      },
+      %{
+        "id" => "chat_bad_reasoning",
+        "model" => "anthropic/claude-sonnet-4",
+        "choices" => [
+          %{
+            "index" => 0,
+            "message" => %{
+              "role" => "assistant",
+              "content" => "answer",
+              "reasoning_details" => [
+                %{
+                  "type" => "reasoning.text",
+                  "text" => "Checking the result.",
+                  "format" => %{"request_dump" => private_detail},
+                  "index" => 0
+                }
+              ]
+            },
+            "finish_reason" => "stop"
+          }
+        ],
+        "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+      }
+    ]
+
+    server = start_provider_server(Enum.map(responses, &%{status: 200, body: &1}))
+    previous = Application.get_env(:req_llm, :openrouter)
+    Application.put_env(:req_llm, :openrouter, base_url: server.base_url)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:req_llm, :openrouter, previous),
+        else: Application.delete_env(:req_llm, :openrouter)
+    end)
+
+    credential = %{@credential | provider: "openrouter", billing_path: :aggregator}
+    model = ReqLLM.model!("openrouter:anthropic/claude-sonnet-4")
+
+    assert {:ok, %{assistant: assistant}} =
+             Adapter.generate(
+               model,
+               [%{"role" => "user", "content" => "show image"}],
+               [],
+               credential,
+               timeout: 5_000,
+               reasoning: "none"
+             )
+
+    assert [%{"metadata" => %{"$kodo_type" => "map", "entries" => []}}] =
+             assistant["content"]
+
+    refute inspect(assistant) =~ private_detail
+
+    assert {:error, %Kodo.LLM.ProviderError{kind: :request_failed} = error} =
+             Adapter.generate(model, [%{"role" => "user", "content" => "answer"}], [], credential,
+               timeout: 5_000,
+               reasoning: "none"
+             )
+
+    refute inspect(error) =~ private_detail
+  end
+
   test "rejects credentials reconstructed from Codex SSE output" do
     credential = %{
       @credential
@@ -825,6 +972,124 @@ defmodule Kodo.LLM.ReqLLMTest do
 
       refute inspect(error) =~ credential.token
     end
+  end
+
+  test "rejects unsafe Codex tool streams before decoder diagnostics" do
+    credential = %{
+      @credential
+      | provider: "openai_codex",
+        authentication_type: "oauth",
+        billing_path: :subscription,
+        token: "request-local-access",
+        account_id: "request-local-account"
+    }
+
+    added =
+      Jason.encode!(%{
+        "type" => "response.output_item.added",
+        "output_index" => 0,
+        "item" => %{
+          "type" => "function_call",
+          "name" => "read_file",
+          "call_id" => credential.token
+        }
+      })
+      |> String.replace("request-local-access", "\\u0072equest-local-access")
+
+    delta =
+      Jason.encode!(%{
+        "type" => "response.function_call_arguments.delta",
+        "output_index" => 0,
+        "delta" => "{"
+      })
+
+    completed =
+      Jason.encode!(%{
+        "type" => "response.completed",
+        "response" => %{
+          "id" => "resp_test",
+          "model" => "gpt-5.4",
+          "status" => "completed",
+          "output" => [],
+          "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+        }
+      })
+
+    body =
+      "event: response.output_item.added\ndata: #{added}\n\n" <>
+        "event: response.function_call_arguments.delta\ndata: #{delta}\n\n" <>
+        "event: response.completed\ndata: #{completed}\n\n"
+
+    safe_added =
+      Jason.encode!(%{
+        "type" => "response.output_item.added",
+        "output_index" => 0,
+        "item" => %{"type" => "function_call", "name" => "read_file", "call_id" => "call-1"}
+      })
+
+    safe_delta =
+      Jason.encode!(%{
+        "type" => "response.function_call_arguments.delta",
+        "output_index" => 0,
+        "delta" => ~s({"path":"mix.exs"})
+      })
+
+    safe_body =
+      "event: response.output_item.added\ndata: #{safe_added}\n\n" <>
+        "event: response.function_call_arguments.delta\ndata: #{safe_delta}\n\n" <>
+        "event: response.completed\ndata: #{completed}\n\n"
+
+    server =
+      start_provider_server([
+        %{status: 200, body: body, content_type: "text/event-stream"},
+        %{status: 200, body: safe_body, content_type: "text/event-stream"}
+      ])
+
+    test_pid = self()
+    handler_id = "safe-codex-tool-diagnostics-#{System.unique_integer()}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:req_llm, :tool_call_args_lost],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:tool_diagnostic, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    options =
+      []
+      |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+
+    log =
+      capture_log(fn ->
+        assert {:error, error} =
+                 ReqLLM.generate_text(
+                   ReqLLM.model!("openai_codex:gpt-5.4"),
+                   [%{"role" => "user", "content" => "private prompt"}],
+                   options
+                 )
+
+        refute inspect(error) =~ credential.token
+      end)
+
+    refute_receive {:tool_diagnostic, [:req_llm, :tool_call_args_lost], _, _}
+    refute log =~ credential.token
+
+    assert {:ok, response} =
+             ReqLLM.generate_text(
+               ReqLLM.model!("openai_codex:gpt-5.4"),
+               [%{"role" => "user", "content" => "use read_file"}],
+               options
+             )
+
+    assert [%{id: "call-1"} = call] = ReqLLM.Response.tool_calls(response)
+    assert ReqLLM.ToolCall.args_map(call) == %{"path" => "mix.exs"}
+    refute_receive {:tool_diagnostic, [:req_llm, :tool_call_args_lost], _, _}
   end
 
   test "Kodo rejects empty Anthropic inference responses without crashing" do

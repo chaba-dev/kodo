@@ -43,6 +43,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
     cache_creation_tokens cache_read_input_tokens cache_creation_input_tokens
   )a
   @tool_usage_keys %{
+    "function" => :function,
     "web_search" => :web_search,
     "web_search_preview" => :web_search_preview,
     "web_fetch" => :web_fetch,
@@ -181,7 +182,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp sanitize_result({request, %Req.Response{status: status} = response}, secrets, provider)
        when status in 200..299 do
-    case decode_success(request, response, provider) do
+    case decode_success(request, response, provider, secrets) do
       {:ok, response} ->
         if credential_in_key?(response.body, secrets) do
           {scrub_request(request), safe_transport_error(:invalid_provider_response)}
@@ -277,7 +278,9 @@ defmodule Kodo.LLM.SafeReqAdapter do
   end
 
   defp credential_in_composed_output?(response, secrets) do
-    [ReqLLM.Response.text(response), ReqLLM.Response.thinking(response)]
+    tool_arguments = Enum.map(ReqLLM.Response.tool_calls(response), &ReqLLM.ToolCall.args_map/1)
+
+    [ReqLLM.Response.text(response), ReqLLM.Response.thinking(response), tool_arguments]
     |> Enum.any?(&credential_present?(&1, secrets))
   end
 
@@ -332,24 +335,70 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp canonicalize_assistant_metadata(_response), do: :error
 
-  defp canonicalize_message(%ReqLLM.Message{reasoning_details: nil} = message),
-    do: {:ok, message}
+  defp canonicalize_message(%ReqLLM.Message{reasoning_details: nil} = message) do
+    with {:ok, content} <- canonicalize_content(message.content) do
+      {:ok, %{message | content: content}}
+    end
+  end
 
   defp canonicalize_message(%ReqLLM.Message{reasoning_details: details} = message)
        when is_list(details) do
-    if Enum.all?(details, &match?(%ReqLLM.Message.ReasoningDetails{}, &1)) do
-      details = Enum.map(details, &canonicalize_reasoning_detail/1)
-      {:ok, %{message | reasoning_details: details}}
-    else
-      :error
+    with {:ok, content} <- canonicalize_content(message.content),
+         {:ok, details} <- canonicalize_reasoning_details(details) do
+      {:ok, %{message | content: content, reasoning_details: details}}
     end
   end
 
   defp canonicalize_message(_message), do: :error
 
-  defp canonicalize_reasoning_detail(%ReqLLM.Message.ReasoningDetails{} = detail) do
-    %{detail | provider_data: canonical_reasoning_provider_data(detail)}
+  defp canonicalize_reasoning_details(details) do
+    Enum.reduce_while(details, {:ok, []}, fn detail, {:ok, acc} ->
+      case canonicalize_reasoning_detail(detail) do
+        {:ok, detail} -> {:cont, {:ok, [detail | acc]}}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      :error -> :error
+    end
   end
+
+  defp canonicalize_reasoning_detail(%ReqLLM.Message.ReasoningDetails{} = detail) do
+    if optional_binary?(detail.text) and optional_binary?(detail.signature) and
+         is_boolean(detail.encrypted?) and
+         detail.provider in [:anthropic, :google, :openai, :openai_codex, :openrouter] and
+         optional_binary?(detail.format) and is_integer(detail.index) and detail.index >= 0 and
+         (is_nil(detail.provider_data) or is_map(detail.provider_data)) do
+      {:ok, %{detail | provider_data: canonical_reasoning_provider_data(detail)}}
+    else
+      :error
+    end
+  end
+
+  defp canonicalize_reasoning_detail(_detail), do: :error
+
+  defp canonicalize_content(content) when is_list(content) do
+    if Enum.all?(content, &valid_content_part?/1) do
+      {:ok, Enum.map(content, &%{&1 | metadata: %{}})}
+    else
+      :error
+    end
+  end
+
+  defp canonicalize_content(_content), do: :error
+
+  defp valid_content_part?(%ReqLLM.Message.ContentPart{} = part) do
+    part.type in [:text, :image_url, :video_url, :image, :file, :thinking] and
+      optional_binary?(part.text) and optional_binary?(part.url) and
+      optional_binary?(part.data) and optional_binary?(part.file_id) and
+      optional_binary?(part.media_type) and optional_binary?(part.filename) and
+      is_map(part.metadata)
+  end
+
+  defp valid_content_part?(_part), do: false
+
+  defp optional_binary?(value), do: is_nil(value) or is_binary(value)
 
   defp canonical_reasoning_provider_data(%{provider: :openrouter, provider_data: data})
        when is_map(data) do
@@ -587,16 +636,18 @@ defmodule Kodo.LLM.SafeReqAdapter do
     }
   end
 
-  defp decode_success(_request, %Req.Response{} = response, "openai_codex") do
+  defp decode_success(_request, %Req.Response{} = response, "openai_codex", secrets) do
     with true <- event_stream_response?(response),
-         :ok <- validate_codex_sse(response.body) do
+         {:ok, events} <- decode_codex_sse(response.body),
+         false <- credential_present?(events, secrets),
+         :ok <- validate_codex_tool_streams(events) do
       {:ok, response}
     else
       _invalid -> {:error, :invalid_provider_response}
     end
   end
 
-  defp decode_success(request, %Req.Response{} = response, provider) do
+  defp decode_success(request, %Req.Response{} = response, provider, _secrets) do
     case response.body do
       body when is_map(body) ->
         validate_json_shape(response, body, provider, request.url.path)
@@ -651,17 +702,97 @@ defmodule Kodo.LLM.SafeReqAdapter do
   defp json_response?(response), do: content_type?(response, "application/json")
   defp event_stream_response?(response), do: content_type?(response, "text/event-stream")
 
-  defp validate_codex_sse(body) when is_binary(body) do
+  defp decode_codex_sse(body) when is_binary(body) do
     events = ReqLLM.Streaming.SSE.parse_sse_binary(body)
 
     if events != [] and Enum.all?(events, &safe_codex_event?/1),
-      do: :ok,
+      do: {:ok, events},
       else: {:error, :invalid_provider_response}
   rescue
     _exception -> {:error, :invalid_provider_response}
   end
 
-  defp validate_codex_sse(_body), do: {:error, :invalid_provider_response}
+  defp decode_codex_sse(_body), do: {:error, :invalid_provider_response}
+
+  defp validate_codex_tool_streams(events) do
+    state = Enum.reduce(events, %{calls: MapSet.new(), fragments: %{}}, &track_codex_tool_event/2)
+
+    if Enum.all?(state.calls, &valid_codex_tool_arguments?(&1, state.fragments)),
+      do: :ok,
+      else: {:error, :invalid_provider_response}
+  end
+
+  defp track_codex_tool_event(%{data: data} = event, state) when is_map(data) do
+    type = event[:event] || data["event"] || data["type"]
+    index = data["output_index"] || data["index"] || 0
+
+    case type do
+      "response.output_item.added" ->
+        track_codex_tool_start(state, index, data["item"])
+
+      "response.function_call.name.delta" ->
+        if is_binary(data["delta"]), do: add_codex_tool_call(state, index), else: state
+
+      "response.function_call.delta" ->
+        if is_binary(get_in(data, ["delta", "name"])),
+          do: add_codex_tool_call(state, index),
+          else: state
+
+      type
+      when type in [
+             "response.function_call_arguments.delta",
+             "response.function_call_arguments.done"
+           ] ->
+        append_codex_tool_arguments(state, index, data["delta"] || data["arguments"])
+
+      "response.output_item.done" ->
+        track_codex_tool_done(state, index, data["item"])
+
+      _other ->
+        state
+    end
+  end
+
+  defp track_codex_tool_event(_event, state), do: state
+
+  defp track_codex_tool_start(state, index, %{"type" => "function_call", "name" => name})
+       when is_binary(name) and name != "",
+       do: add_codex_tool_call(state, index)
+
+  defp track_codex_tool_start(state, _index, _item), do: state
+
+  defp track_codex_tool_done(state, index, %{"type" => "function_call"} = item) do
+    state =
+      if is_binary(item["name"]) and item["name"] != "",
+        do: add_codex_tool_call(state, index),
+        else: state
+
+    if Map.has_key?(state.fragments, index),
+      do: state,
+      else: append_codex_tool_arguments(state, index, item["arguments"])
+  end
+
+  defp track_codex_tool_done(state, _index, _item), do: state
+
+  defp add_codex_tool_call(state, index),
+    do: %{state | calls: MapSet.put(state.calls, index)}
+
+  defp append_codex_tool_arguments(state, index, fragment)
+       when is_binary(fragment) and fragment != "" do
+    %{state | fragments: Map.update(state.fragments, index, [fragment], &[&1, fragment])}
+  end
+
+  defp append_codex_tool_arguments(state, _index, _fragment), do: state
+
+  defp valid_codex_tool_arguments?(index, fragments) do
+    with parts when is_list(parts) <- Map.get(fragments, index),
+         {:ok, decoded} <- parts |> IO.iodata_to_binary() |> Jason.decode(),
+         true <- is_map(decoded) do
+      true
+    else
+      _invalid -> false
+    end
+  end
 
   defp safe_codex_event?(%{data: "[DONE]"}), do: true
 
