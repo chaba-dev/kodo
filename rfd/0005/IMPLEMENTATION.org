@@ -272,8 +272,10 @@ manufactured after that no-go decision.
 - [X] Extend integration settings and model-selection feedback to distinguish
   OpenAI API, Anthropic, and OpenRouter providers without displaying saved
   credentials.
-- [X] Extend onboarding and missing-provider feedback for Anthropic and
-  OpenRouter, and emit credential-free audit events for each provider's key
+- [ ] Extend onboarding for Anthropic and OpenRouter; baseline provider
+  onboarding remains pending with the Phase 1B model-settings experience.
+- [X] Extend missing-provider feedback for Anthropic and OpenRouter, and emit
+  credential-free audit events for each provider's key
   submission, replacement, validation, and disconnection. Test confirmation and
   outcome audits remain covered by the Phase 1B conditional item because the
   optional billed Test action is not implemented.
@@ -285,10 +287,11 @@ manufactured after that no-go decision.
   underlying vendor is OpenAI or Anthropic.
 - [X] Test each provider probe and outcome class, generation fencing, usable
   unverified/unavailable credentials, blocking confirmed-invalid credentials,
-  expected safe error identifiers without raw response persistence, and explicit
-  cost confirmation for each optional Test model request. No billed Test action
-  is implemented in Phase 2. Pin the expected metadata response contract and
-  verify its charging documentation before ship.
+  and expected safe error identifiers without raw response persistence. No
+  billed Test action is implemented in Phase 2, so its explicit cost
+  confirmation remains covered by the Phase 1B conditional item.
+- [ ] Pin each expected metadata response contract and verify its charging
+  documentation before ship.
 - [X] Test provider- and model-specific quota and billing responses on an
   invocation: the affected session preserves work and offers retry and guidance,
   while connection and validation remain unchanged and integration cards show
