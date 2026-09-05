@@ -156,6 +156,11 @@ defmodule Kodo.Integrations.APIKeyValidation do
       else: {:unavailable, "provider_unavailable"}
   end
 
+  defp classify_anthropic_bad_request(%{
+         "error" => %{"code" => "workspace_selection_required"}
+       }),
+       do: {:unavailable, "workspace_selection_required"}
+
   defp classify_anthropic_bad_request(_body),
     do: {:unavailable, "provider_unavailable"}
 

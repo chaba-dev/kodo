@@ -107,4 +107,25 @@ defmodule Kodo.Integrations.ReqAPIKeyValidationClientTest do
 
     assert Agent.get(counter, & &1) == 1
   end
+
+  test "preserves only the fixed Anthropic workspace remediation marker" do
+    finch_request = fn request, _finch_request, _finch_name, _options ->
+      {request,
+       %Req.Response{
+         status: 400,
+         body: %{
+           "error" => %{
+             "type" => "invalid_request_error",
+             "message" =>
+               "anthropic-workspace-id is required when authenticating with an identity-linked API key"
+           }
+         }
+       }}
+    end
+
+    assert {:ok, 400, %{"error" => %{"code" => "workspace_selection_required"}}} =
+             ReqAPIKeyValidationClient.get_metadata("anthropic", "workspace-secret",
+               finch_request: finch_request
+             )
+  end
 end

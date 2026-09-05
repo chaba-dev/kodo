@@ -31,7 +31,8 @@ defmodule Kodo.LLM.SafeReqAdapter do
     "organization_spend_limit_exceeded",
     "project_spend_limit_exceeded"
   ]
-  @safe_error_types ~w(authentication_error billing_error permission_error rate_limit_error)
+  @safe_error_types ~w(authentication_error billing_error permission_error rate_limit_error invalid_request_error)
+  @anthropic_workspace_required_message "anthropic-workspace-id is required when authenticating with an identity-linked API key"
 
   def run(%Req.Request{} = request) do
     run(request, nil)
@@ -44,7 +45,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
       :ok ->
         request
         |> perform_request()
-        |> sanitize_result(secrets)
+        |> sanitize_result(secrets, provider)
 
       {:error, reason} ->
         {scrub_request(request), Kodo.LLM.SafeTransportError.exception(reason: reason)}
@@ -72,7 +73,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
            url.port || default_port(url.scheme),
            mode: :passive,
            protocols: [:http1],
-           timeout: connect_timeout
+           transport_opts: [timeout: connect_timeout]
          ) do
       {:ok, conn} -> send_request(request, conn, timeout)
       {:error, reason} -> {request, safe_mint_error(reason)}
@@ -153,19 +154,54 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp empty_response, do: %{status: nil, headers: [], body: [], size: 0}
 
-  defp sanitize_result({request, %Req.Response{status: status} = response}, secrets)
+  defp sanitize_result({request, %Req.Response{status: status} = response}, secrets, provider)
        when status in 200..299 do
-    case decode_success(response) do
-      {:ok, response} -> {scrub_request(request), redact_success(response, secrets)}
-      {:error, reason} -> {scrub_request(request), safe_transport_error(reason)}
+    case decode_success(response, provider) do
+      {:ok, response} ->
+        request = request |> scrub_request() |> protect_response_decoding()
+        {request, redact_success(response, secrets)}
+
+      {:error, reason} ->
+        {scrub_request(request), safe_transport_error(reason)}
     end
   end
 
-  defp sanitize_result({request, %Req.Response{} = response}, _secrets),
+  defp sanitize_result({request, %Req.Response{} = response}, _secrets, _provider),
     do: {scrub_request(request), scrub_error_response(response)}
 
-  defp sanitize_result({request, exception}, _secrets) when is_exception(exception),
+  defp sanitize_result({request, exception}, _secrets, _provider) when is_exception(exception),
     do: {scrub_request(request), safe_transport_error(exception)}
+
+  # ReqLLM owns provider decoders after the adapter returns. Wrap those steps so
+  # a future decoder exception cannot reintroduce an untrusted body into its
+  # error telemetry; this compatibility fence can go when ReqLLM bounds errors.
+  defp protect_response_decoding(request) do
+    steps =
+      Enum.map(request.response_steps, fn
+        {name, step} when is_function(step, 1) ->
+          {name,
+           fn request_and_response -> run_safe_response_step(step, request_and_response) end}
+
+        step ->
+          step
+      end)
+
+    %{request | response_steps: steps}
+  end
+
+  defp run_safe_response_step(step, {%Req.Request{} = request, %Req.Response{}} = input) do
+    case step.(input) do
+      {%Req.Request{} = request, exception} when is_exception(exception) ->
+        {scrub_request(request), safe_transport_error(exception)}
+
+      result ->
+        result
+    end
+  rescue
+    _exception -> {scrub_request(request), safe_transport_error(:response_decoding)}
+  catch
+    _kind, _reason -> {scrub_request(request), safe_transport_error(:response_decoding)}
+  end
 
   defp credential_values(request) do
     @credential_headers
@@ -223,22 +259,80 @@ defmodule Kodo.LLM.SafeReqAdapter do
     }
   end
 
-  defp decode_success(%Req.Response{} = response) do
-    if json_response?(response) and is_binary(response.body) do
-      case Jason.decode(response.body) do
-        {:ok, body} -> {:ok, %{response | body: body}}
-        {:error, _reason} -> {:error, :invalid_provider_response}
-      end
-    else
+  defp decode_success(%Req.Response{} = response, "openai_codex") do
+    with true <- event_stream_response?(response),
+         :ok <- validate_codex_sse(response.body) do
       {:ok, response}
+    else
+      _invalid -> {:error, :invalid_provider_response}
     end
   end
 
-  defp json_response?(response) do
+  defp decode_success(%Req.Response{} = response, provider) do
+    case response.body do
+      body when is_map(body) ->
+        validate_json_shape(response, body, provider)
+
+      body when is_binary(body) ->
+        with true <- json_response?(response),
+             {:ok, decoded} when is_map(decoded) <- Jason.decode(body),
+             true <- valid_json_shape?(provider, decoded) do
+          {:ok, %{response | body: decoded}}
+        else
+          _invalid -> {:error, :invalid_provider_response}
+        end
+
+      _invalid ->
+        {:error, :invalid_provider_response}
+    end
+  end
+
+  defp validate_json_shape(response, body, provider) do
+    if valid_json_shape?(provider, body),
+      do: {:ok, response},
+      else: {:error, :invalid_provider_response}
+  end
+
+  defp valid_json_shape?("openai", body),
+    do: is_list(body["output"]) or is_list(body["choices"]) or is_list(body["data"])
+
+  defp valid_json_shape?("anthropic", body),
+    do: is_list(body["content"]) or is_list(body["data"])
+
+  defp valid_json_shape?("openrouter", body),
+    do: is_list(body["choices"]) or is_map(body["data"])
+
+  defp valid_json_shape?(_provider, _body), do: false
+
+  defp content_type?(response, expected) do
     response
     |> Req.Response.get_header("content-type")
-    |> Enum.any?(&String.contains?(&1, "application/json"))
+    |> Enum.any?(&String.contains?(&1, expected))
   end
+
+  defp json_response?(response), do: content_type?(response, "application/json")
+  defp event_stream_response?(response), do: content_type?(response, "text/event-stream")
+
+  defp validate_codex_sse(body) when is_binary(body) do
+    events = ReqLLM.Streaming.SSE.parse_sse_binary(body)
+
+    if events != [] and Enum.all?(events, &safe_codex_event?/1),
+      do: :ok,
+      else: {:error, :invalid_provider_response}
+  rescue
+    _exception -> {:error, :invalid_provider_response}
+  end
+
+  defp validate_codex_sse(_body), do: {:error, :invalid_provider_response}
+
+  defp safe_codex_event?(%{data: "[DONE]"}), do: true
+
+  defp safe_codex_event?(%{data: data} = event) when is_map(data) do
+    type = event[:event] || data["event"] || data["type"]
+    type not in ["error", "response.failed"]
+  end
+
+  defp safe_codex_event?(_event), do: false
 
   defp safe_error_body(body) when is_binary(body) do
     case Jason.decode(body) do
@@ -248,10 +342,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
   end
 
   defp safe_error_body(%{"error" => error}) when is_map(error) do
-    safe_error =
-      %{}
-      |> maybe_put_safe("code", error["code"], @safe_error_codes)
-      |> maybe_put_safe("type", error["type"], @safe_error_types)
+    safe_error = safe_error(error)
 
     %{"error" => safe_error}
   end
@@ -262,9 +353,29 @@ defmodule Kodo.LLM.SafeReqAdapter do
     if value in allowed, do: Map.put(map, key, value), else: map
   end
 
+  defp safe_error(%{
+         "type" => "invalid_request_error",
+         "message" => message
+       })
+       when is_binary(message) do
+    if message == @anthropic_workspace_required_message,
+      do: %{"code" => "workspace_selection_required"},
+      else: %{"type" => "invalid_request_error"}
+  end
+
+  defp safe_error(error) do
+    %{}
+    |> maybe_put_safe("code", error["code"], @safe_error_codes)
+    |> maybe_put_safe("type", error["type"], @safe_error_types)
+  end
+
   defp safe_transport_error(%Req.TransportError{reason: reason})
        when reason in [:closed, :timeout, :econnrefused, :nxdomain],
        do: Kodo.LLM.SafeTransportError.exception(reason: :network)
+
+  defp safe_transport_error(%Kodo.LLM.SafeTransportError{reason: reason})
+       when reason in [:network, :tls, :request, :invalid_origin],
+       do: Kodo.LLM.SafeTransportError.exception(reason: reason)
 
   defp safe_transport_error(_exception),
     do: Kodo.LLM.SafeTransportError.exception(reason: :request)

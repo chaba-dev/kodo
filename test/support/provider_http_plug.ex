@@ -23,9 +23,10 @@ defmodule Kodo.Test.ProviderHTTPPlug do
       end)
 
     body = if is_binary(response.body), do: response.body, else: Jason.encode!(response.body)
+    content_type = response[:content_type] || "application/json"
 
     conn
-    |> put_resp_content_type("application/json")
+    |> put_resp_content_type(content_type)
     |> send_resp(response.status, body)
   end
 end

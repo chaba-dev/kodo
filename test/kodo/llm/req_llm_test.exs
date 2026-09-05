@@ -356,10 +356,9 @@ defmodule Kodo.LLM.ReqLLMTest do
     assert ReqLLM.Response.object(response) == %{"answer" => "ok"}
   end
 
-  test "malformed success bodies and the network boundary expose no prompt or credential telemetry" do
+  test "invalid success bodies expose no prompt or credential telemetry" do
     secret = "malformed-response-secret"
     prompt = "private malformed-response prompt"
-    server = start_provider_server([%{status: 200, body: "{echo #{secret} #{prompt}"}])
     test_pid = self()
     handler_id = "safe-boundary-#{System.unique_integer()}"
 
@@ -377,22 +376,107 @@ defmodule Kodo.LLM.ReqLLMTest do
 
     credential = %{@credential | token: secret}
 
+    responses = [
+      %{status: 200, body: Jason.encode!("echo #{secret} #{prompt}")},
+      %{status: 200, body: "echo #{secret} #{prompt}", content_type: "text/plain"},
+      %{status: 200, body: %{"unexpected" => "echo #{secret} #{prompt}"}}
+    ]
+
+    for response <- responses do
+      server = start_provider_server([response])
+
+      options =
+        []
+        |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+        |> Keyword.put(:base_url, server.base_url)
+
+      log =
+        capture_log(fn ->
+          assert {:error, _error} =
+                   ReqLLM.generate_text(
+                     ReqLLM.model!("openai:gpt-4o-mini"),
+                     [%{"role" => "user", "content" => prompt}],
+                     options
+                   )
+        end)
+
+      refute_receive {:provider_telemetry, [:finch, :request, :start], _metadata}
+      assert_receive {:provider_telemetry, [:req_llm, :request, :exception], metadata}
+      refute inspect(metadata) =~ secret
+      refute inspect(metadata) =~ prompt
+      refute log =~ secret
+      refute log =~ prompt
+    end
+  end
+
+  test "Codex failure events expose no provider or prompt details" do
+    secret = "codex-response-secret"
+    prompt = "private Codex prompt"
+
+    credential = %{
+      @credential
+      | provider: "openai_codex",
+        authentication_type: "oauth",
+        billing_path: :subscription,
+        token: "request-local-access",
+        account_id: "request-local-account"
+    }
+
+    for event_type <- ["error", "response.failed"] do
+      body =
+        "event: #{event_type}\ndata: #{Jason.encode!(%{"type" => event_type, "message" => secret})}\n\n"
+
+      server =
+        start_provider_server([
+          %{status: 200, body: body, content_type: "text/event-stream"}
+        ])
+
+      options =
+        []
+        |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+        |> Keyword.put(:base_url, server.base_url)
+
+      log =
+        capture_log(fn ->
+          assert {:error, error} =
+                   ReqLLM.generate_text(
+                     ReqLLM.model!("openai_codex:gpt-5.4"),
+                     [%{"role" => "user", "content" => prompt}],
+                     options
+                   )
+
+          refute inspect(error) =~ secret
+          refute inspect(error) =~ prompt
+        end)
+
+      refute log =~ secret
+      refute log =~ prompt
+    end
+  end
+
+  test "connection refusal remains a retryable provider availability failure" do
+    port = free_port()
+    Application.put_env(:kodo, :safe_req_test_origins, [{"http", "127.0.0.1", port}])
+    credential = %{@credential | token: "network-boundary-secret"}
+    model = ReqLLM.model!("openai:gpt-4o-mini")
+
     options =
       []
-      |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
-      |> Keyword.put(:base_url, server.base_url)
+      |> Adapter.request_options(credential, timeout: 1_000, reasoning: "none")
+      |> Keyword.put(:base_url, "http://127.0.0.1:#{port}")
 
-    assert {:error, _error} =
+    assert {:error, error} =
              ReqLLM.generate_text(
-               ReqLLM.model!("openai:gpt-4o-mini"),
-               [%{"role" => "user", "content" => prompt}],
+               model,
+               [%{"role" => "user", "content" => "private network prompt"}],
                options
              )
 
-    refute_receive {:provider_telemetry, [:finch, :request, :start], _metadata}
-    assert_receive {:provider_telemetry, [:req_llm, :request, :exception], metadata}
-    refute inspect(metadata) =~ secret
-    refute inspect(metadata) =~ prompt
+    assert %{kind: :provider_unavailable, retryable: true} =
+             Adapter.normalize_error(error, model, credential)
+
+    refute inspect(error) =~ "network-boundary-secret"
+    refute inspect(error) =~ "private network prompt"
   end
 
   test "rejects a provider-global alternate origin before dispatch" do

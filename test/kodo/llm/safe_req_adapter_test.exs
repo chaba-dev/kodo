@@ -64,7 +64,11 @@ defmodule Kodo.LLM.SafeReqAdapterTest do
         headers: [{"authorization", "Bearer operation-secret"}],
         body: "request",
         finch_request: fn request, _finch_request, _finch_name, _options ->
-          {request, Req.Response.new(status: 200, body: %{"content" => "echo operation-secret"})}
+          {request,
+           Req.Response.new(
+             status: 200,
+             body: %{"choices" => [%{"content" => "echo operation-secret"}]}
+           )}
         end
       )
 
@@ -75,7 +79,7 @@ defmodule Kodo.LLM.SafeReqAdapterTest do
         result
       end)
 
-    assert response.body == %{"content" => "echo [REDACTED]"}
+    assert response.body == %{"choices" => [%{"content" => "echo [REDACTED]"}]}
   end
 
   test "normalizes transport exceptions without retaining their details" do
