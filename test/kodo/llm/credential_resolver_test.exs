@@ -96,6 +96,16 @@ defmodule Kodo.LLM.CredentialResolverTest do
 
     assert openrouter_error.provider == "openrouter"
     assert openrouter_error.billing_path == :aggregator
+
+    assert {:error, codex_error} = LLM.resolve_integration(scope, "openai_codex:gpt-5.4")
+    assert codex_error.kind == :integration_required
+    assert codex_error.provider == "openai_codex"
+    assert codex_error.billing_path == :subscription
+
+    assert Kodo.LLM.ProviderError.guidance(codex_error) =~
+             "Choose a model from a connected API-key provider"
+
+    assert Kodo.LLM.ProviderError.settings_path(codex_error) == "/integrations"
   end
 
   test "rejects forged and cross-user references", context do
