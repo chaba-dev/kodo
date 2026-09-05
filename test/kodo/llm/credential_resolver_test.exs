@@ -246,6 +246,54 @@ defmodule Kodo.LLM.CredentialResolverTest do
     refute inspected =~ "account-secret"
   end
 
+  test "resolves direct Anthropic and aggregator OpenRouter credentials independently" do
+    scope = AccountsFixtures.user_scope_fixture()
+
+    assert {:ok, anthropic} =
+             Integrations.connect(scope, "anthropic", "api_key", %{
+               "api_key" => "anthropic-secret"
+             })
+
+    assert {:ok, openrouter} =
+             Integrations.connect(scope, "openrouter", "api_key", %{
+               "api_key" => "openrouter-secret"
+             })
+
+    anthropic_model = LLMDB.Model.new!(%{id: "claude", provider: :anthropic})
+
+    openrouter_model =
+      LLMDB.Model.new!(%{id: "anthropic/claude", provider: :openrouter})
+
+    assert {:ok, anthropic_credential} =
+             CredentialResolver.resolve(
+               scope,
+               anthropic_model,
+               IntegrationRef.from_integration(anthropic)
+             )
+
+    assert anthropic_credential.provider == "anthropic"
+    assert anthropic_credential.billing_path == :platform
+    assert anthropic_credential.token == "anthropic-secret"
+
+    assert {:ok, openrouter_credential} =
+             CredentialResolver.resolve(
+               scope,
+               openrouter_model,
+               IntegrationRef.from_integration(openrouter)
+             )
+
+    assert openrouter_credential.provider == "openrouter"
+    assert openrouter_credential.billing_path == :aggregator
+    assert openrouter_credential.token == "openrouter-secret"
+
+    assert {:error, :integration_provider_mismatch} =
+             CredentialResolver.resolve(
+               scope,
+               openrouter_model,
+               IntegrationRef.from_integration(anthropic)
+             )
+  end
+
   defp resolve(context) do
     CredentialResolver.resolve(context.scope, model(), context.reference)
   end

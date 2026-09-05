@@ -113,6 +113,49 @@ defmodule Kodo.Integrations.AuditEventTest do
            ]
   end
 
+  test "records credential-free lifecycle events for every API-key provider" do
+    scope = AccountsFixtures.user_scope_fixture()
+
+    for provider <- ~w(openai anthropic openrouter) do
+      secret = "#{provider}-audit-secret"
+
+      assert {:ok, integration} =
+               Integrations.connect(scope, provider, "api_key", %{"api_key" => secret})
+
+      assert {:ok, replaced} =
+               Integrations.replace_credentials(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"api_key" => "replacement-#{secret}"}
+               )
+
+      assert {:ok, valid} =
+               Integrations.validation_succeeded(
+                 scope,
+                 replaced.id,
+                 replaced.credential_generation
+               )
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(scope, valid.id, valid.credential_generation)
+    end
+
+    events = Integrations.list_audit_events(scope)
+
+    assert Enum.frequencies_by(events, & &1.provider) == %{
+             "anthropic" => 4,
+             "openai" => 4,
+             "openrouter" => 4
+           }
+
+    assert Enum.all?(events, &(&1.actor_user_id == scope.user.id))
+
+    for provider <- ~w(openai anthropic openrouter) do
+      refute inspect(events) =~ "#{provider}-audit-secret"
+    end
+  end
+
   defp connect_openai(scope) do
     Integrations.connect(scope, "openai", "api_key", %{"api_key" => "audit-cascade-secret"})
   end
