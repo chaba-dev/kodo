@@ -103,7 +103,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert codex_error.billing_path == :subscription
 
     assert Kodo.LLM.ProviderError.guidance(codex_error) =~
-             "Choose a model from a connected API-key provider"
+             "Choose models from connected API-key providers for the required roles, then start a new session"
 
     assert Kodo.LLM.ProviderError.settings_path(codex_error) == "/integrations"
   end
