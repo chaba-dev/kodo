@@ -21,8 +21,11 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
 
     {:ok, resolved_model} = ReqLLM.model(model)
     provider = Atom.to_string(resolved_model.provider)
-    key_env = provider_key_env(provider)
-    api_key = System.get_env(key_env) || flunk("#{key_env} is required for #{model}")
+    provider_key_env = provider_key_env(provider)
+
+    api_key =
+      System.get_env("LIVE_LLM_API_KEY") || System.get_env(provider_key_env) ||
+        flunk("LIVE_LLM_API_KEY or #{provider_key_env} is required for #{model}")
 
     previous_adapter = Application.get_env(:kodo, :llm_adapter)
     Application.put_env(:kodo, :llm_adapter, Kodo.LLM.ReqLLM)
@@ -43,8 +46,19 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
 
     # Remove the ambient key after installing the test user's integration so
     # this smoke test exercises the same request-local credential path as production.
-    System.delete_env(key_env)
-    on_exit(fn -> System.put_env(key_env, api_key) end)
+    ambient_keys =
+      for key_env <- ["LIVE_LLM_API_KEY", provider_key_env], into: %{} do
+        {key_env, System.get_env(key_env)}
+      end
+
+    Enum.each(ambient_keys, fn {key_env, _value} -> System.delete_env(key_env) end)
+
+    on_exit(fn ->
+      Enum.each(ambient_keys, fn
+        {key_env, nil} -> System.delete_env(key_env)
+        {key_env, value} -> System.put_env(key_env, value)
+      end)
+    end)
 
     token = Kodo.Accounts.generate_user_agent_token(user)
     runner = Stack.start_runner!(stack.base_url, workspace, token)

@@ -67,9 +67,7 @@ jobs:
       DATABASE_PORT: 5432
       DATABASE_TEST_NAME: kodo_test
       LIVE_LLM_MODEL: ${{ vars.LIVE_LLM_MODEL || 'openai:gpt-4o-mini' }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      LIVE_LLM_API_KEY: ${{ secrets.LIVE_LLM_API_KEY }}
       OTP_VERSION: "28.5"
       ELIXIR_VERSION: "1.20"
     services:
