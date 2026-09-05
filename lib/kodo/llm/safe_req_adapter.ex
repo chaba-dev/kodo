@@ -2,16 +2,25 @@ defmodule Kodo.LLM.SafeReqAdapter do
   @moduledoc """
   Scrubs provider HTTP results before ReqLLM can observe them.
 
-  ReqLLM's terminal-error telemetry retains its input error, including response
-  and request bodies. Kodo cannot sanitize that telemetry after the call returns,
-  so this adapter wraps Req's Finch boundary and removes operation-local secrets
-  and untrusted error details before ReqLLM's response, logging, and telemetry
-  steps execute. Only documented identifiers needed for safe classification are
-  retained from non-successful provider responses.
+  ReqLLM's terminal-error telemetry retains its input error, while Finch emits
+  request telemetry before a wrapping Req adapter can scrub it. Kodo therefore
+  uses Req with this Mint-backed adapter, validates the final provider origin,
+  and removes operation-local secrets and untrusted error details before
+  ReqLLM's response, logging, and telemetry steps execute. Only documented
+  identifiers needed for safe classification are retained from failures.
   """
 
-  @credential_option_keys ~w(api_key access_token auth_mode oauth_file auth_file provider_options chatgpt_account_id)a
+  @credential_option_keys ~w(api_key access_token auth_mode oauth_file auth_file chatgpt_account_id)a
   @credential_headers ~w(authorization x-api-key chatgpt-account-id)
+  @provider_origins %{
+    "openai" => {"https", "api.openai.com", 443},
+    "openai_codex" => {"https", "chatgpt.com", 443},
+    "anthropic" => {"https", "api.anthropic.com", 443},
+    "openrouter" => {"https", "openrouter.ai", 443}
+  }
+  @allow_test_origins Application.compile_env(:kodo, :allow_test_provider_origins, false)
+  @default_timeout 15_000
+  @max_response_bytes 16 * 1024 * 1024
   @safe_error_codes [
     401,
     402,
@@ -25,19 +34,138 @@ defmodule Kodo.LLM.SafeReqAdapter do
   @safe_error_types ~w(authentication_error billing_error permission_error rate_limit_error)
 
   def run(%Req.Request{} = request) do
+    run(request, nil)
+  end
+
+  def run(%Req.Request{} = request, provider) do
     secrets = credential_values(request)
 
-    case Req.Finch.run(request) do
-      {request, %Req.Response{status: status} = response} when status in 200..299 ->
-        {scrub_request(request), redact_success(response, secrets)}
+    case validate_origin(request, provider) do
+      :ok ->
+        request
+        |> perform_request()
+        |> sanitize_result(secrets)
 
-      {request, %Req.Response{} = response} ->
-        {scrub_request(request), scrub_error_response(response)}
-
-      {request, exception} when is_exception(exception) ->
-        {scrub_request(request), safe_transport_error(exception)}
+      {:error, reason} ->
+        {scrub_request(request), Kodo.LLM.SafeTransportError.exception(reason: reason)}
     end
   end
+
+  defp perform_request(%Req.Request{options: %{finch_request: fun}} = request)
+       when is_function(fun) do
+    # Req's deprecated Finch callback remains a test-only transport seam. It
+    # returns before Finch emits request telemetry, so no request is dispatched.
+    Req.Finch.run(request)
+  end
+
+  defp perform_request(request) do
+    # Decoding must happen before untrusted response data can enter ReqLLM's
+    # error pipeline, so ask providers for an uncompressed JSON body here.
+    request = Req.Request.delete_header(request, "accept-encoding")
+    url = request.url
+    timeout = request.options[:receive_timeout] || @default_timeout
+    connect_timeout = get_in(request.options, [:connect_options, :timeout]) || timeout
+
+    case Mint.HTTP.connect(
+           String.to_existing_atom(url.scheme),
+           url.host,
+           url.port || default_port(url.scheme),
+           mode: :passive,
+           protocols: [:http1],
+           timeout: connect_timeout
+         ) do
+      {:ok, conn} -> send_request(request, conn, timeout)
+      {:error, reason} -> {request, safe_mint_error(reason)}
+    end
+  end
+
+  defp send_request(request, conn, timeout) do
+    method = request.method |> to_string() |> String.upcase()
+    path = URI.to_string(%{request.url | scheme: nil, host: nil, port: nil, userinfo: nil})
+    headers = Req.Fields.get_list(request.headers)
+
+    case Mint.HTTP.request(conn, method, path, headers, request.body) do
+      {:ok, conn, ref} -> receive_response(request, conn, ref, timeout, empty_response())
+      {:error, conn, reason} -> close_with_error(request, conn, reason)
+    end
+  end
+
+  defp receive_response(request, conn, ref, timeout, response) do
+    case Mint.HTTP.recv(conn, 0, timeout) do
+      {:ok, conn, entries} ->
+        case collect_response(entries, ref, response) do
+          {:cont, response} -> receive_response(request, conn, ref, timeout, response)
+          {:done, response} -> close_with_response(request, conn, response)
+          {:error, reason} -> close_with_error(request, conn, reason)
+        end
+
+      {:error, conn, reason, entries} ->
+        case collect_response(entries, ref, response) do
+          {:done, response} -> close_with_response(request, conn, response)
+          _other -> close_with_error(request, conn, reason)
+        end
+    end
+  end
+
+  defp collect_response(entries, ref, response) do
+    Enum.reduce_while(entries, {:cont, response}, fn
+      {:status, ^ref, status}, {:cont, acc} ->
+        {:cont, {:cont, %{acc | status: status}}}
+
+      {:headers, ^ref, headers}, {:cont, acc} ->
+        {:cont, {:cont, %{acc | headers: acc.headers ++ headers}}}
+
+      {:data, ^ref, data}, {:cont, acc} ->
+        size = acc.size + byte_size(data)
+
+        if size <= @max_response_bytes,
+          do: {:cont, {:cont, %{acc | body: [data | acc.body], size: size}}},
+          else: {:halt, {:error, :response_too_large}}
+
+      {:done, ^ref}, {:cont, acc} ->
+        {:halt, {:done, acc}}
+
+      {:error, ^ref, reason}, {:cont, _acc} ->
+        {:halt, {:error, reason}}
+
+      _other, result ->
+        {:cont, result}
+    end)
+  end
+
+  defp close_with_response(request, conn, response) do
+    {:ok, _conn} = Mint.HTTP.close(conn)
+
+    body = response.body |> Enum.reverse() |> IO.iodata_to_binary()
+
+    {request,
+     Req.Response.new(
+       status: response.status,
+       headers: response.headers,
+       body: body
+     )}
+  end
+
+  defp close_with_error(request, conn, reason) do
+    {:ok, _conn} = Mint.HTTP.close(conn)
+    {request, safe_mint_error(reason)}
+  end
+
+  defp empty_response, do: %{status: nil, headers: [], body: [], size: 0}
+
+  defp sanitize_result({request, %Req.Response{status: status} = response}, secrets)
+       when status in 200..299 do
+    case decode_success(response) do
+      {:ok, response} -> {scrub_request(request), redact_success(response, secrets)}
+      {:error, reason} -> {scrub_request(request), safe_transport_error(reason)}
+    end
+  end
+
+  defp sanitize_result({request, %Req.Response{} = response}, _secrets),
+    do: {scrub_request(request), scrub_error_response(response)}
+
+  defp sanitize_result({request, exception}, _secrets) when is_exception(exception),
+    do: {scrub_request(request), safe_transport_error(exception)}
 
   defp credential_values(request) do
     @credential_headers
@@ -48,11 +176,31 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp scrub_request(request) do
     request = Enum.reduce(@credential_headers, request, &Req.Request.delete_header(&2, &1))
-    %{request | body: nil, options: Map.drop(request.options, @credential_option_keys)}
+
+    options =
+      request.options
+      |> Map.drop(@credential_option_keys)
+      |> Map.update(:provider_options, nil, &scrub_provider_options/1)
+
+    %{request | body: nil, options: options}
   end
 
+  defp scrub_provider_options(options) when is_list(options) do
+    Enum.reject(options, fn {key, _value} -> key in @credential_option_keys end)
+  end
+
+  defp scrub_provider_options(options) when is_map(options),
+    do: Map.drop(options, @credential_option_keys)
+
+  defp scrub_provider_options(_options), do: nil
+
   defp redact_success(%Req.Response{body: body} = response, secrets) do
-    %{response | body: redact(body, secrets)}
+    %{
+      response
+      | body: redact(body, secrets),
+        headers: Req.Fields.new([]),
+        trailers: Req.Fields.new([])
+    }
   end
 
   defp redact(value, secrets) when is_binary(value) do
@@ -73,6 +221,23 @@ defmodule Kodo.LLM.SafeReqAdapter do
         headers: Req.Fields.new([]),
         trailers: Req.Fields.new([])
     }
+  end
+
+  defp decode_success(%Req.Response{} = response) do
+    if json_response?(response) and is_binary(response.body) do
+      case Jason.decode(response.body) do
+        {:ok, body} -> {:ok, %{response | body: body}}
+        {:error, _reason} -> {:error, :invalid_provider_response}
+      end
+    else
+      {:ok, response}
+    end
+  end
+
+  defp json_response?(response) do
+    response
+    |> Req.Response.get_header("content-type")
+    |> Enum.any?(&String.contains?(&1, "application/json"))
   end
 
   defp safe_error_body(body) when is_binary(body) do
@@ -103,4 +268,40 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp safe_transport_error(_exception),
     do: Kodo.LLM.SafeTransportError.exception(reason: :request)
+
+  defp safe_mint_error(%Mint.TransportError{reason: reason})
+       when reason in [:closed, :timeout, :econnrefused, :nxdomain],
+       do: Kodo.LLM.SafeTransportError.exception(reason: :network)
+
+  defp safe_mint_error(%Mint.TransportError{reason: {:tls_alert, _detail}}),
+    do: Kodo.LLM.SafeTransportError.exception(reason: :tls)
+
+  defp safe_mint_error(_reason),
+    do: Kodo.LLM.SafeTransportError.exception(reason: :request)
+
+  defp validate_origin(request, provider) do
+    with {:ok, expected} <- Map.fetch(@provider_origins, provider),
+         true <- origin(request.url) == expected or test_origin?(request.url) do
+      :ok
+    else
+      _invalid -> {:error, :invalid_origin}
+    end
+  end
+
+  defp origin(%URI{scheme: scheme, host: host, port: port, userinfo: nil})
+       when is_binary(scheme) and is_binary(host),
+       do: {scheme, String.downcase(host), port || default_port(scheme)}
+
+  defp origin(_url), do: nil
+
+  defp default_port("https"), do: 443
+  defp default_port("http"), do: 80
+  defp default_port(_scheme), do: nil
+
+  if @allow_test_origins do
+    defp test_origin?(url),
+      do: origin(url) in Application.get_env(:kodo, :safe_req_test_origins, [])
+  else
+    defp test_origin?(_url), do: false
+  end
 end

@@ -27,6 +27,7 @@ defmodule Kodo.Integrations.ReqAPIKeyValidationClient do
       [
         url: url,
         headers: headers,
+        adapter: safe_adapter(provider),
         max_redirects: 0,
         retry: false,
         receive_timeout: @timeout,
@@ -42,14 +43,8 @@ defmodule Kodo.Integrations.ReqAPIKeyValidationClient do
         {:ok, %Req.Response{status: status, body: body}} ->
           {:ok, status, body}
 
-        {:error, %Req.TooManyRedirectsError{}} ->
-          {:error, :redirect}
-
-        {:error, %Req.TransportError{reason: reason}} ->
-          {:error, transport_error(reason)}
-
-        {:error, _error} ->
-          {:error, :network_error}
+        {:error, error} ->
+          classify_error(error)
       end
     rescue
       exception in RuntimeError ->
@@ -87,4 +82,17 @@ defmodule Kodo.Integrations.ReqAPIKeyValidationClient do
 
   defp transport_error({:tls_alert, _detail}), do: :tls_error
   defp transport_error(_reason), do: :network_error
+
+  defp classify_error(%Req.TooManyRedirectsError{}), do: {:error, :redirect}
+
+  defp classify_error(%Req.TransportError{reason: reason}),
+    do: {:error, transport_error(reason)}
+
+  defp classify_error(%Kodo.LLM.SafeTransportError{reason: :tls}), do: {:error, :tls_error}
+  defp classify_error(%Kodo.LLM.SafeTransportError{}), do: {:error, :network_error}
+  defp classify_error(_error), do: {:error, :network_error}
+
+  defp safe_adapter("openai"), do: Kodo.LLM.SafeReqAdapter.OpenAI
+  defp safe_adapter("anthropic"), do: Kodo.LLM.SafeReqAdapter.Anthropic
+  defp safe_adapter("openrouter"), do: Kodo.LLM.SafeReqAdapter.OpenRouter
 end

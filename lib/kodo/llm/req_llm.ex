@@ -23,12 +23,6 @@ defmodule Kodo.LLM.ReqLLM do
     "max" => :max
   }
 
-  @safe_req_http_options [
-    adapter: Kodo.LLM.SafeReqAdapter,
-    redirect: false,
-    redirect_log_level: false
-  ]
-
   @impl true
   def validate_model(model, role_mapping, contract) do
     with {:ok, resolved} <- resolve_dispatchable_model(model),
@@ -53,7 +47,7 @@ defmodule Kodo.LLM.ReqLLM do
       ]
       |> put_reasoning_effort(opts[:reasoning])
       |> put_credential(credential)
-      |> secure_transport()
+      |> secure_transport(credential.provider)
 
     case ReqLLM.generate_object(model, build_context(messages), schema, request_opts) do
       {:ok, response} ->
@@ -72,7 +66,7 @@ defmodule Kodo.LLM.ReqLLM do
       total_timeout: Keyword.fetch!(opts, :timeout)
     ]
     |> put_reasoning_effort(opts[:reasoning])
-    |> secure_transport()
+    |> secure_transport(nil)
   end
 
   @doc false
@@ -80,6 +74,7 @@ defmodule Kodo.LLM.ReqLLM do
     tools
     |> request_options(opts)
     |> put_credential(credential)
+    |> secure_transport(credential.provider)
   end
 
   @doc false
@@ -203,9 +198,12 @@ defmodule Kodo.LLM.ReqLLM do
        do: {:provider_unavailable, true}
 
   defp error_kind(
-         %ReqLLM.Error.API.Request{cause: %Kodo.LLM.SafeTransportError{reason: :network}},
+         %ReqLLM.Error.API.Request{
+           cause: %Kodo.LLM.SafeTransportError{reason: reason}
+         },
          _provider
-       ),
+       )
+       when reason in [:network, :tls],
        do: {:provider_unavailable, true}
 
   defp error_kind(%ReqLLM.Error.API.Timeout{}, _provider), do: {:provider_unavailable, true}
@@ -235,12 +233,22 @@ defmodule Kodo.LLM.ReqLLM do
   # ReqLLM emits terminal errors to telemetry before returning control to Kodo.
   # The adapter therefore scrubs at the HTTP boundary, while these immutable
   # options prevent redirects, retries, and caller-selected transports.
-  defp secure_transport(opts) do
+  defp secure_transport(opts, provider) do
     opts
     |> Keyword.put(:max_retries, 0)
     |> Keyword.put(:telemetry, payloads: :none)
-    |> Keyword.put(:req_http_options, @safe_req_http_options)
+    |> Keyword.put(:req_http_options,
+      adapter: safe_adapter(provider),
+      redirect: false,
+      redirect_log_level: false
+    )
   end
+
+  defp safe_adapter("openai"), do: Kodo.LLM.SafeReqAdapter.OpenAI
+  defp safe_adapter("openai_codex"), do: Kodo.LLM.SafeReqAdapter.OpenAICodex
+  defp safe_adapter("anthropic"), do: Kodo.LLM.SafeReqAdapter.Anthropic
+  defp safe_adapter("openrouter"), do: Kodo.LLM.SafeReqAdapter.OpenRouter
+  defp safe_adapter(_provider), do: Kodo.LLM.SafeReqAdapter
 
   defp resolve_dispatchable_model(model) do
     with {:ok, resolved} <- ReqLLM.model(model),

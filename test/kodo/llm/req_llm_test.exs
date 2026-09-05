@@ -14,6 +14,17 @@ defmodule Kodo.LLM.ReqLLMTest do
     token: "request-local-key"
   }
 
+  setup do
+    previous_origins = Application.get_env(:kodo, :safe_req_test_origins)
+    Application.put_env(:kodo, :safe_req_test_origins, [])
+
+    on_exit(fn ->
+      if previous_origins,
+        do: Application.put_env(:kodo, :safe_req_test_origins, previous_origins),
+        else: Application.delete_env(:kodo, :safe_req_test_origins)
+    end)
+  end
+
   test "translates Kodo tool definitions into strict ReqLLM tools" do
     [tool] =
       Adapter.build_tools([
@@ -307,6 +318,108 @@ defmodule Kodo.LLM.ReqLLMTest do
     assert provider_requests(target) == []
   end
 
+  test "successful Anthropic native structured output retains decoding options" do
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body: %{
+            "id" => "msg_test",
+            "type" => "message",
+            "role" => "assistant",
+            "model" => "claude-3-5-haiku-latest",
+            "content" => [%{"type" => "text", "text" => ~s({"answer":"ok"})}],
+            "stop_reason" => "end_turn",
+            "stop_sequence" => nil,
+            "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+          }
+        }
+      ])
+
+    credential = %{@credential | provider: "anthropic"}
+    schema = %{"type" => "object", "properties" => %{"answer" => %{"type" => "string"}}}
+
+    options =
+      []
+      |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+      |> Keyword.put(:output_validation, :strict)
+
+    assert {:ok, response} =
+             ReqLLM.generate_object(
+               ReqLLM.model!("anthropic:claude-3-5-haiku-latest"),
+               [%{"role" => "user", "content" => "return an answer"}],
+               schema,
+               options
+             )
+
+    assert ReqLLM.Response.object(response) == %{"answer" => "ok"}
+  end
+
+  test "malformed success bodies and the network boundary expose no prompt or credential telemetry" do
+    secret = "malformed-response-secret"
+    prompt = "private malformed-response prompt"
+    server = start_provider_server([%{status: 200, body: "{echo #{secret} #{prompt}"}])
+    test_pid = self()
+    handler_id = "safe-boundary-#{System.unique_integer()}"
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [[:finch, :request, :start], [:req_llm, :request, :exception]],
+        fn event, _measurements, metadata, _config ->
+          send(test_pid, {:provider_telemetry, event, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    credential = %{@credential | token: secret}
+
+    options =
+      []
+      |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+
+    assert {:error, _error} =
+             ReqLLM.generate_text(
+               ReqLLM.model!("openai:gpt-4o-mini"),
+               [%{"role" => "user", "content" => prompt}],
+               options
+             )
+
+    refute_receive {:provider_telemetry, [:finch, :request, :start], _metadata}
+    assert_receive {:provider_telemetry, [:req_llm, :request, :exception], metadata}
+    refute inspect(metadata) =~ secret
+    refute inspect(metadata) =~ prompt
+  end
+
+  test "rejects a provider-global alternate origin before dispatch" do
+    server = start_provider_server([%{status: 200, body: %{}}], allow_origin?: false)
+    previous = Application.get_env(:req_llm, :openai)
+    Application.put_env(:req_llm, :openai, base_url: server.base_url)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:req_llm, :openai, previous),
+        else: Application.delete_env(:req_llm, :openai)
+    end)
+
+    assert {:error, error} =
+             Adapter.generate(
+               ReqLLM.model!("openai:gpt-4o-mini"),
+               [%{"role" => "user", "content" => "private prompt"}],
+               [],
+               @credential,
+               timeout: 5_000,
+               reasoning: "none"
+             )
+
+    assert error.kind == :request_failed
+    assert provider_requests(server) == []
+  end
+
   test "reconstructs a tool exchange from provider-independent persisted values" do
     context =
       Adapter.build_context([
@@ -393,7 +506,7 @@ defmodule Kodo.LLM.ReqLLMTest do
     assert restored_tool_call == tool_call
   end
 
-  defp start_provider_server(responses) do
+  defp start_provider_server(responses, opts \\ []) do
     port = free_port()
 
     agent =
@@ -412,8 +525,17 @@ defmodule Kodo.LLM.ReqLLMTest do
       id: {:provider_http, port}
     )
 
-    %{agent: agent, base_url: "http://127.0.0.1:#{port}"}
+    server = %{agent: agent, base_url: "http://127.0.0.1:#{port}"}
+    origin = {"http", "127.0.0.1", port}
+
+    if Keyword.get(opts, :allow_origin?, true) do
+      Application.put_env(:kodo, :safe_req_test_origins, [origin | test_origins()])
+    end
+
+    server
   end
+
+  defp test_origins, do: Application.get_env(:kodo, :safe_req_test_origins, [])
 
   defp provider_requests(server), do: Agent.get(server.agent, & &1.requests)
 
