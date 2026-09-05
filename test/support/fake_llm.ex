@@ -157,6 +157,18 @@ defmodule Kodo.Test.FakeLLM do
     tool_call("delegate-search", "delegate_search", %{"question" => "find helper"})
   end
 
+  defp initial(%{"content" => "delegate search after credential change"}) do
+    test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
+    send(test_pid, {:primary_generation_started, self()})
+
+    receive do
+      :release_primary_generation ->
+        tool_call("delegate-search-after-change", "delegate_search", %{
+          "question" => "find helper"
+        })
+    end
+  end
+
   defp initial(%{"content" => "delegate provider failure with sibling"}) do
     {:ok,
      %{

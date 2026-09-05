@@ -494,6 +494,70 @@ defmodule Kodo.Agent.LoopTest do
     refute Enum.any?(events, &(&1.type == "subagent_invocation_started"))
   end
 
+  test "blocks a delegated role revoked after turn preflight", %{
+    runner: runner,
+    scope: scope
+  } do
+    previous_test_pid = Application.get_env(:kodo, :fake_llm_test_pid)
+    Application.put_env(:kodo, :fake_llm_test_pid, self())
+    on_exit(fn -> restore_env(:fake_llm_test_pid, previous_test_pid) end)
+
+    {:ok, anthropic} =
+      Integrations.connect(scope, "anthropic", "api_key", %{"api_key" => "search-key"})
+
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :search, %{
+               model: "anthropic:claude-3-5-haiku-latest"
+             })
+
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Revoked search provider",
+        model: "openai:gpt-4o-mini"
+      })
+
+    {:ok, ownership} = Sessions.claim_ownership(session.id, nil)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "delegate search after credential change"},
+        ownership: ownership
+      )
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:primary_generation_started, primary_pid}
+
+    assert {:ok, _invalid} =
+             Integrations.validation_invalid(
+               scope,
+               anthropic.id,
+               anthropic.credential_generation
+             )
+
+    send(primary_pid, :release_primary_generation)
+
+    assert {:error,
+            %Kodo.LLM.ProviderError{
+              kind: :authentication_rejected,
+              provider: "anthropic"
+            }} = Task.await(loop)
+
+    events = Sessions.events_after(session.id)
+    assert Enum.any?(events, &(&1.type == "model_invocation_started"))
+    refute Enum.any?(events, &(&1.type == "subagent_invocation_started"))
+  end
+
   test "reconciles a delegated provider failure so the next turn has a valid transcript", %{
     runner: runner,
     session: session,
