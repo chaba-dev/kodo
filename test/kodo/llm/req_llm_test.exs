@@ -332,7 +332,12 @@ defmodule Kodo.LLM.ReqLLMTest do
             "content" => [%{"type" => "text", "text" => ~s({"answer":"ok"})}],
             "stop_reason" => "end_turn",
             "stop_sequence" => nil,
-            "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+            "usage" => %{
+              "input_tokens" => 10,
+              "output_tokens" => 1,
+              "cache_read_input_tokens" => 1_000,
+              "cache_creation_input_tokens" => 500
+            }
           }
         }
       ])
@@ -355,6 +360,8 @@ defmodule Kodo.LLM.ReqLLMTest do
              )
 
     assert ReqLLM.Response.object(response) == %{"answer" => "ok"}
+    assert response.usage.cached_tokens == 1_000
+    assert response.usage.cache_creation_tokens == 500
   end
 
   test "successful provider usage cannot create unbounded telemetry keys" do
@@ -540,6 +547,131 @@ defmodule Kodo.LLM.ReqLLMTest do
       refute log =~ prompt
       refute_receive {:decoded_usage_telemetry, [:req_llm, :token_usage], _, _}
       refute_receive {:decoded_usage_telemetry, [:req_llm, :request, :stop], _, _}
+    end
+  end
+
+  test "rejects credentials reconstructed from nested tool argument JSON" do
+    secret = "request-local-key"
+
+    escaped_arguments =
+      ~S({"path":"\u0072equest-local-key","\u0072equest-local-key":"echo"})
+
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body: %{
+            "id" => "chat_escaped_key",
+            "model" => "anthropic/claude-sonnet-4",
+            "choices" => [
+              %{
+                "index" => 0,
+                "message" => %{
+                  "role" => "assistant",
+                  "content" => nil,
+                  "tool_calls" => [
+                    %{
+                      "id" => "call-1",
+                      "type" => "function",
+                      "function" => %{
+                        "name" => "read_file",
+                        "arguments" => escaped_arguments
+                      }
+                    }
+                  ]
+                },
+                "finish_reason" => "tool_calls"
+              }
+            ],
+            "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+          }
+        }
+      ])
+
+    previous = Application.get_env(:req_llm, :openrouter)
+    Application.put_env(:req_llm, :openrouter, base_url: server.base_url)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:req_llm, :openrouter, previous),
+        else: Application.delete_env(:req_llm, :openrouter)
+    end)
+
+    credential = %{@credential | provider: "openrouter", billing_path: :aggregator}
+
+    assert {:error, %Kodo.LLM.ProviderError{kind: :request_failed} = error} =
+             Adapter.generate(
+               ReqLLM.model!("openrouter:anthropic/claude-sonnet-4"),
+               [%{"role" => "user", "content" => "use read_file"}],
+               [],
+               credential,
+               timeout: 5_000,
+               reasoning: "none"
+             )
+
+    refute inspect(error) =~ secret
+  end
+
+  test "rejects credentials reconstructed from Codex SSE output" do
+    credential = %{
+      @credential
+      | provider: "openai_codex",
+        authentication_type: "oauth",
+        billing_path: :subscription,
+        token: "request-local-access",
+        account_id: "request-local-account"
+    }
+
+    completion =
+      "event: response.completed\n" <>
+        "data: " <>
+        Jason.encode!(%{
+          "type" => "response.completed",
+          "response" => %{
+            "id" => "resp_test",
+            "model" => "gpt-5.4",
+            "status" => "completed",
+            "output" => [],
+            "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+          }
+        }) <> "\n\n"
+
+    bodies = [
+      "event: response.output_text.delta\n" <>
+        ~S(data: {"type":"response.output_text.delta","delta":"\u0072equest-local-access"}) <>
+        "\n\n" <> completion,
+      ("event: response.output_text.delta\n" <>
+         Jason.encode!(%{
+           "type" => "response.output_text.delta",
+           "delta" => "request-local-"
+         }))
+      |> then(fn event -> "data: " <> event <> "\n\n" end)
+      |> Kernel.<>(
+        "event: response.output_text.delta\ndata: " <>
+          Jason.encode!(%{"type" => "response.output_text.delta", "delta" => "access"}) <>
+          "\n\n" <> completion
+      )
+    ]
+
+    for body <- bodies do
+      server =
+        start_provider_server([
+          %{status: 200, body: body, content_type: "text/event-stream"}
+        ])
+
+      options =
+        []
+        |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+        |> Keyword.put(:base_url, server.base_url)
+
+      assert {:error, error} =
+               ReqLLM.generate_text(
+                 ReqLLM.model!("openai_codex:gpt-5.4"),
+                 [%{"role" => "user", "content" => "private prompt"}],
+                 options
+               )
+
+      refute inspect(error) =~ credential.token
     end
   end
 

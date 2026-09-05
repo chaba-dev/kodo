@@ -37,7 +37,10 @@ defmodule Kodo.LLM.SafeReqAdapter do
   @max_tool_usage_count 1_000_000
   @max_token_count 1_000_000_000
   @usage_fields ~w(
-    input_tokens output_tokens reasoning_tokens cached_tokens cache_creation_tokens
+    input_tokens output_tokens reasoning_tokens cached_tokens
+  )a
+  @optional_usage_fields ~w(
+    cache_creation_tokens cache_read_input_tokens cache_creation_input_tokens
   )a
   @tool_usage_keys %{
     "web_search" => :web_search,
@@ -183,7 +186,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
         if credential_in_key?(response.body, secrets) do
           {scrub_request(request), safe_transport_error(:invalid_provider_response)}
         else
-          request = request |> scrub_request() |> protect_response_decoding()
+          request = request |> scrub_request() |> protect_response_decoding(secrets)
           {request, sanitize_success(response, provider, secrets)}
         end
 
@@ -201,12 +204,14 @@ defmodule Kodo.LLM.SafeReqAdapter do
   # ReqLLM owns provider decoders after the adapter returns. Wrap those steps so
   # a future decoder exception cannot reintroduce an untrusted body into its
   # error telemetry; this compatibility fence can go when ReqLLM bounds errors.
-  defp protect_response_decoding(request) do
+  defp protect_response_decoding(request, secrets) do
     steps =
       Enum.map(request.response_steps, fn
         {name, step} when is_function(step, 1) ->
           {name,
-           fn request_and_response -> run_safe_response_step(name, step, request_and_response) end}
+           fn request_and_response ->
+             run_safe_response_step(name, step, request_and_response, secrets)
+           end}
 
         step ->
           step
@@ -215,11 +220,16 @@ defmodule Kodo.LLM.SafeReqAdapter do
     %{request | response_steps: steps}
   end
 
-  defp run_safe_response_step(name, step, {%Req.Request{} = request, %Req.Response{}} = input) do
+  defp run_safe_response_step(
+         name,
+         step,
+         {%Req.Request{} = request, %Req.Response{}} = input,
+         secrets
+       ) do
     case step.(input) do
       {%Req.Request{} = request, %Req.Response{body: %ReqLLM.Response{} = body} = response}
       when name == :llm_decode_response ->
-        case canonicalize_usage(body) do
+        case sanitize_decoded_response(body, secrets) do
           {:ok, body} -> {request, %{response | body: body}}
           :error -> {scrub_request(request), safe_transport_error(:invalid_provider_response)}
         end
@@ -255,6 +265,47 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp credential_in_key?(_value, _secrets), do: false
 
+  defp sanitize_decoded_response(response, secrets) do
+    if credential_in_response?(response, secrets), do: :error, else: canonicalize_usage(response)
+  end
+
+  defp credential_in_response?(%ReqLLM.Response{} = response, secrets) do
+    [
+      response.id,
+      response.model,
+      response.message,
+      response.object,
+      response.provider_meta,
+      response.error
+    ]
+    |> Enum.any?(&credential_present?(&1, secrets))
+  end
+
+  defp credential_present?(value, secrets) when is_binary(value) do
+    Enum.any?(secrets, &String.contains?(value, &1)) or
+      case Jason.decode(value) do
+        {:ok, decoded} -> credential_present?(decoded, secrets)
+        {:error, _reason} -> false
+      end
+  end
+
+  defp credential_present?(value, secrets) when is_struct(value),
+    do: value |> Map.from_struct() |> credential_present?(secrets)
+
+  defp credential_present?(value, secrets) when is_map(value) do
+    Enum.any?(value, fn {key, nested} ->
+      credential_present?(key, secrets) or credential_present?(nested, secrets)
+    end)
+  end
+
+  defp credential_present?(value, secrets) when is_list(value),
+    do: Enum.any?(value, &credential_present?(&1, secrets))
+
+  defp credential_present?(value, secrets) when is_tuple(value),
+    do: value |> Tuple.to_list() |> credential_present?(secrets)
+
+  defp credential_present?(_value, _secrets), do: false
+
   defp canonicalize_usage(%ReqLLM.Response{usage: nil} = response), do: {:ok, response}
 
   defp canonicalize_usage(%ReqLLM.Response{usage: usage} = response) when is_map(usage) do
@@ -281,7 +332,8 @@ defmodule Kodo.LLM.SafeReqAdapter do
              :total_tokens,
              Map.get(usage, "total_tokens", counters.input_tokens + counters.output_tokens)
            ),
-         true <- valid_usage_count?(total) do
+         true <- valid_usage_count?(total),
+         {:ok, counters} <- canonical_optional_usage_counters(usage, counters) do
       {:ok, Map.put(counters, :total_tokens, total)}
     else
       _invalid -> :error
@@ -290,6 +342,26 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp valid_usage_count?(value),
     do: is_integer(value) and value >= 0 and value <= @max_token_count
+
+  defp canonical_optional_usage_counters(usage, counters) do
+    Enum.reduce_while(@optional_usage_fields, {:ok, counters}, fn field, {:ok, acc} ->
+      string_field = Atom.to_string(field)
+
+      cond do
+        Map.has_key?(usage, field) and valid_usage_count?(usage[field]) ->
+          {:cont, {:ok, Map.put(acc, field, usage[field])}}
+
+        Map.has_key?(usage, string_field) and valid_usage_count?(usage[string_field]) ->
+          {:cont, {:ok, Map.put(acc, field, usage[string_field])}}
+
+        Map.has_key?(usage, field) or Map.has_key?(usage, string_field) ->
+          {:halt, :error}
+
+        true ->
+          {:cont, {:ok, acc}}
+      end
+    end)
+  end
 
   defp canonical_tool_usage(nil), do: {:ok, %{}}
 
