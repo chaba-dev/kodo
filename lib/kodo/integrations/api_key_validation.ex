@@ -14,6 +14,7 @@ defmodule Kodo.Integrations.APIKeyValidation do
 
   @providers ~w(openai anthropic openrouter)
   @probe_timeout 5_000
+  @anthropic_workspace_required_message "anthropic-workspace-id is required when authenticating with an identity-linked API key"
 
   def start(
         %Scope{} = scope,
@@ -111,11 +112,8 @@ defmodule Kodo.Integrations.APIKeyValidation do
   defp classify_response({:ok, 401, body}, provider),
     do: classify_unauthorized(provider, body)
 
-  defp classify_response(
-         {:ok, 400, %{"error" => %{"type" => "invalid_request_error"}}},
-         "anthropic"
-       ),
-       do: {:unavailable, "workspace_selection_required"}
+  defp classify_response({:ok, 400, body}, "anthropic"),
+    do: classify_anthropic_bad_request(body)
 
   defp classify_response({:ok, status, _body}, _provider) when status in 300..399,
     do: {:unavailable, "provider_unavailable"}
@@ -147,6 +145,18 @@ defmodule Kodo.Integrations.APIKeyValidation do
   defp classify_unauthorized("openrouter", %{"error" => %{"code" => 401}}), do: :invalid
 
   defp classify_unauthorized(_provider, _body),
+    do: {:unavailable, "provider_unavailable"}
+
+  defp classify_anthropic_bad_request(%{
+         "error" => %{"type" => "invalid_request_error", "message" => message}
+       })
+       when is_binary(message) do
+    if String.contains?(message, @anthropic_workspace_required_message),
+      do: {:unavailable, "workspace_selection_required"},
+      else: {:unavailable, "provider_unavailable"}
+  end
+
+  defp classify_anthropic_bad_request(_body),
     do: {:unavailable, "provider_unavailable"}
 
   defp persist(scope, integration, :valid) do

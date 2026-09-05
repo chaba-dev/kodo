@@ -78,6 +78,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
 
     assert error.kind == :integration_changed
     assert Kodo.LLM.ProviderError.guidance(error) =~ "Retry the turn"
+    assert Kodo.LLM.ProviderError.settings_path(error) == "/integrations"
   end
 
   test "the public facade returns actionable missing-provider feedback" do

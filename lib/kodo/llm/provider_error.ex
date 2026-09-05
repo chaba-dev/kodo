@@ -69,9 +69,10 @@ defmodule Kodo.LLM.ProviderError do
   def settings_path(%__MODULE__{provider: provider, kind: :integration_required}),
     do: "/integrations?provider=#{provider}&action=connect"
 
-  def settings_path(%__MODULE__{provider: provider, kind: kind})
-      when kind in [:integration_changed, :authentication_rejected],
-      do: "/integrations?provider=#{provider}&action=replace"
+  def settings_path(%__MODULE__{kind: :integration_changed}), do: "/integrations"
+
+  def settings_path(%__MODULE__{provider: provider, kind: :authentication_rejected}),
+    do: "/integrations?provider=#{provider}&action=replace"
 
   def settings_path(%__MODULE__{}), do: "/integrations"
 

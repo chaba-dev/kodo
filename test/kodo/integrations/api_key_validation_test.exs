@@ -42,6 +42,7 @@ defmodule Kodo.Integrations.APIKeyValidationTest do
         {"anthropic", "valid-", "valid", nil},
         {"anthropic", "invalid-", "invalid", "invalid_credentials"},
         {"anthropic", "workspace-required-", "unavailable", "workspace_selection_required"},
+        {"anthropic", "unrelated-bad-request-", "unavailable", "provider_unavailable"},
         {"anthropic", "permission-", "unavailable", "provider_unavailable"},
         {"anthropic", "timeout-", "unavailable", "timeout"},
         {"anthropic", "tls-", "unavailable", "tls_error"},

@@ -58,8 +58,14 @@ defmodule KodoWeb.IntegrationsLive do
     open_action(socket, provider, action)
   end
 
+  def handle_params(%{"provider" => _provider, "action" => action}, _uri, socket)
+      when action in @actions do
+    unsupported_provider(socket)
+  end
+
   # Keep existing OpenAI action links valid while provider-qualified links roll out.
-  def handle_params(%{"action" => action}, _uri, socket) when action in @actions do
+  def handle_params(%{"action" => action} = params, _uri, socket)
+      when action in @actions and not is_map_key(params, "provider") do
     open_action(socket, "openai", action)
   end
 
@@ -295,6 +301,13 @@ defmodule KodoWeb.IntegrationsLive do
     {:noreply,
      socket
      |> put_flash(:error, "The integration changed in another session. Review its current state.")
+     |> push_patch(to: ~p"/integrations")}
+  end
+
+  defp unsupported_provider(socket) do
+    {:noreply,
+     socket
+     |> put_flash(:error, "This provider integration is not available.")
      |> push_patch(to: ~p"/integrations")}
   end
 

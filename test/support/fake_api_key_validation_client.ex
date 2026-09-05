@@ -20,7 +20,25 @@ defmodule Kodo.Test.FakeAPIKeyValidationClient do
     do: {:ok, 401, %{"error" => %{"type" => "authentication_error"}}}
 
   def get_metadata("anthropic", "workspace-required-" <> _rest),
-    do: {:ok, 400, %{"error" => %{"type" => "invalid_request_error"}}}
+    do:
+      {:ok, 400,
+       %{
+         "error" => %{
+           "type" => "invalid_request_error",
+           "message" =>
+             "anthropic-workspace-id is required when authenticating with an identity-linked API key"
+         }
+       }}
+
+  def get_metadata("anthropic", "unrelated-bad-request-" <> _rest),
+    do:
+      {:ok, 400,
+       %{
+         "error" => %{
+           "type" => "invalid_request_error",
+           "message" => "The request used an unsupported API version"
+         }
+       }}
 
   def get_metadata("openrouter", "invalid-" <> _rest),
     do: {:ok, 401, %{"error" => %{"code" => 401}}}

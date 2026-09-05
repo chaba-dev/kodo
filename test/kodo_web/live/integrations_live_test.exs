@@ -51,6 +51,15 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert has_element?(view, "#openai-api-key-form")
   end
 
+  test "an explicit unsupported provider cannot fall back to the OpenAI form", %{conn: conn} do
+    assert {:error,
+            {:live_redirect,
+             %{
+               to: "/integrations",
+               flash: %{"error" => "This provider integration is not available."}
+             }}} = live(conn, ~p"/integrations?#{[provider: "anthopic", action: "connect"]}")
+  end
+
   test "connects without assigning or rendering the submitted key", %{conn: conn, scope: scope} do
     Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
     {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
