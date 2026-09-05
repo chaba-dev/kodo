@@ -79,12 +79,15 @@ defmodule Kodo.Agent.LoopTest do
         ownership: ownership
       )
 
-    assert {:error, :integration_disconnected} =
+    assert {:error, %Kodo.LLM.ProviderError{} = error} =
              Loop.run(session.id,
                adapter: Kodo.Test.FakeLLM,
                budgets: budgets([]),
                ownership: ownership
              )
+
+    assert error.kind == :integration_required
+    assert error.provider == "openai"
 
     refute Enum.any?(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
   end
@@ -475,12 +478,16 @@ defmodule Kodo.Agent.LoopTest do
         ownership: ownership
       )
 
-    assert {:error, :integration_not_found} =
+    assert {:error, %Kodo.LLM.ProviderError{} = error} =
              Loop.run(session.id,
                adapter: Kodo.Test.FakeLLM,
                budgets: budgets([]),
                ownership: ownership
              )
+
+    assert error.kind == :integration_required
+    assert error.provider == "anthropic"
+    assert error.billing_path == :platform
 
     events = Sessions.events_after(session.id)
     assert Enum.any?(events, &(&1.type == "model_invocation_started"))

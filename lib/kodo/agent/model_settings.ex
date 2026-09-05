@@ -6,6 +6,7 @@ defmodule Kodo.Agent.ModelSettings do
   alias Kodo.Accounts.Scope
   alias Kodo.Agent.ModelMapping
   alias Kodo.Agent.RoleOverride
+  alias Kodo.Integrations
   alias Kodo.Repo
   alias Kodo.Runners.Runner
 
@@ -13,6 +14,18 @@ defmodule Kodo.Agent.ModelSettings do
     with {:ok, layers} <- layers(scope, runner_id) do
       {:ok, ModelMapping.balanced(layers)}
     end
+  end
+
+  def integration_feedback(%Scope{} = scope, %{"roles" => roles}) do
+    statuses =
+      scope
+      |> Integrations.list_integration_statuses()
+      |> Map.new(&{&1.provider, &1})
+
+    Map.new(roles, fn {role, mapping} ->
+      provider = mapping["provider"]
+      {role, provider_feedback(provider, Map.get(statuses, provider))}
+    end)
   end
 
   def layers(%Scope{user: user}, nil), do: {:ok, layers(user.id, nil)}
@@ -147,4 +160,62 @@ defmodule Kodo.Agent.ModelSettings do
 
   defp normalize_role(role) when role in ["primary", "search", "review"], do: {:ok, role}
   defp normalize_role(_role), do: {:error, :invalid_role}
+
+  defp provider_feedback(provider, nil) when provider in ~w(openai anthropic openrouter) do
+    %{
+      provider: provider,
+      provider_name: provider_name(provider),
+      billing_path: billing_path(provider),
+      status: "not_connected",
+      settings_path: "/integrations?provider=#{provider}&action=connect"
+    }
+  end
+
+  defp provider_feedback(provider, %{connection_status: "connected", validation_status: "invalid"}) do
+    %{
+      provider: provider,
+      provider_name: provider_name(provider),
+      billing_path: billing_path(provider),
+      status: "invalid",
+      settings_path: "/integrations?provider=#{provider}&action=replace"
+    }
+  end
+
+  defp provider_feedback(provider, %{connection_status: "connected"}) do
+    %{
+      provider: provider,
+      provider_name: provider_name(provider),
+      billing_path: billing_path(provider),
+      status: "ready",
+      settings_path: "/integrations"
+    }
+  end
+
+  defp provider_feedback(provider, %{connection_status: "disconnected"}) do
+    %{
+      provider: provider,
+      provider_name: provider_name(provider),
+      billing_path: billing_path(provider),
+      status: "disconnected",
+      settings_path: "/integrations?provider=#{provider}&action=connect"
+    }
+  end
+
+  defp provider_feedback(provider, _integration) do
+    %{
+      provider: provider,
+      provider_name: provider_name(provider),
+      billing_path: billing_path(provider),
+      status: "action_required",
+      settings_path: "/integrations"
+    }
+  end
+
+  defp provider_name("openai"), do: "OpenAI API"
+  defp provider_name("anthropic"), do: "Anthropic"
+  defp provider_name("openrouter"), do: "OpenRouter"
+  defp provider_name(provider), do: provider
+
+  defp billing_path("openrouter"), do: "aggregator"
+  defp billing_path(_provider), do: "platform"
 end

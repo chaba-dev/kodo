@@ -5,7 +5,8 @@ defmodule Kodo.LLM.ProviderError do
   defstruct [:kind, :provider, :model, :billing_path, :retryable]
 
   @type kind ::
-          :authentication_rejected
+          :integration_required
+          | :authentication_rejected
           | :billing_required
           | :access_restricted
           | :quota_or_rate_limit
@@ -19,6 +20,27 @@ defmodule Kodo.LLM.ProviderError do
           billing_path: :platform | :subscription | :aggregator,
           retryable: boolean()
         }
+
+  def from_integration(reason, %LLMDB.Model{} = model)
+      when reason in [
+             :integration_not_found,
+             :integration_disconnected,
+             :integration_reauthorization_required,
+             :integration_invalid
+           ] do
+    provider = Atom.to_string(model.provider)
+
+    %__MODULE__{
+      kind: integration_kind(reason),
+      provider: provider,
+      model: "#{provider}:#{model.id}",
+      billing_path: billing_path(provider),
+      retryable: false
+    }
+  end
+
+  def guidance(%__MODULE__{kind: :integration_required, provider: provider}),
+    do: "Connect the #{provider_name(provider)} integration, then retry the turn."
 
   def guidance(%__MODULE__{kind: :authentication_rejected}),
     do: "Replace or reconnect this provider credential, then retry the turn."
@@ -37,4 +59,18 @@ defmodule Kodo.LLM.ProviderError do
 
   def guidance(%__MODULE__{kind: :request_failed}),
     do: "The provider could not complete this model request. Review provider access, then retry."
+
+  defp integration_kind(:integration_invalid), do: :authentication_rejected
+  defp integration_kind(:integration_reauthorization_required), do: :authentication_rejected
+  defp integration_kind(_reason), do: :integration_required
+
+  defp billing_path("openai_codex"), do: :subscription
+  defp billing_path("openrouter"), do: :aggregator
+  defp billing_path(_provider), do: :platform
+
+  defp provider_name("openai"), do: "OpenAI API"
+  defp provider_name("anthropic"), do: "Anthropic"
+  defp provider_name("openrouter"), do: "OpenRouter"
+  defp provider_name("openai_codex"), do: "ChatGPT"
+  defp provider_name(provider), do: provider
 end

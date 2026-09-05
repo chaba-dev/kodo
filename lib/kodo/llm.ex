@@ -11,6 +11,7 @@ defmodule Kodo.LLM do
   alias Kodo.LLM.Credential
   alias Kodo.LLM.CredentialResolver
   alias Kodo.LLM.IntegrationRef
+  alias Kodo.LLM.ProviderError
 
   @credential_option_keys ~w(api_key access_token auth_mode oauth_file auth_file provider_options chatgpt_account_id)a
 
@@ -38,9 +39,23 @@ defmodule Kodo.LLM do
 
   @doc "Resolves a model and captures non-secret integration metadata for later admission."
   def resolve_integration(%Scope{} = scope, model) do
-    with {:ok, resolved_model} <- resolve_model(model),
-         {:ok, reference} <- CredentialResolver.reference(scope, resolved_model) do
-      {:ok, resolved_model, reference}
+    with {:ok, resolved_model} <- resolve_model(model) do
+      case CredentialResolver.reference(scope, resolved_model) do
+        {:ok, reference} ->
+          {:ok, resolved_model, reference}
+
+        {:error, reason}
+        when reason in [
+               :integration_not_found,
+               :integration_disconnected,
+               :integration_reauthorization_required,
+               :integration_invalid
+             ] ->
+          {:error, ProviderError.from_integration(reason, resolved_model)}
+
+        {:error, _reason} = error ->
+          error
+      end
     end
   end
 

@@ -68,6 +68,23 @@ defmodule Kodo.LLM.CredentialResolverTest do
              )
   end
 
+  test "the public facade returns actionable missing-provider feedback" do
+    scope = AccountsFixtures.user_scope_fixture()
+
+    assert {:error, error} = LLM.resolve_integration(scope, "anthropic:claude-3-5-haiku-latest")
+    assert error.kind == :integration_required
+    assert error.provider == "anthropic"
+    assert error.model == "anthropic:claude-3-5-haiku-20241022"
+    assert error.billing_path == :platform
+    assert Kodo.LLM.ProviderError.guidance(error) =~ "Connect the Anthropic integration"
+
+    assert {:error, openrouter_error} =
+             LLM.resolve_integration(scope, "openrouter:anthropic/claude-sonnet-4")
+
+    assert openrouter_error.provider == "openrouter"
+    assert openrouter_error.billing_path == :aggregator
+  end
+
   test "rejects forged and cross-user references", context do
     other_scope = AccountsFixtures.user_scope_fixture()
 

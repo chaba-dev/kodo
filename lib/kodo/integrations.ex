@@ -26,6 +26,17 @@ defmodule Kodo.Integrations do
     |> Repo.all()
   end
 
+  def list_integration_statuses(%Scope{user: user}) do
+    Integration
+    |> where([integration], integration.user_id == ^user.id)
+    |> select([integration], %{
+      provider: integration.provider,
+      connection_status: integration.connection_status,
+      validation_status: integration.validation_status
+    })
+    |> Repo.all()
+  end
+
   def get_integration(%Scope{user: user}, id) do
     with {:ok, id} <- Ecto.UUID.cast(id),
          %Integration{} = integration <- Repo.get_by(Integration, id: id, user_id: user.id) do
