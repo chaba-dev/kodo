@@ -66,6 +66,26 @@ defmodule Kodo.LLM.ProviderError do
   def guidance(%__MODULE__{kind: :request_failed}),
     do: "The provider could not complete this model request. Review provider access, then retry."
 
+  def settings_path(%__MODULE__{provider: provider, kind: :integration_required}),
+    do: "/integrations?provider=#{provider}&action=connect"
+
+  def settings_path(%__MODULE__{provider: provider, kind: kind})
+      when kind in [:integration_changed, :authentication_rejected],
+      do: "/integrations?provider=#{provider}&action=replace"
+
+  def settings_path(%__MODULE__{}), do: "/integrations"
+
+  def provider_help_url(%__MODULE__{provider: "openai"}),
+    do: "https://platform.openai.com/settings/organization/billing"
+
+  def provider_help_url(%__MODULE__{provider: "anthropic"}),
+    do: "https://console.anthropic.com/settings/billing"
+
+  def provider_help_url(%__MODULE__{provider: "openrouter"}),
+    do: "https://openrouter.ai/credits"
+
+  def provider_help_url(%__MODULE__{}), do: nil
+
   defp integration_kind(:integration_invalid), do: :authentication_rejected
   defp integration_kind(:integration_reauthorization_required), do: :authentication_rejected
   defp integration_kind(:stale_credential_generation), do: :integration_changed

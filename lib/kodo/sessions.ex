@@ -878,7 +878,9 @@ defmodule Kodo.Sessions do
          "model" => error.model,
          "billing_path" => Atom.to_string(error.billing_path),
          "retryable" => error.retryable,
-         "guidance" => ProviderError.guidance(error)
+         "guidance" => ProviderError.guidance(error),
+         "provider_help_url" => ProviderError.provider_help_url(error),
+         "settings_path" => ProviderError.settings_path(error)
        }},
       opts
     )

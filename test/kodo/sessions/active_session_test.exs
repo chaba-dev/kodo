@@ -328,7 +328,10 @@ defmodule Kodo.Sessions.ActiveSessionTest do
                         "model" => "openai:gpt-4o-mini",
                         "billing_path" => "platform",
                         "retryable" => true,
-                        "guidance" => guidance
+                        "guidance" => guidance,
+                        "provider_help_url" =>
+                          "https://platform.openai.com/settings/organization/billing",
+                        "settings_path" => "/integrations"
                       }
                     }}
 

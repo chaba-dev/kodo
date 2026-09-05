@@ -588,7 +588,7 @@ fn format_event(event: &Event) -> String {
                 .unwrap_or("unknown error")
         ),
         "provider_action_required" => format!(
-            "[provider action required] {} ({}, {})\n{}",
+            "[provider action required] {} ({}, {})\n{}\nProvider help: {}\nKodo settings: {}",
             payload
                 .get("provider")
                 .and_then(Value::as_str)
@@ -604,7 +604,15 @@ fn format_event(event: &Event) -> String {
             payload
                 .get("guidance")
                 .and_then(Value::as_str)
-                .unwrap_or("Review provider access, then retry.")
+                .unwrap_or("Review provider access, then retry."),
+            payload
+                .get("provider_help_url")
+                .and_then(Value::as_str)
+                .unwrap_or("not available"),
+            payload
+                .get("settings_path")
+                .and_then(Value::as_str)
+                .unwrap_or("/integrations")
         ),
         "approval_requested" => format!("[approval requested] {}", approval_summary(payload)),
         _ => format!("[{}]", event.kind),
@@ -887,7 +895,9 @@ mod tests {
                 "model": "openrouter:anthropic/claude-sonnet-4",
                 "billing_path": "aggregator",
                 "retryable": false,
-                "guidance": "Update billing with this provider, then retry the turn."
+                "guidance": "Update billing with this provider, then retry the turn.",
+                "provider_help_url": "https://openrouter.ai/credits",
+                "settings_path": "/integrations"
             }),
         };
 
@@ -896,6 +906,8 @@ mod tests {
         assert!(rendered.contains("openrouter:anthropic/claude-sonnet-4"));
         assert!(rendered.contains("aggregator"));
         assert!(rendered.contains("Update billing"));
+        assert!(rendered.contains("https://openrouter.ai/credits"));
+        assert!(rendered.contains("Kodo settings: /integrations"));
     }
 
     #[test]
