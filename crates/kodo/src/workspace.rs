@@ -355,6 +355,8 @@ fn canonicalize(path: &Path) -> Result<PathBuf, WorkspaceError> {
 mod tests {
     use std::fs;
     use std::io::{Read, Seek, SeekFrom};
+    use std::sync::mpsc;
+    use std::thread;
 
     use tempfile::TempDir;
 
@@ -375,14 +377,26 @@ mod tests {
     fn permits_only_one_runner_for_a_workspace() {
         let repository = git_repository();
         let workspace = Workspace::from_root(repository.path()).unwrap();
-        let first = workspace.lock_runner().unwrap();
+        let holder_workspace = workspace.clone();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let lock = holder_workspace.lock_runner().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(lock);
+        });
+
+        // Do not let the contender race the thread intended to hold the lock.
+        locked_rx.recv().unwrap();
 
         assert!(matches!(
             workspace.lock_runner(),
             Err(WorkspaceError::RunnerAlreadyActive(path)) if path == workspace.root()
         ));
 
-        drop(first);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
         workspace.lock_runner().unwrap();
     }
 

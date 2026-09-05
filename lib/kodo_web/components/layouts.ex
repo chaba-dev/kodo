@@ -184,6 +184,85 @@ defmodule KodoWeb.Layouts do
     """
   end
 
+  @doc "Renders the responsive navigation and detail surface shared by user settings pages."
+  attr :title, :string, required: true
+  attr :subtitle, :string, required: true
+  attr :return_to, :string, required: true
+
+  slot :section, required: true do
+    attr :id, :string, required: true
+    attr :label, :string, required: true
+    attr :icon, :string, required: true
+    attr :navigate, :string, required: true
+    attr :current, :boolean
+  end
+
+  slot :inner_block, required: true
+
+  def settings_shell(assigns) do
+    ~H"""
+    <section id="settings-shell" class="mx-auto max-w-6xl">
+      <header class="mb-5 flex items-start gap-4 sm:mb-7 sm:items-center">
+        <.link
+          id="settings-return"
+          navigate={@return_to}
+          class="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl border border-[#d7ddd0] bg-white text-zinc-500 shadow-sm transition hover:-translate-x-0.5 hover:border-zinc-400 hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-zinc-600 dark:hover:text-white sm:mt-0"
+          aria-label="Return to sessions"
+        >
+          <.icon name="hero-arrow-left" class="size-4" />
+        </.link>
+        <div class="min-w-0">
+          <p class="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700 dark:text-emerald-400">
+            Settings
+          </p>
+          <h1 class="mt-1 text-2xl font-semibold tracking-tight text-zinc-950 dark:text-white sm:text-3xl">
+            {@title}
+          </h1>
+          <p class="mt-1 max-w-2xl text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+            {@subtitle}
+          </p>
+        </div>
+      </header>
+
+      <div class="overflow-hidden rounded-2xl border border-[#d7ddd0] bg-white shadow-[0_18px_55px_-38px_rgba(24,24,27,0.45)] dark:border-zinc-800 dark:bg-zinc-900 lg:grid lg:min-h-[34rem] lg:grid-cols-[13rem_minmax(0,1fr)]">
+        <nav
+          id="settings-sections"
+          aria-label="Settings sections"
+          class="flex gap-1 overflow-x-auto border-b border-[#e2e7dc] bg-[#f8faf5] p-2 dark:border-zinc-800 dark:bg-zinc-900/70 lg:block lg:space-y-1 lg:border-b-0 lg:border-r lg:p-3"
+        >
+          <.link
+            :for={section <- @section}
+            id={section.id}
+            navigate={section.navigate}
+            aria-current={if(section[:current], do: "page", else: nil)}
+            class={[
+              "group flex shrink-0 items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 lg:w-full",
+              section[:current] &&
+                "bg-white text-zinc-950 shadow-sm ring-1 ring-zinc-950/5 dark:bg-zinc-800 dark:text-white dark:ring-white/10",
+              !section[:current] &&
+                "text-zinc-600 hover:bg-white/70 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800/70 dark:hover:text-white"
+            ]}
+          >
+            <.icon
+              name={section.icon}
+              class={[
+                "size-4",
+                section[:current] && "text-emerald-700 dark:text-emerald-400",
+                !section[:current] && "text-zinc-400 group-hover:text-zinc-600"
+              ]}
+            />
+            <span>{section.label}</span>
+          </.link>
+        </nav>
+
+        <div id="settings-detail" class="min-w-0 p-4 sm:p-6 lg:p-8">
+          {render_slot(@inner_block)}
+        </div>
+      </div>
+    </section>
+    """
+  end
+
   defp repository_name(%{name: name}) when is_binary(name) and name != "", do: name
   defp repository_name(%{workspace_root: root}), do: Path.basename(root)
 

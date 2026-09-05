@@ -8,63 +8,114 @@ defmodule KodoWeb.UserLive.Settings do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope}>
-      <div class="text-center">
-        <.header>
-          Account Settings
-          <:subtitle>Manage your account email address and password settings</:subtitle>
-        </.header>
-      </div>
-
-      <.form for={@email_form} id="email_form" phx-submit="update_email" phx-change="validate_email">
-        <.input
-          field={@email_form[:email]}
-          type="email"
-          label="Email"
-          autocomplete="username"
-          spellcheck="false"
-          required
-        />
-        <.button variant="primary" phx-disable-with="Changing...">Change Email</.button>
-      </.form>
-
-      <div class="divider" />
-
-      <.form
-        for={@password_form}
-        id="password_form"
-        action={~p"/users/update-password"}
-        method="post"
-        phx-change="validate_password"
-        phx-submit="update_password"
-        phx-trigger-action={@trigger_submit}
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      content_class=""
+      main_class="px-3 py-5 sm:px-6 sm:py-8 lg:px-8"
+    >
+      <Layouts.settings_shell
+        title="Account"
+        subtitle="Manage the identity and sign-in credentials associated with your Kodo account."
+        return_to={~p"/sessions"}
       >
-        <input
-          name={@password_form[:email].name}
-          type="hidden"
-          id="hidden_user_email"
-          spellcheck="false"
-          value={@current_email}
+        <:section
+          id="settings-nav-account"
+          label="Account"
+          icon="hero-user-circle"
+          navigate={~p"/users/settings"}
+          current
         />
-        <.input
-          field={@password_form[:password]}
-          type="password"
-          label="New password"
-          autocomplete="new-password"
-          spellcheck="false"
-          required
+        <:section
+          id="settings-nav-integrations"
+          label="Integrations"
+          icon="hero-link"
+          navigate={~p"/integrations"}
         />
-        <.input
-          field={@password_form[:password_confirmation]}
-          type="password"
-          label="Confirm new password"
-          autocomplete="new-password"
-          spellcheck="false"
-        />
-        <.button variant="primary" phx-disable-with="Saving...">
-          Save Password
-        </.button>
-      </.form>
+
+        <div id="account-settings" class="space-y-5">
+          <section
+            id="email-settings"
+            class="rounded-2xl border border-zinc-200/80 bg-zinc-50/70 p-5 dark:border-zinc-800 dark:bg-zinc-950/40 sm:p-6"
+          >
+            <div class="mb-5">
+              <h2 class="text-base font-semibold text-zinc-950 dark:text-white">Email address</h2>
+              <p class="mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+                We will send a confirmation link before applying a new address.
+              </p>
+            </div>
+            <.form
+              for={@email_form}
+              id="email_form"
+              phx-submit="update_email"
+              phx-change="validate_email"
+              class="max-w-xl"
+            >
+              <.input
+                field={@email_form[:email]}
+                type="email"
+                label="Email"
+                autocomplete="username"
+                spellcheck="false"
+                required
+              />
+              <div class="mt-4 flex justify-end">
+                <.button variant="primary" phx-disable-with="Changing...">Change Email</.button>
+              </div>
+            </.form>
+          </section>
+
+          <section
+            id="password-settings"
+            class="rounded-2xl border border-zinc-200/80 bg-zinc-50/70 p-5 dark:border-zinc-800 dark:bg-zinc-950/40 sm:p-6"
+          >
+            <div class="mb-5">
+              <h2 class="text-base font-semibold text-zinc-950 dark:text-white">Password</h2>
+              <p class="mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+                Choose a unique password with at least 12 characters.
+              </p>
+            </div>
+            <.form
+              for={@password_form}
+              id="password_form"
+              action={~p"/users/update-password"}
+              method="post"
+              phx-change="validate_password"
+              phx-submit="update_password"
+              phx-trigger-action={@trigger_submit}
+              class="max-w-xl"
+            >
+              <input
+                name={@password_form[:email].name}
+                type="hidden"
+                id="hidden_user_email"
+                spellcheck="false"
+                value={@current_email}
+              />
+              <.input
+                field={@password_form[:password]}
+                type="password"
+                label="New password"
+                autocomplete="new-password"
+                spellcheck="false"
+                required
+              />
+              <.input
+                field={@password_form[:password_confirmation]}
+                type="password"
+                label="Confirm new password"
+                autocomplete="new-password"
+                spellcheck="false"
+              />
+              <div class="mt-4 flex justify-end">
+                <.button variant="primary" phx-disable-with="Saving...">
+                  Save Password
+                </.button>
+              </div>
+            </.form>
+          </section>
+        </div>
+      </Layouts.settings_shell>
     </Layouts.app>
     """
   end

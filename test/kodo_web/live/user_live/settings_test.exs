@@ -7,13 +7,18 @@ defmodule KodoWeb.UserLive.SettingsTest do
 
   describe "Settings page" do
     test "renders settings page", %{conn: conn} do
-      {:ok, _lv, html} =
+      {:ok, lv, _html} =
         conn
         |> log_in_user(user_fixture())
         |> live(~p"/users/settings")
 
-      assert html =~ "Change Email"
-      assert html =~ "Save Password"
+      assert has_element?(lv, "#settings-shell")
+      assert has_element?(lv, "#settings-sections[aria-label='Settings sections']")
+      assert has_element?(lv, "#settings-nav-account[aria-current='page']")
+      assert has_element?(lv, "#settings-nav-integrations[href='/integrations']")
+      assert has_element?(lv, "#settings-return[href='/sessions']")
+      assert has_element?(lv, "#settings-detail #email-settings #email_form")
+      assert has_element?(lv, "#settings-detail #password-settings #password_form")
     end
 
     test "redirects if user is not logged in", %{conn: conn} do
