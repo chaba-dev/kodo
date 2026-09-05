@@ -254,43 +254,46 @@ manufactured after that no-go decision.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 
-- [ ] Add Anthropic API-key connection, fixed endpoint configuration,
+- [X] Add Anthropic API-key connection, fixed endpoint configuration,
   asynchronous non-inference ~GET /v1/models~ metadata validation, and safe
   generation-fenced error classification. Support only standard workspace-
   scoped Console keys; return actionable unsupported-credential guidance for
-  organization/Admin credentials that require workspace selection.
-- [ ] Add OpenRouter API-key connection, fixed endpoint configuration,
+  unscoped identity-linked credentials that require workspace selection. Do not
+  add higher-privilege Admin API or workspace-selector support for inference.
+- [X] Add OpenRouter API-key connection, fixed endpoint configuration,
   asynchronous non-inference ~GET /api/v1/key~ metadata validation, documented
   invalid/revoked-key ~401~ handling, and explicit OpenRouter billing identity
   for routed models.
-- [ ] Represent saved-but-unverified credentials separately from valid, invalid,
+- [X] Represent saved-but-unverified credentials separately from valid, invalid,
   and validation-unavailable credentials. Keep unverified and unavailable
   credentials usable, block only confirmed invalid credentials, and treat quota,
   billing, entitlement, restricted validation permission, and provider outages
   as non-invalid outcomes.
-- [ ] Extend integration settings and model-selection feedback to distinguish
+- [X] Extend integration settings and model-selection feedback to distinguish
   OpenAI API, Anthropic, and OpenRouter providers without displaying saved
   credentials.
-- [ ] Extend onboarding and missing-provider feedback for Anthropic and
+- [X] Extend onboarding and missing-provider feedback for Anthropic and
   OpenRouter, and emit credential-free audit events for each provider's key
-  submission, replacement, validation, Test confirmation/outcome, and
-  disconnection.
-- [ ] Test a role mapping that uses different connected providers for primary,
+  submission, replacement, validation, and disconnection. Test confirmation and
+  outcome audits remain covered by the Phase 1B conditional item because the
+  optional billed Test action is not implemented.
+- [X] Test a role mapping that uses different connected providers for primary,
   search, and review, including absence or revocation of one required
   integration during a turn.
-- [ ] Test that connecting another provider leaves a usable mapping unchanged
+- [X] Test that connecting another provider leaves a usable mapping unchanged
   and that OpenRouter models use the OpenRouter integration even when their
   underlying vendor is OpenAI or Anthropic.
-- [ ] Test each provider probe and outcome class, generation fencing, usable
+- [X] Test each provider probe and outcome class, generation fencing, usable
   unverified/unavailable credentials, blocking confirmed-invalid credentials,
   expected safe error identifiers without raw response persistence, and explicit
-  cost confirmation for each optional Test model request. Pin the expected
-  metadata response contract and verify its charging documentation before ship.
-- [ ] Test provider- and model-specific quota and billing responses on an
+  cost confirmation for each optional Test model request. No billed Test action
+  is implemented in Phase 2. Pin the expected metadata response contract and
+  verify its charging documentation before ship.
+- [X] Test provider- and model-specific quota and billing responses on an
   invocation: the affected session preserves work and offers retry and guidance,
   while connection and validation remain unchanged and integration cards show
   no stale quota state.
-- [ ] Add opt-in live-provider checks for OpenAI API, Anthropic, and OpenRouter
+- [X] Add opt-in live-provider checks for OpenAI API, Anthropic, and OpenRouter
   using explicit test-user integrations while keeping ordinary tests
   independent of external provider access.
 

@@ -10,12 +10,30 @@ defmodule Kodo.Integrations do
   alias Kodo.Integrations.Integration
   alias Kodo.Repo
 
-  @safe_validation_errors ~w(network_error timeout tls_error provider_unavailable rate_limited)
+  @safe_validation_errors ~w(
+    network_error
+    timeout
+    tls_error
+    provider_unavailable
+    rate_limited
+    workspace_selection_required
+  )
 
   def list_integrations(%Scope{user: user}) do
     Integration
     |> where([integration], integration.user_id == ^user.id)
     |> order_by([integration], asc: integration.provider)
+    |> Repo.all()
+  end
+
+  def list_integration_statuses(%Scope{user: user}) do
+    Integration
+    |> where([integration], integration.user_id == ^user.id)
+    |> select([integration], %{
+      provider: integration.provider,
+      connection_status: integration.connection_status,
+      validation_status: integration.validation_status
+    })
     |> Repo.all()
   end
 

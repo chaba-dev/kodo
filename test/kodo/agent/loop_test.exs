@@ -2,6 +2,7 @@ defmodule Kodo.Agent.LoopTest do
   use Kodo.DataCase
 
   alias Kodo.Agent.Loop
+  alias Kodo.Agent.ModelSettings
   alias Kodo.Agent.Tools
   alias Kodo.Integrations
   alias Kodo.Runners
@@ -78,12 +79,15 @@ defmodule Kodo.Agent.LoopTest do
         ownership: ownership
       )
 
-    assert {:error, :integration_disconnected} =
+    assert {:error, %Kodo.LLM.ProviderError{} = error} =
              Loop.run(session.id,
                adapter: Kodo.Test.FakeLLM,
                budgets: budgets([]),
                ownership: ownership
              )
+
+    assert error.kind == :integration_required
+    assert error.provider == "openai"
 
     refute Enum.any?(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
   end
@@ -356,6 +360,138 @@ defmodule Kodo.Agent.LoopTest do
                  "content" => "README.md:1 contains the requested helper evidence."
                }
            end)
+  end
+
+  test "keeps primary, search, and review credentials and billing paths provider-specific", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, _anthropic} =
+      Integrations.connect(scope, "anthropic", "api_key", %{"api_key" => "search-key"})
+
+    {:ok, _openrouter} =
+      Integrations.connect(scope, "openrouter", "api_key", %{"api_key" => "review-key"})
+
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :search, %{
+               model: "anthropic:claude-3-5-haiku-latest"
+             })
+
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :review, %{
+               model: "openrouter:anthropic/claude-sonnet-4"
+             })
+
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Provider-specific roles",
+        model: "openai:gpt-4o-mini"
+      })
+
+    {:ok, ownership} = Sessions.claim_ownership(session.id, nil)
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "delegate search"},
+        ownership: ownership
+      )
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:tool_request, search_request}
+
+    broadcast_success(runner, search_request, %{
+      "result" => "file",
+      "content" => "helper documentation",
+      "offset" => 0,
+      "next_offset" => nil,
+      "truncated" => false
+    })
+
+    assert_receive {:tool_request, review_request}
+
+    broadcast_success(runner, review_request, %{
+      "result" => "output",
+      "content" => "clean diff",
+      "truncated" => false
+    })
+
+    assert {:ok, "Used delegated evidence."} = Task.await(loop)
+
+    events = Sessions.events_after(session.id)
+
+    assert Enum.any?(events, fn event ->
+             event.type == "model_invocation_started" and
+               event.payload["role"] == "primary" and event.payload["provider"] == "openai" and
+               event.payload["billing_path"] == "platform"
+           end)
+
+    assert Enum.any?(events, fn event ->
+             event.type == "subagent_invocation_started" and
+               event.payload["role"] == "search" and
+               event.payload["provider"] == "anthropic" and
+               event.payload["billing_path"] == "platform"
+           end)
+
+    assert Enum.any?(events, fn event ->
+             event.type == "review_invocation_started" and
+               event.payload["role"] == "review" and
+               event.payload["provider"] == "openrouter" and
+               event.payload["billing_path"] == "aggregator"
+           end)
+  end
+
+  test "fails only when a required mapped provider is absent", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :search, %{
+               model: "anthropic:claude-3-5-haiku-latest"
+             })
+
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Missing search provider",
+        model: "openai:gpt-4o-mini"
+      })
+
+    {:ok, ownership} = Sessions.claim_ownership(session.id, nil)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "delegate search"},
+        ownership: ownership
+      )
+
+    assert {:error, %Kodo.LLM.ProviderError{} = error} =
+             Loop.run(session.id,
+               adapter: Kodo.Test.FakeLLM,
+               budgets: budgets([]),
+               ownership: ownership
+             )
+
+    assert error.kind == :integration_required
+    assert error.provider == "anthropic"
+    assert error.billing_path == :platform
+
+    events = Sessions.events_after(session.id)
+    assert Enum.any?(events, &(&1.type == "model_invocation_started"))
+    refute Enum.any?(events, &(&1.type == "subagent_invocation_started"))
   end
 
   test "denies search tools outside the persisted read-only toolset", %{

@@ -135,6 +135,17 @@ defmodule Kodo.Test.FakeLLM do
   defp initial(%{"content" => "provider failure"}), do: {:error, :provider_failure}
   defp initial(%{"content" => "provider timeout"}), do: {:error, :provider_timeout}
 
+  defp initial(%{"content" => "provider quota"}) do
+    {:error,
+     %Kodo.LLM.ProviderError{
+       kind: :quota_or_rate_limit,
+       provider: "openai",
+       model: "openai:gpt-4o-mini",
+       billing_path: :platform,
+       retryable: true
+     }}
+  end
+
   defp initial(%{"content" => "delegate search"}) do
     tool_call("delegate-search", "delegate_search", %{"question" => "find helper"})
   end

@@ -11,6 +11,7 @@ defmodule Kodo.LLM do
   alias Kodo.LLM.Credential
   alias Kodo.LLM.CredentialResolver
   alias Kodo.LLM.IntegrationRef
+  alias Kodo.LLM.ProviderError
 
   @credential_option_keys ~w(api_key access_token auth_mode oauth_file auth_file provider_options chatgpt_account_id)a
 
@@ -38,9 +39,23 @@ defmodule Kodo.LLM do
 
   @doc "Resolves a model and captures non-secret integration metadata for later admission."
   def resolve_integration(%Scope{} = scope, model) do
-    with {:ok, resolved_model} <- resolve_model(model),
-         {:ok, reference} <- CredentialResolver.reference(scope, resolved_model) do
-      {:ok, resolved_model, reference}
+    with {:ok, resolved_model} <- resolve_model(model) do
+      case CredentialResolver.reference(scope, resolved_model) do
+        {:ok, reference} ->
+          {:ok, resolved_model, reference}
+
+        {:error, reason}
+        when reason in [
+               :integration_not_found,
+               :integration_disconnected,
+               :integration_reauthorization_required,
+               :integration_invalid
+             ] ->
+          {:error, ProviderError.from_integration(reason, resolved_model)}
+
+        {:error, _reason} = error ->
+          error
+      end
     end
   end
 
@@ -57,7 +72,7 @@ defmodule Kodo.LLM do
     adapter_opts = Keyword.delete(opts, :adapter)
 
     with :ok <- reject_credential_options(adapter_opts),
-         {:ok, credential} <- CredentialResolver.resolve(scope, model, reference) do
+         {:ok, credential} <- resolve_credential(scope, model, reference) do
       adapter.generate(model, messages, tools, credential, adapter_opts)
     end
   end
@@ -75,7 +90,7 @@ defmodule Kodo.LLM do
     adapter_opts = Keyword.delete(opts, :adapter)
 
     with :ok <- reject_credential_options(adapter_opts),
-         {:ok, credential} <- CredentialResolver.resolve(scope, model, reference) do
+         {:ok, credential} <- resolve_credential(scope, model, reference) do
       adapter.generate_object(model, messages, schema, credential, adapter_opts)
     end
   end
@@ -86,6 +101,22 @@ defmodule Kodo.LLM do
     case ReqLLM.model(model) do
       {:ok, %LLMDB.Model{} = resolved} -> {:ok, resolved}
       {:error, _reason} -> {:error, :malformed_model}
+    end
+  end
+
+  defp resolve_credential(scope, model, reference) do
+    case CredentialResolver.resolve(scope, model, reference) do
+      {:error, reason}
+      when reason in [
+             :integration_disconnected,
+             :integration_reauthorization_required,
+             :integration_invalid,
+             :stale_credential_generation
+           ] ->
+        {:error, ProviderError.from_integration(reason, model)}
+
+      result ->
+        result
     end
   end
 

@@ -1,12 +1,12 @@
-defmodule Kodo.Integrations.OpenAIValidationTest do
+defmodule Kodo.Integrations.APIKeyValidationTest do
   use Kodo.DataCase, async: false
 
   import ExUnit.CaptureLog
 
   alias Kodo.AccountsFixtures
   alias Kodo.Integrations
-  alias Kodo.Integrations.OpenAIValidation
-  alias Kodo.Test.FakeOpenAIValidationClient
+  alias Kodo.Integrations.APIKeyValidation
+  alias Kodo.Test.FakeAPIKeyValidationClient
 
   setup do
     scope = AccountsFixtures.user_scope_fixture()
@@ -28,8 +28,8 @@ defmodule Kodo.Integrations.OpenAIValidationTest do
       {:ok, integration} = connect(scope, unquote(prefix) <> "secret")
 
       assert {:ok, validated} =
-               OpenAIValidation.validate(scope, integration.id, integration.credential_generation,
-                 client: FakeOpenAIValidationClient
+               APIKeyValidation.validate(scope, integration.id, integration.credential_generation,
+                 client: FakeAPIKeyValidationClient
                )
 
       assert validated.validation_status == unquote(status)
@@ -38,12 +38,45 @@ defmodule Kodo.Integrations.OpenAIValidationTest do
     end
   end
 
+  for {provider, prefix, status, error_code} <- [
+        {"anthropic", "valid-", "valid", nil},
+        {"anthropic", "invalid-", "invalid", "invalid_credentials"},
+        {"anthropic", "workspace-required-", "unavailable", "workspace_selection_required"},
+        {"anthropic", "permission-", "unavailable", "provider_unavailable"},
+        {"anthropic", "timeout-", "unavailable", "timeout"},
+        {"anthropic", "tls-", "unavailable", "tls_error"},
+        {"anthropic", "redirect-", "unavailable", "provider_unavailable"},
+        {"anthropic", "rate-limited-", "unavailable", "rate_limited"},
+        {"anthropic", "provider-error-", "unavailable", "provider_unavailable"},
+        {"openrouter", "valid-", "valid", nil},
+        {"openrouter", "invalid-", "invalid", "invalid_credentials"},
+        {"openrouter", "permission-", "unavailable", "provider_unavailable"},
+        {"openrouter", "timeout-", "unavailable", "timeout"},
+        {"openrouter", "tls-", "unavailable", "tls_error"},
+        {"openrouter", "redirect-", "unavailable", "provider_unavailable"},
+        {"openrouter", "rate-limited-", "unavailable", "rate_limited"},
+        {"openrouter", "provider-error-", "unavailable", "provider_unavailable"}
+      ] do
+    test "classifies #{provider} #{prefix} responses", %{scope: scope} do
+      {:ok, integration} =
+        connect(scope, unquote(prefix) <> "secret", unquote(provider))
+
+      assert {:ok, validated} =
+               APIKeyValidation.validate(scope, integration.id, integration.credential_generation,
+                 client: FakeAPIKeyValidationClient
+               )
+
+      assert validated.validation_status == unquote(status)
+      assert validated.validation_error_code == unquote(error_code)
+    end
+  end
+
   test "does not classify an unrecognized 401 context as an invalid key", %{scope: scope} do
     {:ok, integration} = connect(scope, "permission-secret")
 
     assert {:ok, validated} =
-             OpenAIValidation.validate(scope, integration.id, integration.credential_generation,
-               client: FakeOpenAIValidationClient
+             APIKeyValidation.validate(scope, integration.id, integration.credential_generation,
+               client: FakeAPIKeyValidationClient
              )
 
     assert validated.validation_status == "unavailable"
@@ -61,22 +94,22 @@ defmodule Kodo.Integrations.OpenAIValidationTest do
       )
 
     assert {:error, :stale_credential_generation} =
-             OpenAIValidation.validate(scope, original.id, original.credential_generation,
-               client: FakeOpenAIValidationClient
+             APIKeyValidation.validate(scope, original.id, original.credential_generation,
+               client: FakeAPIKeyValidationClient
              )
   end
 
   test "does not persist a result admitted before credential replacement", %{scope: scope} do
-    Application.put_env(:kodo, :fake_openai_validation_test_pid, self())
+    Application.put_env(:kodo, :fake_api_key_validation_test_pid, self())
 
-    on_exit(fn -> Application.delete_env(:kodo, :fake_openai_validation_test_pid) end)
+    on_exit(fn -> Application.delete_env(:kodo, :fake_api_key_validation_test_pid) end)
 
     {:ok, original} = connect(scope, "blocking-original")
 
     task =
       Task.async(fn ->
-        OpenAIValidation.validate(scope, original.id, original.credential_generation,
-          client: FakeOpenAIValidationClient
+        APIKeyValidation.validate(scope, original.id, original.credential_generation,
+          client: FakeAPIKeyValidationClient
         )
       end)
 
@@ -99,16 +132,16 @@ defmodule Kodo.Integrations.OpenAIValidationTest do
   end
 
   test "does not persist a result admitted before disconnection", %{scope: scope} do
-    Application.put_env(:kodo, :fake_openai_validation_test_pid, self())
+    Application.put_env(:kodo, :fake_api_key_validation_test_pid, self())
 
-    on_exit(fn -> Application.delete_env(:kodo, :fake_openai_validation_test_pid) end)
+    on_exit(fn -> Application.delete_env(:kodo, :fake_api_key_validation_test_pid) end)
 
     {:ok, original} = connect(scope, "blocking-disconnect")
 
     task =
       Task.async(fn ->
-        OpenAIValidation.validate(scope, original.id, original.credential_generation,
-          client: FakeOpenAIValidationClient
+        APIKeyValidation.validate(scope, original.id, original.credential_generation,
+          client: FakeAPIKeyValidationClient
         )
       end)
 
@@ -127,15 +160,15 @@ defmodule Kodo.Integrations.OpenAIValidationTest do
   end
 
   test "bounds a validation client that never returns", %{scope: scope} do
-    Application.put_env(:kodo, :fake_openai_validation_test_pid, self())
+    Application.put_env(:kodo, :fake_api_key_validation_test_pid, self())
 
-    on_exit(fn -> Application.delete_env(:kodo, :fake_openai_validation_test_pid) end)
+    on_exit(fn -> Application.delete_env(:kodo, :fake_api_key_validation_test_pid) end)
 
     {:ok, integration} = connect(scope, "blocking-timeout")
 
     assert {:ok, validated} =
-             OpenAIValidation.validate(scope, integration.id, integration.credential_generation,
-               client: FakeOpenAIValidationClient,
+             APIKeyValidation.validate(scope, integration.id, integration.credential_generation,
+               client: FakeAPIKeyValidationClient,
                timeout: 10
              )
 
@@ -153,11 +186,11 @@ defmodule Kodo.Integrations.OpenAIValidationTest do
     log =
       capture_log(fn ->
         assert {:ok, validated} =
-                 OpenAIValidation.validate(
+                 APIKeyValidation.validate(
                    scope,
                    integration.id,
                    integration.credential_generation,
-                   client: FakeOpenAIValidationClient
+                   client: FakeAPIKeyValidationClient
                  )
 
         assert validated.validation_status == "unavailable"
@@ -172,15 +205,15 @@ defmodule Kodo.Integrations.OpenAIValidationTest do
     {:ok, integration} = connect(scope, "valid-owned")
 
     assert {:error, :integration_not_found} =
-             OpenAIValidation.validate(
+             APIKeyValidation.validate(
                other_scope,
                integration.id,
                integration.credential_generation,
-               client: FakeOpenAIValidationClient
+               client: FakeAPIKeyValidationClient
              )
   end
 
-  defp connect(scope, api_key) do
-    Integrations.connect(scope, "openai", "api_key", %{"api_key" => api_key})
+  defp connect(scope, api_key, provider \\ "openai") do
+    Integrations.connect(scope, provider, "api_key", %{"api_key" => api_key})
   end
 end

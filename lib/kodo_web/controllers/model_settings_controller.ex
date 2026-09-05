@@ -7,8 +7,15 @@ defmodule KodoWeb.ModelSettingsController do
 
   def show(conn, params) do
     case ModelSettings.resolved(conn.assigns.current_scope, params["runner_id"]) do
-      {:ok, mapping} -> json(conn, %{model_mapping: mapping})
-      {:error, :runner_not_available} -> runner_not_available(conn)
+      {:ok, mapping} ->
+        json(conn, %{
+          model_mapping: mapping,
+          integration_feedback:
+            ModelSettings.integration_feedback(conn.assigns.current_scope, mapping)
+        })
+
+      {:error, :runner_not_available} ->
+        runner_not_available(conn)
     end
   end
 

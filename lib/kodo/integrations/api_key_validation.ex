@@ -1,6 +1,6 @@
-defmodule Kodo.Integrations.OpenAIValidation do
+defmodule Kodo.Integrations.APIKeyValidation do
   @moduledoc """
-  Runs a bounded, generation-fenced OpenAI API-key metadata probe.
+  Runs bounded, generation-fenced API-key metadata probes.
 
   The task decrypts immediately before its one external operation and retains
   neither the key nor provider response. Only bounded validation outcomes are
@@ -12,7 +12,7 @@ defmodule Kodo.Integrations.OpenAIValidation do
   alias Kodo.Integrations.CredentialEncryption
   alias Kodo.Integrations.Integration
 
-  @provider "openai"
+  @providers ~w(openai anthropic openrouter)
   @probe_timeout 5_000
 
   def start(
@@ -36,7 +36,7 @@ defmodule Kodo.Integrations.OpenAIValidation do
          :ok <- admit(integration, generation),
          {:ok, payload} <- CredentialEncryption.decrypt(integration),
          {:ok, api_key} <- fetch_api_key(payload),
-         outcome <- bounded_probe(client, api_key, timeout) do
+         outcome <- bounded_probe(client, integration.provider, api_key, timeout) do
       persist(scope, integration, outcome)
     end
   end
@@ -44,20 +44,21 @@ defmodule Kodo.Integrations.OpenAIValidation do
   defp configured_client do
     Application.get_env(
       :kodo,
-      :openai_validation_client,
-      Kodo.Integrations.ReqOpenAIValidationClient
+      :api_key_validation_client,
+      Kodo.Integrations.ReqAPIKeyValidationClient
     )
   end
 
   defp admit(
          %Integration{
-           provider: @provider,
+           provider: provider,
            authentication_type: "api_key",
            connection_status: "connected",
            credential_generation: generation
          },
          generation
-       ),
+       )
+       when provider in @providers,
        do: :ok
 
   defp admit(%Integration{}, _generation), do: {:error, :stale_credential_generation}
@@ -70,10 +71,11 @@ defmodule Kodo.Integrations.OpenAIValidation do
   # The HTTP client's timeouts bound individual transport phases. This outer
   # deadline also bounds response decoding and misbehaving client adapters so a
   # validation task cannot retain an operation-local key indefinitely.
-  defp bounded_probe(client, api_key, timeout) when is_integer(timeout) and timeout > 0 do
+  defp bounded_probe(client, provider, api_key, timeout)
+       when is_integer(timeout) and timeout > 0 do
     task =
       Task.Supervisor.async_nolink(Kodo.ControlPlaneTaskSupervisor, fn ->
-        safe_probe(client, api_key)
+        safe_probe(client, provider, api_key)
       end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
@@ -85,9 +87,9 @@ defmodule Kodo.Integrations.OpenAIValidation do
 
   # Normalize inside the supervised task so its crash logger can never inspect
   # a provider exception or response containing operation-local credentials.
-  defp safe_probe(client, api_key) do
+  defp safe_probe(client, provider, api_key) do
     try do
-      client.get_models(api_key) |> classify_response()
+      client.get_metadata(provider, api_key) |> classify_response(provider)
     rescue
       _exception -> {:unavailable, "provider_unavailable"}
     catch
@@ -95,25 +97,57 @@ defmodule Kodo.Integrations.OpenAIValidation do
     end
   end
 
-  defp classify_response({:ok, status, _body}) when status in 200..299, do: :valid
-  defp classify_response({:ok, 401, body}), do: classify_unauthorized(body)
+  defp classify_response({:ok, status, %{"data" => data}}, provider)
+       when status in 200..299 and provider in ~w(openai anthropic) and is_list(data),
+       do: :valid
 
-  defp classify_response({:ok, status, _body}) when status in 300..399,
+  defp classify_response({:ok, status, %{"data" => data}}, "openrouter")
+       when status in 200..299 and is_map(data),
+       do: :valid
+
+  defp classify_response({:ok, status, _body}, _provider) when status in 200..299,
     do: {:unavailable, "provider_unavailable"}
 
-  defp classify_response({:ok, 429, _body}), do: {:unavailable, "rate_limited"}
-  defp classify_response({:ok, _status, _body}), do: {:unavailable, "provider_unavailable"}
-  defp classify_response({:error, :timeout}), do: {:unavailable, "timeout"}
-  defp classify_response({:error, :tls_error}), do: {:unavailable, "tls_error"}
-  defp classify_response({:error, :redirect}), do: {:unavailable, "provider_unavailable"}
-  defp classify_response({:error, :network_error}), do: {:unavailable, "network_error"}
-  defp classify_response({:error, _reason}), do: {:unavailable, "provider_unavailable"}
+  defp classify_response({:ok, 401, body}, provider),
+    do: classify_unauthorized(provider, body)
 
-  defp classify_unauthorized(%{"error" => %{"code" => code}})
+  defp classify_response(
+         {:ok, 400, %{"error" => %{"type" => "invalid_request_error"}}},
+         "anthropic"
+       ),
+       do: {:unavailable, "workspace_selection_required"}
+
+  defp classify_response({:ok, status, _body}, _provider) when status in 300..399,
+    do: {:unavailable, "provider_unavailable"}
+
+  defp classify_response({:ok, 429, _body}, _provider), do: {:unavailable, "rate_limited"}
+
+  defp classify_response({:ok, _status, _body}, _provider),
+    do: {:unavailable, "provider_unavailable"}
+
+  defp classify_response({:error, :timeout}, _provider), do: {:unavailable, "timeout"}
+  defp classify_response({:error, :tls_error}, _provider), do: {:unavailable, "tls_error"}
+
+  defp classify_response({:error, :redirect}, _provider),
+    do: {:unavailable, "provider_unavailable"}
+
+  defp classify_response({:error, :network_error}, _provider),
+    do: {:unavailable, "network_error"}
+
+  defp classify_response({:error, _reason}, _provider),
+    do: {:unavailable, "provider_unavailable"}
+
+  defp classify_unauthorized("openai", %{"error" => %{"code" => code}})
        when code in ["invalid_api_key", "key_revoked"],
        do: :invalid
 
-  defp classify_unauthorized(_body), do: {:unavailable, "provider_unavailable"}
+  defp classify_unauthorized("anthropic", %{"error" => %{"type" => "authentication_error"}}),
+    do: :invalid
+
+  defp classify_unauthorized("openrouter", %{"error" => %{"code" => 401}}), do: :invalid
+
+  defp classify_unauthorized(_provider, _body),
+    do: {:unavailable, "provider_unavailable"}
 
   defp persist(scope, integration, :valid) do
     scope

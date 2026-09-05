@@ -118,6 +118,24 @@ defmodule Kodo.Agent.ModelSettingsTest do
              ModelSettings.put_repository_override(other_scope, runner.id, :search, %{model: "x"})
   end
 
+  test "connecting another provider does not alter an existing role mapping", %{scope: scope} do
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :search, %{
+               model: "anthropic:claude-3-5-haiku-latest"
+             })
+
+    assert {:ok, before_connect} = ModelSettings.resolved(scope)
+
+    assert {:ok, _integration} =
+             Kodo.Integrations.connect(scope, "openrouter", "api_key", %{
+               "api_key" => "unrelated-provider-secret"
+             })
+
+    assert {:ok, after_connect} = ModelSettings.resolved(scope)
+    assert after_connect == before_connect
+    assert after_connect["roles"]["search"]["provider"] == "anthropic"
+  end
+
   defp runner_attrs do
     %{
       workspace_root: "/work/#{Ecto.UUID.generate()}",

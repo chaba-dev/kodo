@@ -2,6 +2,7 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
   use Kodo.DataCase, async: false
 
   alias Kodo.Sessions
+  alias Kodo.Integrations
   alias Kodo.Test.FullStackCase, as: Stack
 
   import Kodo.AccountsFixtures
@@ -18,6 +19,14 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
       System.get_env("LIVE_LLM_MODEL") ||
         flunk("LIVE_LLM_MODEL is required for the explicitly-run live provider smoke test")
 
+    {:ok, resolved_model} = ReqLLM.model(model)
+    provider = Atom.to_string(resolved_model.provider)
+    provider_key_env = provider_key_env(provider)
+
+    api_key =
+      System.get_env("LIVE_LLM_API_KEY") || System.get_env(provider_key_env) ||
+        flunk("LIVE_LLM_API_KEY or #{provider_key_env} is required for #{model}")
+
     previous_adapter = Application.get_env(:kodo, :llm_adapter)
     Application.put_env(:kodo, :llm_adapter, Kodo.LLM.ReqLLM)
 
@@ -29,7 +38,29 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
 
     stack = Stack.start_stack!()
     workspace = Stack.fixture!()
-    token = user_fixture() |> Kodo.Accounts.generate_user_agent_token()
+    user = user_fixture()
+    scope = Kodo.Accounts.Scope.for_user(user)
+
+    {:ok, _integration} =
+      Integrations.connect(scope, provider, "api_key", %{"api_key" => api_key})
+
+    # Remove the ambient key after installing the test user's integration so
+    # this smoke test exercises the same request-local credential path as production.
+    ambient_keys =
+      for key_env <- ["LIVE_LLM_API_KEY", provider_key_env], into: %{} do
+        {key_env, System.get_env(key_env)}
+      end
+
+    Enum.each(ambient_keys, fn {key_env, _value} -> System.delete_env(key_env) end)
+
+    on_exit(fn ->
+      Enum.each(ambient_keys, fn
+        {key_env, nil} -> System.delete_env(key_env)
+        {key_env, value} -> System.put_env(key_env, value)
+      end)
+    end)
+
+    token = Kodo.Accounts.generate_user_agent_token(user)
     runner = Stack.start_runner!(stack.base_url, workspace, token)
     %{model: model, stack: stack, workspace: workspace, runner: runner, token: token}
   end
@@ -69,5 +100,13 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
     Stack.terminate_session!(session_id)
     assert {:ok, projection} = Sessions.active_state(session_id)
     assert projection.status == "completed"
+  end
+
+  defp provider_key_env("openai"), do: "OPENAI_API_KEY"
+  defp provider_key_env("anthropic"), do: "ANTHROPIC_API_KEY"
+  defp provider_key_env("openrouter"), do: "OPENROUTER_API_KEY"
+
+  defp provider_key_env(provider) do
+    flunk("live provider #{provider} is not supported; use openai, anthropic, or openrouter")
   end
 end

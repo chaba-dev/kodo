@@ -587,6 +587,33 @@ fn format_event(event: &Event) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error")
         ),
+        "provider_action_required" => format!(
+            "[provider action required] {} ({}, {})\n{}\nProvider help: {}\nKodo settings: {}",
+            payload
+                .get("provider")
+                .and_then(Value::as_str)
+                .unwrap_or("provider"),
+            payload
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown model"),
+            payload
+                .get("billing_path")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown billing"),
+            payload
+                .get("guidance")
+                .and_then(Value::as_str)
+                .unwrap_or("Review provider access, then retry."),
+            payload
+                .get("provider_help_url")
+                .and_then(Value::as_str)
+                .unwrap_or("not available"),
+            payload
+                .get("settings_path")
+                .and_then(Value::as_str)
+                .unwrap_or("/integrations")
+        ),
         "approval_requested" => format!("[approval requested] {}", approval_summary(payload)),
         _ => format!("[{}]", event.kind),
     }
@@ -855,6 +882,32 @@ mod tests {
         assert!(rendered.contains("mix test test/kodo/sessions_test.exs"));
         assert!(rendered.contains("cwd: apps/kodo"));
         assert!(rendered.contains("timeout_ms: 30000"));
+    }
+
+    #[test]
+    fn provider_action_required_shows_safe_retry_guidance() {
+        let event = Event {
+            sequence: 3,
+            kind: "provider_action_required".into(),
+            payload: json!({
+                "reason": "billing_required",
+                "provider": "openrouter",
+                "model": "openrouter:anthropic/claude-sonnet-4",
+                "billing_path": "aggregator",
+                "retryable": false,
+                "guidance": "Update billing with this provider, then retry the turn.",
+                "provider_help_url": "https://openrouter.ai/credits",
+                "settings_path": "/integrations"
+            }),
+        };
+
+        let rendered = format_event(&event);
+        assert!(rendered.contains("[provider action required] openrouter"));
+        assert!(rendered.contains("openrouter:anthropic/claude-sonnet-4"));
+        assert!(rendered.contains("aggregator"));
+        assert!(rendered.contains("Update billing"));
+        assert!(rendered.contains("https://openrouter.ai/credits"));
+        assert!(rendered.contains("Kodo settings: /integrations"));
     }
 
     #[test]

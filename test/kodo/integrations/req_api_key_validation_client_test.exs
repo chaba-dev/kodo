@@ -1,23 +1,37 @@
-defmodule Kodo.Integrations.ReqOpenAIValidationClientTest do
+defmodule Kodo.Integrations.ReqAPIKeyValidationClientTest do
   use ExUnit.Case, async: true
 
   import ExUnit.CaptureIO
 
-  alias Kodo.Integrations.ReqOpenAIValidationClient
+  alias Kodo.Integrations.ReqAPIKeyValidationClient
 
-  test "sends the key only to the fixed OpenAI HTTPS models endpoint" do
-    secret = "fixed-origin-secret"
+  test "sends provider credentials only to their fixed HTTPS metadata endpoints" do
+    for {provider, host, path, expected_headers} <- [
+          {"openai", "api.openai.com", "/v1/models",
+           %{"authorization" => ["Bearer fixed-origin-secret"]}},
+          {"anthropic", "api.anthropic.com", "/v1/models",
+           %{
+             "anthropic-version" => ["2023-06-01"],
+             "x-api-key" => ["fixed-origin-secret"]
+           }},
+          {"openrouter", "openrouter.ai", "/api/v1/key",
+           %{"authorization" => ["Bearer fixed-origin-secret"]}}
+        ] do
+      plug = fn conn ->
+        assert conn.scheme == :https
+        assert conn.host == host
+        assert conn.request_path == path
 
-    plug = fn conn ->
-      assert conn.scheme == :https
-      assert conn.host == "api.openai.com"
-      assert conn.request_path == "/v1/models"
-      assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer #{secret}"]
-      Req.Test.json(conn, %{"data" => []})
+        for {header, expected} <- expected_headers do
+          assert Plug.Conn.get_req_header(conn, header) == expected
+        end
+
+        Req.Test.json(conn, %{"data" => []})
+      end
+
+      assert {:ok, 200, %{"data" => []}} =
+               ReqAPIKeyValidationClient.get_metadata(provider, "fixed-origin-secret", plug: plug)
     end
-
-    assert {:ok, 200, %{"data" => []}} =
-             ReqOpenAIValidationClient.get_models(secret, plug: plug)
   end
 
   test "does not follow same-origin or cross-origin redirects" do
@@ -36,7 +50,7 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClientTest do
       end
 
       assert {:error, :redirect} =
-               ReqOpenAIValidationClient.get_models("redirect-secret", plug: plug)
+               ReqAPIKeyValidationClient.get_metadata("openai", "redirect-secret", plug: plug)
 
       assert Agent.get(counter, & &1) == 1
     end
@@ -52,7 +66,7 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClientTest do
 
     capture_io(:stderr, fn ->
       assert {:ok, 200, %{"data" => []}} =
-               ReqOpenAIValidationClient.get_models("finch-options-secret",
+               ReqAPIKeyValidationClient.get_metadata("openai", "finch-options-secret",
                  finch_request: finch_request
                )
     end)
@@ -71,7 +85,7 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClientTest do
 
     capture_io(:stderr, fn ->
       assert {:error, :timeout} =
-               ReqOpenAIValidationClient.get_models("pool-timeout-secret",
+               ReqAPIKeyValidationClient.get_metadata("openai", "pool-timeout-secret",
                  finch_request: finch_request
                )
     end)
@@ -89,7 +103,7 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClientTest do
     end
 
     assert {:ok, 503, %{"error" => "unavailable"}} =
-             ReqOpenAIValidationClient.get_models("no-retry-secret", plug: plug)
+             ReqAPIKeyValidationClient.get_metadata("openai", "no-retry-secret", plug: plug)
 
     assert Agent.get(counter, & &1) == 1
   end
