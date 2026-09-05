@@ -53,6 +53,9 @@ defmodule Kodo.LLM.SafeReqAdapter do
     "code_interpreter" => :code_interpreter
   }
   @tool_usage_units %{"call" => :call, "request" => :request, "source" => :source}
+  @codex_builtin_call_types ~w(
+    web_search_call web_search_preview_call file_search_call mcp_call x_search_call
+  )
   @safe_error_types ~w(authentication_error billing_error permission_error rate_limit_error invalid_request_error)
   @anthropic_workspace_required_message "anthropic-workspace-id is required when authenticating with an identity-linked API key"
   @anthropic_spend_limit_prefixes [
@@ -337,8 +340,9 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp canonicalize_message(%ReqLLM.Message{reasoning_details: nil} = message) do
     with {:ok, content} <- canonicalize_content(message.content),
-         {:ok, metadata} <- canonicalize_message_metadata(message.metadata) do
-      {:ok, %{message | content: content, metadata: metadata}}
+         {:ok, metadata} <- canonicalize_message_metadata(message.metadata),
+         {:ok, tool_calls} <- canonicalize_tool_calls(message.tool_calls) do
+      {:ok, %{message | content: content, metadata: metadata, tool_calls: tool_calls}}
     end
   end
 
@@ -346,8 +350,16 @@ defmodule Kodo.LLM.SafeReqAdapter do
        when is_list(details) do
     with {:ok, content} <- canonicalize_content(message.content),
          {:ok, details} <- canonicalize_reasoning_details(details),
-         {:ok, metadata} <- canonicalize_message_metadata(message.metadata) do
-      {:ok, %{message | content: content, reasoning_details: details, metadata: metadata}}
+         {:ok, metadata} <- canonicalize_message_metadata(message.metadata),
+         {:ok, tool_calls} <- canonicalize_tool_calls(message.tool_calls) do
+      {:ok,
+       %{
+         message
+         | content: content,
+           reasoning_details: details,
+           metadata: metadata,
+           tool_calls: tool_calls
+       }}
     end
   end
 
@@ -476,6 +488,44 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp maybe_put_metadata(metadata, _key, nil), do: metadata
   defp maybe_put_metadata(metadata, key, value), do: Map.put(metadata, key, value)
+
+  defp canonicalize_tool_calls(nil), do: {:ok, nil}
+
+  defp canonicalize_tool_calls(calls) when is_list(calls) do
+    Enum.reduce_while(calls, {:ok, []}, fn call, {:ok, acc} ->
+      case canonicalize_tool_call(call) do
+        {:ok, call} -> {:cont, {:ok, [call | acc]}}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      :error -> :error
+    end
+  end
+
+  defp canonicalize_tool_calls(_calls), do: :error
+
+  defp canonicalize_tool_call(%ReqLLM.ToolCall{id: id, type: "function"} = call)
+       when is_binary(id) and id != "" do
+    name = ReqLLM.ToolCall.name(call)
+    arguments = ReqLLM.ToolCall.args_map(call)
+
+    if is_binary(name) and name != "" and is_map(arguments) do
+      function = %{name: name, arguments: Jason.encode!(arguments)}
+
+      function =
+        if ReqLLM.ToolCall.builtin?(call),
+          do: Map.put(function, :builtin?, true),
+          else: function
+
+      {:ok, %{call | function: function}}
+    else
+      :error
+    end
+  end
+
+  defp canonicalize_tool_call(_call), do: :error
 
   defp canonical_reasoning_provider_data(%{provider: :openrouter, provider_data: data})
        when is_map(data) do
@@ -799,12 +849,12 @@ defmodule Kodo.LLM.SafeReqAdapter do
     state =
       Enum.reduce(
         events,
-        %{calls: MapSet.new(), fragments: %{}, valid?: true},
+        %{calls: %{}, fragments: %{}, valid?: true},
         &track_codex_tool_event/2
       )
 
     if state.valid? and
-         Enum.all?(state.calls, &valid_codex_tool_arguments?(&1, state.fragments)),
+         Enum.all?(Map.keys(state.calls), &valid_codex_tool_arguments?(&1, state.fragments)),
        do: :ok,
        else: {:error, :invalid_provider_response}
   end
@@ -819,7 +869,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
       "response.function_call.name.delta" ->
         if is_binary(data["delta"]) and data["delta"] != "",
-          do: add_codex_tool_call(state, index),
+          do: put_codex_tool_call(state, index, :function),
           else: invalidate_codex_tool_stream(state)
 
       "response.function_call.delta" ->
@@ -834,7 +884,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
           else: append_codex_tool_arguments(state, index, data["arguments"] || data["delta"])
 
       "response.output_item.done" ->
-        track_codex_tool_done(state, index, data["item"])
+        track_codex_item_done(state, index, data["item"])
 
       _other ->
         state
@@ -846,7 +896,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
   defp track_codex_function_delta(state, index, delta) when is_map(delta) do
     state =
       if is_binary(delta["name"]) and delta["name"] != "",
-        do: add_codex_tool_call(state, index),
+        do: put_codex_tool_call(state, index, :function),
         else: state
 
     case delta["arguments"] do
@@ -860,14 +910,18 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp track_codex_tool_start(state, index, %{"type" => "function_call", "name" => name})
        when is_binary(name) and name != "",
-       do: add_codex_tool_call(state, index)
+       do: put_codex_tool_call(state, index, :function)
+
+  defp track_codex_tool_start(state, index, %{"type" => type})
+       when type in @codex_builtin_call_types,
+       do: put_codex_tool_call(state, index, {:builtin, type})
 
   defp track_codex_tool_start(state, _index, _item), do: state
 
-  defp track_codex_tool_done(state, index, %{"type" => "function_call"} = item) do
+  defp track_codex_item_done(state, index, %{"type" => "function_call"} = item) do
     state =
       if is_binary(item["name"]) and item["name"] != "",
-        do: add_codex_tool_call(state, index),
+        do: put_codex_tool_call(state, index, :function),
         else: state
 
     if Map.has_key?(state.fragments, index),
@@ -875,10 +929,27 @@ defmodule Kodo.LLM.SafeReqAdapter do
       else: append_codex_tool_arguments(state, index, item["arguments"])
   end
 
-  defp track_codex_tool_done(state, _index, _item), do: state
+  defp track_codex_item_done(state, index, %{"type" => type} = item)
+       when type in @codex_builtin_call_types do
+    state = put_codex_tool_call(state, index, {:builtin, type})
 
-  defp add_codex_tool_call(state, index),
-    do: %{state | calls: MapSet.put(state.calls, index)}
+    arguments =
+      item
+      |> Map.drop(["id", "call_id", "type", "status"])
+      |> Jason.encode!()
+
+    append_codex_tool_arguments(state, index, arguments)
+  end
+
+  defp track_codex_item_done(state, _index, _item), do: state
+
+  defp put_codex_tool_call(state, index, kind) do
+    case Map.fetch(state.calls, index) do
+      :error -> %{state | calls: Map.put(state.calls, index, kind)}
+      {:ok, ^kind} -> state
+      {:ok, _other} -> invalidate_codex_tool_stream(state)
+    end
+  end
 
   defp append_codex_tool_arguments(state, index, fragment)
        when is_binary(fragment) and fragment != "" do

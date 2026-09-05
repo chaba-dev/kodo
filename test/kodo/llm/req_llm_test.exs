@@ -669,6 +669,62 @@ defmodule Kodo.LLM.ReqLLMTest do
     refute inspect(error) =~ secret
   end
 
+  test "rejects provider objects in decoded tool call IDs" do
+    private_detail = "private-provider-detail"
+
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body: %{
+            "id" => "chat_bad_call_id",
+            "model" => "anthropic/claude-sonnet-4",
+            "choices" => [
+              %{
+                "index" => 0,
+                "message" => %{
+                  "role" => "assistant",
+                  "content" => nil,
+                  "tool_calls" => [
+                    %{
+                      "id" => %{"request_dump" => private_detail},
+                      "type" => "function",
+                      "function" => %{"name" => "read_file", "arguments" => "{}"}
+                    }
+                  ]
+                },
+                "finish_reason" => "tool_calls"
+              }
+            ],
+            "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+          }
+        }
+      ])
+
+    previous = Application.get_env(:req_llm, :openrouter)
+    Application.put_env(:req_llm, :openrouter, base_url: server.base_url)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:req_llm, :openrouter, previous),
+        else: Application.delete_env(:req_llm, :openrouter)
+    end)
+
+    credential = %{@credential | provider: "openrouter", billing_path: :aggregator}
+
+    assert {:error, %Kodo.LLM.ProviderError{kind: :request_failed} = error} =
+             Adapter.generate(
+               ReqLLM.model!("openrouter:anthropic/claude-sonnet-4"),
+               [%{"role" => "user", "content" => "use read_file"}],
+               [],
+               credential,
+               timeout: 5_000,
+               reasoning: "none"
+             )
+
+    refute inspect(error) =~ private_detail
+  end
+
   test "rejects credentials reconstructed from sibling text parts" do
     secret = "request-local-key"
 
@@ -1041,14 +1097,18 @@ defmodule Kodo.LLM.ReqLLMTest do
       Jason.encode!(%{
         "type" => "response.function_call_arguments.delta",
         "output_index" => 0,
-        "delta" => "{"
+        "delta" => "{}"
       })
 
-    done =
+    builtin_done =
       Jason.encode!(%{
-        "type" => "response.function_call_arguments.done",
+        "type" => "response.output_item.done",
         "output_index" => 0,
-        "arguments" => "}"
+        "item" => %{
+          "type" => "web_search_call",
+          "id" => "search-1",
+          "action" => %{}
+        }
       })
 
     completed =
@@ -1066,7 +1126,7 @@ defmodule Kodo.LLM.ReqLLMTest do
     body =
       "event: response.output_item.added\ndata: #{added}\n\n" <>
         "event: response.function_call_arguments.delta\ndata: #{delta}\n\n" <>
-        "event: response.function_call_arguments.done\ndata: #{done}\n\n" <>
+        "event: response.output_item.done\ndata: #{builtin_done}\n\n" <>
         "event: response.completed\ndata: #{completed}\n\n"
 
     safe_added =
