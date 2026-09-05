@@ -344,6 +344,14 @@ defmodule KodoWeb.IntegrationsLive do
     "The provider rejected these credentials. Update the connection and check access again."
   end
 
+  defp validation_detail(%{
+         provider: "anthropic",
+         validation_status: "unavailable",
+         validation_error_code: "workspace_selection_required"
+       }) do
+    "Kodo supports workspace-scoped Anthropic Console keys. Create one for a workspace, then replace this key."
+  end
+
   defp validation_detail(%{validation_status: "unavailable"}) do
     "We couldn't confirm access right now. The connection remains saved. Try again."
   end

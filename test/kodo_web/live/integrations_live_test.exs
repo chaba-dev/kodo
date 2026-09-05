@@ -489,6 +489,34 @@ defmodule KodoWeb.IntegrationsLiveTest do
     end
   end
 
+  test "guides unsupported Anthropic credentials toward a workspace-scoped key", %{
+    conn: conn,
+    scope: scope
+  } do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
+
+    {:ok, view, _html} =
+      live(conn, ~p"/integrations?#{[provider: "anthropic", action: "connect"]}")
+
+    view
+    |> form("#anthropic-api-key-form", %{
+      "integration" => %{"api_key" => "workspace-required-anthropic-secret"}
+    })
+    |> render_submit()
+
+    assert_receive message = {:integration_validation_finished, _id, _generation}
+    send(view.pid, message)
+    _ = :sys.get_state(view.pid)
+
+    assert has_element?(view, "#anthropic-status", "Unable to verify")
+
+    assert has_element?(
+             view,
+             "#anthropic-access-detail",
+             "workspace-scoped Anthropic Console keys"
+           )
+  end
+
   test "replaces and disconnects each additional API-key provider", %{conn: conn, scope: scope} do
     for {provider, revoke_url} <- [
           {"anthropic", "https://console.anthropic.com/settings/keys"},

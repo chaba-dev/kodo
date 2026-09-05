@@ -19,6 +19,9 @@ defmodule Kodo.Test.FakeAPIKeyValidationClient do
   def get_metadata("anthropic", "invalid-" <> _rest),
     do: {:ok, 401, %{"error" => %{"type" => "authentication_error"}}}
 
+  def get_metadata("anthropic", "workspace-required-" <> _rest),
+    do: {:ok, 400, %{"error" => %{"type" => "invalid_request_error"}}}
+
   def get_metadata("openrouter", "invalid-" <> _rest),
     do: {:ok, 401, %{"error" => %{"code" => 401}}}
 

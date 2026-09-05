@@ -41,6 +41,7 @@ defmodule Kodo.Integrations.APIKeyValidationTest do
   for {provider, prefix, status, error_code} <- [
         {"anthropic", "valid-", "valid", nil},
         {"anthropic", "invalid-", "invalid", "invalid_credentials"},
+        {"anthropic", "workspace-required-", "unavailable", "workspace_selection_required"},
         {"anthropic", "permission-", "unavailable", "provider_unavailable"},
         {"openrouter", "valid-", "valid", nil},
         {"openrouter", "invalid-", "invalid", "invalid_credentials"},

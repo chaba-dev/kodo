@@ -111,6 +111,12 @@ defmodule Kodo.Integrations.APIKeyValidation do
   defp classify_response({:ok, 401, body}, provider),
     do: classify_unauthorized(provider, body)
 
+  defp classify_response(
+         {:ok, 400, %{"error" => %{"type" => "invalid_request_error"}}},
+         "anthropic"
+       ),
+       do: {:unavailable, "workspace_selection_required"}
+
   defp classify_response({:ok, status, _body}, _provider) when status in 300..399,
     do: {:unavailable, "provider_unavailable"}
 
