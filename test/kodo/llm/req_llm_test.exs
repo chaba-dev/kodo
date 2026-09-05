@@ -1081,21 +1081,30 @@ defmodule Kodo.LLM.ReqLLMTest do
           }
         }) <> "\n\n"
 
+    split_body =
+      "event: response.output_text.delta\ndata: " <>
+        Jason.encode!(%{
+          "type" => "response.output_text.delta",
+          "delta" => "request-local-"
+        }) <>
+        "\n\n" <>
+        "event: response.output_text.delta\ndata: " <>
+        Jason.encode!(%{"type" => "response.output_text.delta", "delta" => "access"}) <>
+        "\n\n" <> completion
+
+    split_deltas =
+      split_body
+      |> ReqLLM.Streaming.SSE.parse_sse_binary()
+      |> Enum.filter(&(&1.event == "response.output_text.delta"))
+
+    assert Enum.all?(split_deltas, &is_map(&1.data))
+    assert Enum.map_join(split_deltas, & &1.data["delta"]) == credential.token
+
     bodies = [
       "event: response.output_text.delta\n" <>
         ~S(data: {"type":"response.output_text.delta","delta":"\u0072equest-local-access"}) <>
         "\n\n" <> completion,
-      ("event: response.output_text.delta\n" <>
-         Jason.encode!(%{
-           "type" => "response.output_text.delta",
-           "delta" => "request-local-"
-         }))
-      |> then(fn event -> "data: " <> event <> "\n\n" end)
-      |> Kernel.<>(
-        "event: response.output_text.delta\ndata: " <>
-          Jason.encode!(%{"type" => "response.output_text.delta", "delta" => "access"}) <>
-          "\n\n" <> completion
-      )
+      split_body
     ]
 
     for body <- bodies do
@@ -1118,6 +1127,30 @@ defmodule Kodo.LLM.ReqLLMTest do
 
       refute inspect(error) =~ credential.token
     end
+
+    safe_body =
+      split_body
+      |> String.replace("request-local-", "public-")
+      |> String.replace(~s("delta":"access"), ~s("delta":"answer"))
+
+    server =
+      start_provider_server([
+        %{status: 200, body: safe_body, content_type: "text/event-stream"}
+      ])
+
+    options =
+      []
+      |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+
+    assert {:ok, response} =
+             ReqLLM.generate_text(
+               ReqLLM.model!("openai_codex:gpt-5.4"),
+               [%{"role" => "user", "content" => "public prompt"}],
+               options
+             )
+
+    assert ReqLLM.Response.text(response) == "public-answer"
   end
 
   test "rejects unsafe Codex tool streams before decoder diagnostics" do
@@ -1430,6 +1463,123 @@ defmodule Kodo.LLM.ReqLLMTest do
              )
 
     refute inspect(error) =~ "Partial answer"
+  end
+
+  test "rejects malformed or conflicting Codex terminal envelopes" do
+    delta =
+      Jason.encode!(%{
+        "type" => "response.output_text.delta",
+        "delta" => "Partial answer"
+      })
+
+    terminal = fn type, response ->
+      "event: #{type}\ndata: " <>
+        Jason.encode!(%{"type" => type, "response" => response}) <> "\n\n"
+    end
+
+    valid_response = %{
+      "id" => "resp_valid",
+      "model" => "gpt-5.4",
+      "status" => "completed",
+      "output" => [],
+      "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+    }
+
+    bodies = [
+      terminal.("response.completed", %{}),
+      terminal.("response.completed", %{"status" => "completed"}),
+      terminal.("response.completed", valid_response) <>
+        terminal.("response.incomplete", %{valid_response | "status" => "incomplete"})
+    ]
+
+    credential = %{
+      @credential
+      | provider: "openai_codex",
+        authentication_type: "oauth",
+        billing_path: :subscription,
+        token: "request-local-access",
+        account_id: "request-local-account"
+    }
+
+    for terminal_body <- bodies do
+      server =
+        start_provider_server([
+          %{
+            status: 200,
+            body: "event: response.output_text.delta\ndata: #{delta}\n\n" <> terminal_body,
+            content_type: "text/event-stream"
+          }
+        ])
+
+      options =
+        []
+        |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+        |> Keyword.put(:base_url, server.base_url)
+
+      assert {:error, _error} =
+               ReqLLM.generate_text(
+                 ReqLLM.model!("openai_codex:gpt-5.4"),
+                 [%{"role" => "user", "content" => "answer"}],
+                 options
+               )
+    end
+  end
+
+  test "accepts each supported Codex terminal envelope" do
+    credential = %{
+      @credential
+      | provider: "openai_codex",
+        authentication_type: "oauth",
+        billing_path: :subscription,
+        token: "request-local-access",
+        account_id: "request-local-account"
+    }
+
+    for {type, status} <- [
+          {"response.completed", "completed"},
+          {"response.done", "completed"},
+          {"response.incomplete", "incomplete"}
+        ] do
+      delta =
+        Jason.encode!(%{"type" => "response.output_text.delta", "delta" => "answer"})
+
+      terminal =
+        Jason.encode!(%{
+          "type" => type,
+          "response" => %{
+            "id" => "resp_#{status}",
+            "model" => "gpt-5.4",
+            "status" => status,
+            "output" => [],
+            "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+          }
+        })
+
+      server =
+        start_provider_server([
+          %{
+            status: 200,
+            body:
+              "event: response.output_text.delta\ndata: #{delta}\n\n" <>
+                "event: #{type}\ndata: #{terminal}\n\n",
+            content_type: "text/event-stream"
+          }
+        ])
+
+      options =
+        []
+        |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+        |> Keyword.put(:base_url, server.base_url)
+
+      assert {:ok, response} =
+               ReqLLM.generate_text(
+                 ReqLLM.model!("openai_codex:gpt-5.4"),
+                 [%{"role" => "user", "content" => "answer"}],
+                 options
+               )
+
+      assert ReqLLM.Response.text(response) == "answer"
+    end
   end
 
   test "accepts Codex native structured output" do

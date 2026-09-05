@@ -867,9 +867,15 @@ defmodule Kodo.LLM.SafeReqAdapter do
   # deltas alone. Require the provider's terminal envelope so a truncated
   # transport cannot be mistaken for a complete model response.
   defp validate_codex_terminal_event(events) do
-    if Enum.any?(events, &valid_codex_terminal_event?/1),
-      do: :ok,
-      else: {:error, :invalid_provider_response}
+    case Enum.filter(events, &codex_terminal_event?/1) do
+      [event] ->
+        if valid_codex_terminal_event?(event),
+          do: :ok,
+          else: {:error, :invalid_provider_response}
+
+      _missing_or_conflicting ->
+        {:error, :invalid_provider_response}
+    end
   end
 
   defp valid_codex_terminal_event?(%{data: data} = event) when is_map(data) do
@@ -878,10 +884,10 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
     case {type, response} do
       {type, %{} = response} when type in ["response.completed", "response.done"] ->
-        response["status"] in [nil, "completed"]
+        valid_codex_response_id?(response["id"]) and response["status"] == "completed"
 
       {"response.incomplete", %{} = response} ->
-        response["status"] in [nil, "incomplete"]
+        valid_codex_response_id?(response["id"]) and response["status"] == "incomplete"
 
       _other ->
         false
@@ -889,6 +895,18 @@ defmodule Kodo.LLM.SafeReqAdapter do
   end
 
   defp valid_codex_terminal_event?(_event), do: false
+
+  defp codex_terminal_event?(%{data: data} = event) when is_map(data) do
+    (event[:event] || data["event"] || data["type"]) in [
+      "response.completed",
+      "response.done",
+      "response.incomplete"
+    ]
+  end
+
+  defp codex_terminal_event?(_event), do: false
+
+  defp valid_codex_response_id?(id), do: is_binary(id) and id != ""
 
   defp validate_codex_tool_streams(events) do
     state =
