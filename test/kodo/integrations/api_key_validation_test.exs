@@ -43,9 +43,19 @@ defmodule Kodo.Integrations.APIKeyValidationTest do
         {"anthropic", "invalid-", "invalid", "invalid_credentials"},
         {"anthropic", "workspace-required-", "unavailable", "workspace_selection_required"},
         {"anthropic", "permission-", "unavailable", "provider_unavailable"},
+        {"anthropic", "timeout-", "unavailable", "timeout"},
+        {"anthropic", "tls-", "unavailable", "tls_error"},
+        {"anthropic", "redirect-", "unavailable", "provider_unavailable"},
+        {"anthropic", "rate-limited-", "unavailable", "rate_limited"},
+        {"anthropic", "provider-error-", "unavailable", "provider_unavailable"},
         {"openrouter", "valid-", "valid", nil},
         {"openrouter", "invalid-", "invalid", "invalid_credentials"},
-        {"openrouter", "permission-", "unavailable", "provider_unavailable"}
+        {"openrouter", "permission-", "unavailable", "provider_unavailable"},
+        {"openrouter", "timeout-", "unavailable", "timeout"},
+        {"openrouter", "tls-", "unavailable", "tls_error"},
+        {"openrouter", "redirect-", "unavailable", "provider_unavailable"},
+        {"openrouter", "rate-limited-", "unavailable", "rate_limited"},
+        {"openrouter", "provider-error-", "unavailable", "provider_unavailable"}
       ] do
     test "classifies #{provider} #{prefix} responses", %{scope: scope} do
       {:ok, integration} =
