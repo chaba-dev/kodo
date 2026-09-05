@@ -72,7 +72,7 @@ defmodule Kodo.LLM do
     adapter_opts = Keyword.delete(opts, :adapter)
 
     with :ok <- reject_credential_options(adapter_opts),
-         {:ok, credential} <- CredentialResolver.resolve(scope, model, reference) do
+         {:ok, credential} <- resolve_credential(scope, model, reference) do
       adapter.generate(model, messages, tools, credential, adapter_opts)
     end
   end
@@ -90,7 +90,7 @@ defmodule Kodo.LLM do
     adapter_opts = Keyword.delete(opts, :adapter)
 
     with :ok <- reject_credential_options(adapter_opts),
-         {:ok, credential} <- CredentialResolver.resolve(scope, model, reference) do
+         {:ok, credential} <- resolve_credential(scope, model, reference) do
       adapter.generate_object(model, messages, schema, credential, adapter_opts)
     end
   end
@@ -101,6 +101,22 @@ defmodule Kodo.LLM do
     case ReqLLM.model(model) do
       {:ok, %LLMDB.Model{} = resolved} -> {:ok, resolved}
       {:error, _reason} -> {:error, :malformed_model}
+    end
+  end
+
+  defp resolve_credential(scope, model, reference) do
+    case CredentialResolver.resolve(scope, model, reference) do
+      {:error, reason}
+      when reason in [
+             :integration_disconnected,
+             :integration_reauthorization_required,
+             :integration_invalid,
+             :stale_credential_generation
+           ] ->
+        {:error, ProviderError.from_integration(reason, model)}
+
+      result ->
+        result
     end
   end
 

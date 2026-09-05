@@ -6,6 +6,7 @@ defmodule Kodo.LLM.ProviderError do
 
   @type kind ::
           :integration_required
+          | :integration_changed
           | :authentication_rejected
           | :billing_required
           | :access_restricted
@@ -26,7 +27,8 @@ defmodule Kodo.LLM.ProviderError do
              :integration_not_found,
              :integration_disconnected,
              :integration_reauthorization_required,
-             :integration_invalid
+             :integration_invalid,
+             :stale_credential_generation
            ] do
     provider = Atom.to_string(model.provider)
 
@@ -41,6 +43,10 @@ defmodule Kodo.LLM.ProviderError do
 
   def guidance(%__MODULE__{kind: :integration_required, provider: provider}),
     do: "Connect the #{provider_name(provider)} integration, then retry the turn."
+
+  def guidance(%__MODULE__{kind: :integration_changed}),
+    do:
+      "The provider credential changed during this turn. Retry the turn with its current connection."
 
   def guidance(%__MODULE__{kind: :authentication_rejected}),
     do: "Replace or reconnect this provider credential, then retry the turn."
@@ -62,6 +68,7 @@ defmodule Kodo.LLM.ProviderError do
 
   defp integration_kind(:integration_invalid), do: :authentication_rejected
   defp integration_kind(:integration_reauthorization_required), do: :authentication_rejected
+  defp integration_kind(:stale_credential_generation), do: :integration_changed
   defp integration_kind(_reason), do: :integration_required
 
   defp billing_path("openai_codex"), do: :subscription

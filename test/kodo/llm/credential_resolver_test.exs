@@ -56,7 +56,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
                %{"api_key" => "replacement"}
              )
 
-    assert {:error, :stale_credential_generation} =
+    assert {:error, %Kodo.LLM.ProviderError{} = error} =
              LLM.generate(
                context.scope,
                resolved_model,
@@ -66,6 +66,9 @@ defmodule Kodo.LLM.CredentialResolverTest do
                adapter: Kodo.Test.FakeLLM,
                timeout: 1_000
              )
+
+    assert error.kind == :integration_changed
+    assert Kodo.LLM.ProviderError.guidance(error) =~ "Retry the turn"
   end
 
   test "the public facade returns actionable missing-provider feedback" do
