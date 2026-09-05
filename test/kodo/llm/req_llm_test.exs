@@ -1007,6 +1007,56 @@ defmodule Kodo.LLM.ReqLLMTest do
     refute inspect(error) =~ private_detail
   end
 
+  test "drops unreviewed OpenAI builtin payloads" do
+    private_detail = "private-provider-detail"
+
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body: %{
+            "id" => "resp_builtin",
+            "object" => "response",
+            "model" => "gpt-4o-mini",
+            "output" => [
+              %{
+                "type" => "web_search_call",
+                "id" => "search-1",
+                "status" => "completed",
+                "action" => %{"type" => "search", "query" => "kodo"},
+                "debug" => %{"request_dump" => private_detail}
+              },
+              %{
+                "type" => "message",
+                "role" => "assistant",
+                "content" => [
+                  %{"type" => "output_text", "text" => "answer", "annotations" => []}
+                ]
+              }
+            ],
+            "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+          }
+        }
+      ])
+
+    options =
+      []
+      |> Adapter.request_options(@credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+
+    assert {:ok, response} =
+             ReqLLM.generate_text(
+               ReqLLM.model!("openai:gpt-4o-mini"),
+               [%{"role" => "user", "content" => "search"}],
+               options
+             )
+
+    assert [%{id: "search-1"} = call] = ReqLLM.Response.tool_calls(response)
+    assert ReqLLM.ToolCall.builtin?(call)
+    assert ReqLLM.ToolCall.args_map(call) == %{}
+    refute inspect(response.message) =~ private_detail
+  end
+
   test "rejects credentials reconstructed from Codex SSE output" do
     credential = %{
       @credential
@@ -1266,6 +1316,120 @@ defmodule Kodo.LLM.ReqLLMTest do
       end)
 
     refute log =~ private_marker
+  end
+
+  test "drops unreviewed Codex builtin payloads" do
+    private_detail = "private-provider-detail"
+
+    added =
+      Jason.encode!(%{
+        "type" => "response.output_item.added",
+        "output_index" => 0,
+        "item" => %{"type" => "web_search_call", "id" => "search-1"}
+      })
+
+    done =
+      Jason.encode!(%{
+        "type" => "response.output_item.done",
+        "output_index" => 0,
+        "item" => %{
+          "type" => "web_search_call",
+          "id" => "search-1",
+          "status" => "completed",
+          "action" => %{"type" => "search", "query" => "kodo"},
+          "debug" => %{"request_dump" => private_detail}
+        }
+      })
+
+    completed =
+      Jason.encode!(%{
+        "type" => "response.completed",
+        "response" => %{
+          "id" => "resp_builtin",
+          "model" => "gpt-5.4",
+          "status" => "completed",
+          "output" => [],
+          "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+        }
+      })
+
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body:
+            "event: response.output_item.added\ndata: #{added}\n\n" <>
+              "event: response.output_item.done\ndata: #{done}\n\n" <>
+              "event: response.completed\ndata: #{completed}\n\n",
+          content_type: "text/event-stream"
+        }
+      ])
+
+    credential = %{
+      @credential
+      | provider: "openai_codex",
+        authentication_type: "oauth",
+        billing_path: :subscription,
+        token: "request-local-access",
+        account_id: "request-local-account"
+    }
+
+    options =
+      []
+      |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+
+    assert {:ok, response} =
+             ReqLLM.generate_text(
+               ReqLLM.model!("openai_codex:gpt-5.4"),
+               [%{"role" => "user", "content" => "search"}],
+               options
+             )
+
+    assert [%{id: "search-1"} = call] = ReqLLM.Response.tool_calls(response)
+    assert ReqLLM.ToolCall.builtin?(call)
+    assert ReqLLM.ToolCall.args_map(call) == %{}
+    refute inspect(response.message) =~ private_detail
+  end
+
+  test "rejects Codex SSE that ends before a terminal event" do
+    delta =
+      Jason.encode!(%{
+        "type" => "response.output_text.delta",
+        "delta" => "Partial answer"
+      })
+
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body: "event: response.output_text.delta\ndata: #{delta}\n\n",
+          content_type: "text/event-stream"
+        }
+      ])
+
+    credential = %{
+      @credential
+      | provider: "openai_codex",
+        authentication_type: "oauth",
+        billing_path: :subscription,
+        token: "request-local-access",
+        account_id: "request-local-account"
+    }
+
+    options =
+      []
+      |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+
+    assert {:error, error} =
+             ReqLLM.generate_text(
+               ReqLLM.model!("openai_codex:gpt-5.4"),
+               [%{"role" => "user", "content" => "answer"}],
+               options
+             )
+
+    refute inspect(error) =~ "Partial answer"
   end
 
   test "accepts Codex native structured output" do

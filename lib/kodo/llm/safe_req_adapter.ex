@@ -512,12 +512,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
     arguments = ReqLLM.ToolCall.args_map(call)
 
     if is_binary(name) and name != "" and is_map(arguments) do
-      function = %{name: name, arguments: Jason.encode!(arguments)}
-
-      function =
-        if ReqLLM.ToolCall.builtin?(call),
-          do: Map.put(function, :builtin?, true),
-          else: function
+      function = canonical_tool_function(call, name, arguments)
 
       {:ok, %{call | function: function}}
     else
@@ -526,6 +521,17 @@ defmodule Kodo.LLM.SafeReqAdapter do
   end
 
   defp canonicalize_tool_call(_call), do: :error
+
+  # ReqLLM intentionally preserves the full payload of provider-executed
+  # builtins. Kodo does not replay these calls, so retain only their identity
+  # and marker rather than persisting unreviewed provider fields.
+  defp canonical_tool_function(call, name, arguments) do
+    if ReqLLM.ToolCall.builtin?(call) do
+      %{name: name, arguments: "{}", builtin?: true}
+    else
+      %{name: name, arguments: Jason.encode!(arguments)}
+    end
+  end
 
   defp canonical_reasoning_provider_data(%{provider: :openrouter, provider_data: data})
        when is_map(data) do
@@ -767,6 +773,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
     with true <- event_stream_response?(response),
          {:ok, events} <- decode_codex_sse(response.body),
          false <- credential_present?(events, secrets),
+         :ok <- validate_codex_terminal_event(events),
          :ok <- validate_codex_tool_streams(events) do
       {:ok, response}
     else
@@ -844,6 +851,33 @@ defmodule Kodo.LLM.SafeReqAdapter do
   end
 
   defp decode_codex_sse(_body), do: {:error, :invalid_provider_response}
+
+  # ReqLLM's buffered Codex decoder can construct a successful response from
+  # deltas alone. Require the provider's terminal envelope so a truncated
+  # transport cannot be mistaken for a complete model response.
+  defp validate_codex_terminal_event(events) do
+    if Enum.any?(events, &valid_codex_terminal_event?/1),
+      do: :ok,
+      else: {:error, :invalid_provider_response}
+  end
+
+  defp valid_codex_terminal_event?(%{data: data} = event) when is_map(data) do
+    type = event[:event] || data["event"] || data["type"]
+    response = data["response"]
+
+    case {type, response} do
+      {type, %{} = response} when type in ["response.completed", "response.done"] ->
+        response["status"] in [nil, "completed"]
+
+      {"response.incomplete", %{} = response} ->
+        response["status"] in [nil, "incomplete"]
+
+      _other ->
+        false
+    end
+  end
+
+  defp valid_codex_terminal_event?(_event), do: false
 
   defp validate_codex_tool_streams(events) do
     state =
