@@ -201,8 +201,9 @@ action does not run model inference or introduce a separately billed probe.
 | Anthropic
 | Successful metadata response for a standard workspace-scoped Console key
 | Explicit authentication failure for that supported key type
-| `403`, organization/Admin credential requiring workspace selection, network
-  or TLS failure, timeout, redirect, `429`, or `5xx`
+| `400 invalid_request_error` from an unscoped identity-linked key requiring
+  workspace selection, `403`, network or TLS failure, timeout, redirect, `429`,
+  or `5xx`
 
 | OpenRouter
 | Successful key metadata response
@@ -212,9 +213,11 @@ action does not run model inference or introduce a separately billed probe.
 |===
 
 Phase 2 supports standard workspace-scoped Anthropic Console API keys only.
-Organization/Admin credentials that require an explicit workspace selector are
-higher privilege than inference needs and return actionable unsupported-
-credential guidance rather than adding workspace selection in this RFD.
+Unscoped identity-linked Console keys that require an explicit workspace
+selector return actionable guidance to create a workspace-scoped key instead.
+Anthropic Admin keys are a separate, higher-privilege credential class intended
+for the Admin API; they are not supported for normal model inference and adding
+a workspace selector would not make them a supported key type.
 
 A successful probe marks the integration `valid`. Only the provider-specific
 invalid outcomes above mark it `invalid`; Kodo never infers invalidity from a
