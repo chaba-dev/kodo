@@ -20,7 +20,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert has_element?(view, "#settings-nav-account")
     assert has_element?(view, "#openai-integration #openai-connect")
     assert has_element?(view, "#openai-status", "Not connected")
-    refute has_element?(view, "#openai-status", "Validation")
+    refute has_element?(view, "#openai-status", "Access")
     assert has_element?(view, "#openai-status[aria-live='polite'][aria-atomic='true']")
   end
 
@@ -60,7 +60,8 @@ defmodule KodoWeb.IntegrationsLiveTest do
     refute inspect(:sys.get_state(view.pid)) =~ secret
     refute has_element?(view, "#openai-api-key-panel")
     assert has_element?(view, "#openai-status", "Connected")
-    assert has_element?(view, "#openai-status", "Validation unavailable")
+    assert has_element?(view, "#openai-status", "Could not check")
+    assert has_element?(view, "#openai-access-detail", "connection remains saved")
 
     assert {:ok, integration} = Integrations.get_integration_by_provider(scope, "openai")
     assert {:ok, %{"api_key" => ^secret}} = CredentialEncryption.decrypt(integration)
@@ -77,11 +78,42 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert_receive message = {:integration_validation_finished, _id, _generation}
     send(view.pid, message)
     _ = :sys.get_state(view.pid)
-    assert has_element?(view, "#openai-status", "Validated")
+    assert has_element?(view, "#openai-status", "Working")
+    refute has_element?(view, "#openai-validation-progress")
+  end
+
+  test "checks access again without re-entering or exposing the saved key", %{
+    conn: conn,
+    scope: scope
+  } do
+    Application.put_env(:kodo, :fake_openai_validation_test_pid, self())
+
+    on_exit(fn -> Application.delete_env(:kodo, :fake_openai_validation_test_pid) end)
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
+    {:ok, _integration} = connect_openai(scope, "blocking-manual-check")
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+
+    view |> element("#openai-check-access") |> render_click()
+
+    assert_receive {:validation_probe_started, probe, validation_task}
+    assert has_element?(view, "#openai-check-access[disabled]", "Checking…")
+    assert has_element?(view, "#openai-validation-progress")
+    refute inspect(:sys.get_state(view.pid)) =~ "blocking-manual-check"
+
+    validation_ref = Process.monitor(validation_task)
+    send(probe, {:finish_validation_probe, {:ok, 200, %{"data" => []}}})
+    assert_receive message = {:integration_validation_finished, _id, _generation}
+    send(view.pid, message)
+    assert_receive {:DOWN, ^validation_ref, :process, ^validation_task, _reason}
+    _ = :sys.get_state(view.pid)
+
+    assert has_element?(view, "#openai-status", "Working")
+    assert has_element?(view, "#openai-check-access:not([disabled])", "Check access")
     refute has_element?(view, "#openai-validation-progress")
   end
 
   test "replaces a key and clears the form after success", %{conn: conn, scope: scope} do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
     {:ok, original} = connect_openai(scope, "first-secret")
     {:ok, view, _html} = live(conn, ~p"/integrations?action=replace")
 
@@ -89,6 +121,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "replacement-secret"}})
     |> render_submit()
 
+    assert_receive {:integration_validation_finished, _id, _generation}
     assert {:ok, replaced} = Integrations.get_integration_by_provider(scope, "openai")
     assert replaced.credential_generation == original.credential_generation + 1
 
@@ -102,6 +135,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     conn: conn,
     scope: scope
   } do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
     {:ok, original} = connect_openai(scope, "first-secret")
 
     {:ok, disconnected} =
@@ -113,6 +147,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "valid-reconnected"}})
     |> render_submit()
 
+    assert_receive {:integration_validation_finished, _id, _generation}
     assert {:ok, reconnected} = Integrations.get_integration(scope, original.id)
     assert reconnected.connection_status == "connected"
     assert reconnected.credential_generation == disconnected.credential_generation + 1
@@ -230,11 +265,13 @@ defmodule KodoWeb.IntegrationsLiveTest do
   end
 
   test "remains alive when an older validation finishes after a newer task", %{
-    conn: conn
+    conn: conn,
+    scope: scope
   } do
     Application.put_env(:kodo, :fake_openai_validation_test_pid, self())
 
     on_exit(fn -> Application.delete_env(:kodo, :fake_openai_validation_test_pid) end)
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
 
     {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
 
@@ -246,8 +283,14 @@ defmodule KodoWeb.IntegrationsLiveTest do
     render_patch(view, ~p"/integrations?action=replace")
 
     view
-    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "valid-second"}})
+    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "blocking-second"}})
     |> render_submit()
+
+    assert_receive {:validation_probe_started, second_probe, second_validation}
+    second_validation_ref = Process.monitor(second_validation)
+    send(second_probe, {:finish_validation_probe, {:ok, 200, %{"data" => []}}})
+    assert_receive {:integration_validation_finished, _id, _generation}
+    assert_receive {:DOWN, ^second_validation_ref, :process, ^second_validation, _reason}
 
     send(first_probe, {:finish_validation_probe, {:ok, 200, %{"data" => []}}})
     first_validation_ref = Process.monitor(first_validation)
@@ -285,7 +328,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     send(view.pid, message)
     _ = :sys.get_state(view.pid)
 
-    assert has_element?(view, "#openai-status", "Validated")
+    assert has_element?(view, "#openai-status", "Working")
     refute has_element?(view, "#openai-validation-progress")
 
     first_validation_ref = Process.monitor(first_validation)
@@ -358,7 +401,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     {:ok, view, _html} = live(conn, ~p"/integrations")
 
     assert has_element?(view, "#openai-status", "Disconnected")
-    refute has_element?(view, "#openai-status", "Validation")
+    refute has_element?(view, "#openai-status", "Access")
   end
 
   defp connect_openai(scope, key) do

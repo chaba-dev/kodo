@@ -62,7 +62,7 @@ defmodule KodoWeb.IntegrationsLive do
       {:noreply,
        socket
        |> start_validation(integration)
-       |> put_flash(:info, "OpenAI API key saved. Validation is pending.")
+       |> put_flash(:info, "OpenAI API key saved. Checking access.")
        |> push_patch(to: ~p"/integrations")}
     else
       false ->
@@ -79,6 +79,22 @@ defmodule KodoWeb.IntegrationsLive do
 
       {:error, _reason} ->
         {:noreply, put_flash(socket, :error, "The API key could not be saved.")}
+    end
+  end
+
+  def handle_event("check_access", _params, socket) do
+    socket = load_integration(socket)
+
+    case socket.assigns.integration do
+      %{connection_status: "connected"} = integration ->
+        if validation_running?(socket.assigns.validation_tasks, integration) do
+          {:noreply, socket}
+        else
+          {:noreply, start_validation(socket, integration)}
+        end
+
+      _integration ->
+        stale_action(socket)
     end
   end
 
@@ -276,10 +292,20 @@ defmodule KodoWeb.IntegrationsLive do
   defp status_label(%{connection_status: "reauthorization_required"}), do: "Action required"
   defp status_label(%{connection_status: "disconnected"}), do: "Disconnected"
 
-  defp validation_label(%{validation_status: "unverified"}), do: "Pending validation"
-  defp validation_label(%{validation_status: "valid"}), do: "Validated"
-  defp validation_label(%{validation_status: "invalid"}), do: "Invalid credential"
-  defp validation_label(%{validation_status: "unavailable"}), do: "Validation unavailable"
+  defp validation_label(%{validation_status: "unverified"}), do: "Not checked"
+  defp validation_label(%{validation_status: "valid"}), do: "Working"
+  defp validation_label(%{validation_status: "invalid"}), do: "Not working"
+  defp validation_label(%{validation_status: "unavailable"}), do: "Could not check"
+
+  defp validation_detail(%{validation_status: "invalid"}) do
+    "The provider rejected these credentials. Update the connection and check access again."
+  end
+
+  defp validation_detail(%{validation_status: "unavailable"}) do
+    "We couldn't confirm access right now. The connection remains saved. Try again."
+  end
+
+  defp validation_detail(_integration), do: nil
 
   @impl true
   def render(assigns) do
@@ -323,8 +349,7 @@ defmodule KodoWeb.IntegrationsLive do
             class="flex items-center gap-2 text-xs font-medium text-zinc-500"
             role="status"
           >
-            <span class="size-2 animate-pulse rounded-full bg-amber-500"></span>
-            Checking OpenAI connection…
+            <span class="size-2 animate-pulse rounded-full bg-amber-500"></span> Checking access…
           </p>
 
           <section
@@ -359,12 +384,19 @@ defmodule KodoWeb.IntegrationsLive do
                       </dd>
                     </div>
                     <div :if={integration_connected?(@integration)}>
-                      <dt class="text-zinc-500">Validation</dt>
+                      <dt class="text-zinc-500">Access</dt>
                       <dd class="mt-0.5 font-semibold text-zinc-900 dark:text-zinc-100">
                         {validation_label(@integration)}
                       </dd>
                     </div>
                   </dl>
+                  <p
+                    :if={validation_detail(@integration)}
+                    id="openai-access-detail"
+                    class="mt-2 max-w-xl text-xs leading-5 text-zinc-500 dark:text-zinc-400"
+                  >
+                    {validation_detail(@integration)}
+                  </p>
                 </div>
               </div>
 
@@ -377,7 +409,31 @@ defmodule KodoWeb.IntegrationsLive do
                   Connect
                 </.link>
               </div>
-              <div :if={integration_connected?(@integration)} class="flex shrink-0 gap-2">
+              <div
+                :if={integration_connected?(@integration)}
+                class="flex shrink-0 flex-wrap justify-end gap-2"
+              >
+                <button
+                  id="openai-check-access"
+                  type="button"
+                  phx-click="check_access"
+                  disabled={validation_running?(@validation_tasks, @integration)}
+                  aria-describedby="openai-status"
+                  class="inline-flex items-center gap-1.5 rounded-xl border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:text-zinc-950 disabled:cursor-wait disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-white"
+                >
+                  <.icon
+                    name="hero-arrow-path"
+                    class={[
+                      "size-4",
+                      validation_running?(@validation_tasks, @integration) &&
+                        "motion-safe:animate-spin"
+                    ]}
+                  />
+                  {if(validation_running?(@validation_tasks, @integration),
+                    do: "Checking…",
+                    else: "Check access"
+                  )}
+                </button>
                 <.link
                   id="openai-replace"
                   patch={~p"/integrations?action=replace"}

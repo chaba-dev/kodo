@@ -17,7 +17,7 @@ defmodule Kodo.Integrations.OpenAIValidation do
 
   def start(
         %Scope{} = scope,
-        %Integration{id: integration_id, credential_generation: generation}
+        %{id: integration_id, credential_generation: generation}
       ) do
     Task.Supervisor.async_nolink(Kodo.ControlPlaneTaskSupervisor, fn ->
       case validate(scope, integration_id, generation) do
