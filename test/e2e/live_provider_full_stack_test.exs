@@ -3,6 +3,7 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
 
   alias Kodo.Sessions
   alias Kodo.Integrations
+  alias Kodo.Agent.ModelSettings
   alias Kodo.Test.FullStackCase, as: Stack
 
   import Kodo.AccountsFixtures
@@ -44,6 +45,13 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
     {:ok, _integration} =
       Integrations.connect(scope, provider, "api_key", %{"api_key" => api_key})
 
+    # The live smoke must keep every agent role on the selected provider. A
+    # session-level model only overrides primary and would otherwise let search
+    # or review silently exercise the profile's OpenAI default.
+    for role <- [:primary, :search, :review] do
+      {:ok, _override} = ModelSettings.put_user_override(scope, role, %{model: model})
+    end
+
     # Remove the ambient key after installing the test user's integration so
     # this smoke test exercises the same request-local credential path as production.
     ambient_keys =
@@ -62,7 +70,15 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
 
     token = Kodo.Accounts.generate_user_agent_token(user)
     runner = Stack.start_runner!(stack.base_url, workspace, token)
-    %{model: model, stack: stack, workspace: workspace, runner: runner, token: token}
+
+    %{
+      model: model,
+      provider: provider,
+      stack: stack,
+      workspace: workspace,
+      runner: runner,
+      token: token
+    }
   end
 
   test "a configured provider edits and verifies through the real runner", context do
@@ -82,6 +98,17 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
     session_id = created["session"]["id"]
     on_exit(fn -> Stack.terminate_session!(session_id) end)
     Stack.subscribe_session!(session_id)
+
+    mapping =
+      session_id
+      |> Sessions.events_after()
+      |> hd()
+      |> then(& &1.payload["model_mapping"])
+
+    assert Enum.all?(mapping["roles"], fn {_role, role_mapping} ->
+             role_mapping["model"] == context.model and
+               role_mapping["provider"] == context.provider
+           end)
 
     assert %{"status" => "running"} =
              Stack.post!(

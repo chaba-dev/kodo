@@ -134,6 +134,9 @@ defmodule Kodo.Test.FullStackCase do
       {:session_event, %{type: "session_failed", payload: payload}} ->
         flunk("session #{session_id} failed: #{inspect(payload)}")
 
+      {:session_event, %{type: "provider_action_required", payload: payload}} ->
+        flunk("session #{session_id} requires provider action: #{inspect(payload)}")
+
       {:session_event, %{type: "session_status_changed", payload: %{"status" => status}}}
       when status in ["failed", "cancelled"] ->
         flunk("session #{session_id} reached #{status}")
