@@ -60,7 +60,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     refute inspect(:sys.get_state(view.pid)) =~ secret
     refute has_element?(view, "#openai-api-key-panel")
     assert has_element?(view, "#openai-status", "Connected")
-    assert has_element?(view, "#openai-status", "Could not check")
+    assert has_element?(view, "#openai-status", "Unable to verify")
     assert has_element?(view, "#openai-access-detail", "connection remains saved")
 
     assert {:ok, integration} = Integrations.get_integration_by_provider(scope, "openai")
@@ -78,8 +78,23 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert_receive message = {:integration_validation_finished, _id, _generation}
     send(view.pid, message)
     _ = :sys.get_state(view.pid)
-    assert has_element?(view, "#openai-status", "Working")
+    assert has_element?(view, "#openai-status dd.text-green-700", "Valid")
     refute has_element?(view, "#openai-validation-progress")
+  end
+
+  test "shows a rejected credential as invalid in red", %{conn: conn, scope: scope} do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
+    {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
+
+    view
+    |> form("#openai-api-key-form", %{"integration" => %{"api_key" => "invalid-live-secret"}})
+    |> render_submit()
+
+    assert_receive message = {:integration_validation_finished, _id, _generation}
+    send(view.pid, message)
+    _ = :sys.get_state(view.pid)
+
+    assert has_element?(view, "#openai-status dd.text-red-700", "Invalid")
   end
 
   test "checks access again without re-entering or exposing the saved key", %{
@@ -107,7 +122,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert_receive {:DOWN, ^validation_ref, :process, ^validation_task, _reason}
     _ = :sys.get_state(view.pid)
 
-    assert has_element?(view, "#openai-status", "Working")
+    assert has_element?(view, "#openai-status dd.text-green-700", "Valid")
     assert has_element?(view, "#openai-check-access:not([disabled])", "Check access")
     refute has_element?(view, "#openai-validation-progress")
   end
@@ -328,7 +343,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     send(view.pid, message)
     _ = :sys.get_state(view.pid)
 
-    assert has_element?(view, "#openai-status", "Working")
+    assert has_element?(view, "#openai-status dd.text-green-700", "Valid")
     refute has_element?(view, "#openai-validation-progress")
 
     first_validation_ref = Process.monitor(first_validation)

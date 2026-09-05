@@ -293,9 +293,17 @@ defmodule KodoWeb.IntegrationsLive do
   defp status_label(%{connection_status: "disconnected"}), do: "Disconnected"
 
   defp validation_label(%{validation_status: "unverified"}), do: "Not checked"
-  defp validation_label(%{validation_status: "valid"}), do: "Working"
-  defp validation_label(%{validation_status: "invalid"}), do: "Not working"
-  defp validation_label(%{validation_status: "unavailable"}), do: "Could not check"
+  defp validation_label(%{validation_status: "valid"}), do: "Valid"
+  defp validation_label(%{validation_status: "invalid"}), do: "Invalid"
+  defp validation_label(%{validation_status: "unavailable"}), do: "Unable to verify"
+
+  defp validation_class(%{validation_status: "valid"}),
+    do: "text-green-700 dark:text-green-400"
+
+  defp validation_class(%{validation_status: "invalid"}),
+    do: "text-red-700 dark:text-red-400"
+
+  defp validation_class(_integration), do: "text-zinc-900 dark:text-zinc-100"
 
   defp validation_detail(%{validation_status: "invalid"}) do
     "The provider rejected these credentials. Update the connection and check access again."
@@ -385,7 +393,7 @@ defmodule KodoWeb.IntegrationsLive do
                     </div>
                     <div :if={integration_connected?(@integration)}>
                       <dt class="text-zinc-500">Access</dt>
-                      <dd class="mt-0.5 font-semibold text-zinc-900 dark:text-zinc-100">
+                      <dd class={["mt-0.5 font-semibold", validation_class(@integration)]}>
                         {validation_label(@integration)}
                       </dd>
                     </div>
