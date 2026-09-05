@@ -336,16 +336,18 @@ defmodule Kodo.LLM.SafeReqAdapter do
   defp canonicalize_assistant_metadata(_response), do: :error
 
   defp canonicalize_message(%ReqLLM.Message{reasoning_details: nil} = message) do
-    with {:ok, content} <- canonicalize_content(message.content) do
-      {:ok, %{message | content: content}}
+    with {:ok, content} <- canonicalize_content(message.content),
+         {:ok, metadata} <- canonicalize_message_metadata(message.metadata) do
+      {:ok, %{message | content: content, metadata: metadata}}
     end
   end
 
   defp canonicalize_message(%ReqLLM.Message{reasoning_details: details} = message)
        when is_list(details) do
     with {:ok, content} <- canonicalize_content(message.content),
-         {:ok, details} <- canonicalize_reasoning_details(details) do
-      {:ok, %{message | content: content, reasoning_details: details}}
+         {:ok, details} <- canonicalize_reasoning_details(details),
+         {:ok, metadata} <- canonicalize_message_metadata(message.metadata) do
+      {:ok, %{message | content: content, reasoning_details: details, metadata: metadata}}
     end
   end
 
@@ -379,26 +381,101 @@ defmodule Kodo.LLM.SafeReqAdapter do
   defp canonicalize_reasoning_detail(_detail), do: :error
 
   defp canonicalize_content(content) when is_list(content) do
-    if Enum.all?(content, &valid_content_part?/1) do
-      {:ok, Enum.map(content, &%{&1 | metadata: %{}})}
-    else
-      :error
+    Enum.reduce_while(content, {:ok, []}, fn part, {:ok, acc} ->
+      case canonicalize_content_part(part) do
+        {:ok, part} -> {:cont, {:ok, [part | acc]}}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      :error -> :error
     end
   end
 
   defp canonicalize_content(_content), do: :error
 
-  defp valid_content_part?(%ReqLLM.Message.ContentPart{} = part) do
-    part.type in [:text, :image_url, :video_url, :image, :file, :thinking] and
-      optional_binary?(part.text) and optional_binary?(part.url) and
-      optional_binary?(part.data) and optional_binary?(part.file_id) and
-      optional_binary?(part.media_type) and optional_binary?(part.filename) and
-      is_map(part.metadata)
+  defp canonicalize_content_part(%ReqLLM.Message.ContentPart{} = part) do
+    if part.type in [:text, :image_url, :video_url, :image, :file, :thinking] and
+         optional_binary?(part.text) and optional_binary?(part.url) and
+         optional_binary?(part.data) and optional_binary?(part.file_id) and
+         optional_binary?(part.media_type) and optional_binary?(part.filename) and
+         is_map(part.metadata) do
+      {:ok, %{part | metadata: %{}}}
+    else
+      :error
+    end
   end
 
-  defp valid_content_part?(_part), do: false
+  defp canonicalize_content_part(%{type: :object, object: object}) when is_map(object) do
+    {:ok, ReqLLM.Message.ContentPart.text(Jason.encode!(object))}
+  end
+
+  defp canonicalize_content_part(_part), do: :error
 
   defp optional_binary?(value), do: is_nil(value) or is_binary(value)
+
+  defp canonicalize_message_metadata(metadata) when is_map(metadata) do
+    with {:ok, response_id} <- optional_metadata_string(metadata, :response_id),
+         {:ok, phase} <- optional_assistant_phase(metadata),
+         {:ok, phase_items} <- optional_phase_items(metadata) do
+      {:ok,
+       %{}
+       |> maybe_put_metadata(:response_id, response_id)
+       |> maybe_put_metadata(:phase, phase)
+       |> maybe_put_metadata(:phase_items, phase_items)}
+    end
+  end
+
+  defp canonicalize_message_metadata(_metadata), do: :error
+
+  defp optional_metadata_string(metadata, key) do
+    case fetch_metadata(metadata, key) do
+      :error -> {:ok, nil}
+      {:ok, value} when is_binary(value) and value != "" -> {:ok, value}
+      {:ok, _invalid} -> :error
+    end
+  end
+
+  defp optional_assistant_phase(metadata) do
+    case fetch_metadata(metadata, :phase) do
+      :error -> {:ok, nil}
+      {:ok, phase} when phase in ["commentary", "final_answer"] -> {:ok, phase}
+      {:ok, _invalid} -> :error
+    end
+  end
+
+  defp optional_phase_items(metadata) do
+    case fetch_metadata(metadata, :phase_items) do
+      :error -> {:ok, nil}
+      {:ok, items} when is_list(items) -> canonicalize_phase_items(items)
+      {:ok, _invalid} -> :error
+    end
+  end
+
+  defp canonicalize_phase_items(items) do
+    if Enum.all?(items, &valid_phase_item?/1), do: {:ok, items}, else: :error
+  end
+
+  defp valid_phase_item?(%{"phase" => phase, "content" => content})
+       when phase in ["commentary", "final_answer"] and is_list(content) do
+    Enum.all?(content, fn
+      %{"type" => "output_text", "text" => text} when is_binary(text) -> true
+      _invalid -> false
+    end)
+  end
+
+  defp valid_phase_item?(_item), do: false
+
+  defp fetch_metadata(metadata, key) do
+    case Map.fetch(metadata, key) do
+      :error -> Map.fetch(metadata, Atom.to_string(key))
+      result -> result
+    end
+  end
+
+  defp maybe_put_metadata(metadata, _key, nil), do: metadata
+  defp maybe_put_metadata(metadata, key, value), do: Map.put(metadata, key, value)
 
   defp canonical_reasoning_provider_data(%{provider: :openrouter, provider_data: data})
        when is_map(data) do
@@ -645,6 +722,10 @@ defmodule Kodo.LLM.SafeReqAdapter do
     else
       _invalid -> {:error, :invalid_provider_response}
     end
+  rescue
+    _exception -> {:error, :invalid_provider_response}
+  catch
+    _kind, _reason -> {:error, :invalid_provider_response}
   end
 
   defp decode_success(request, %Req.Response{} = response, provider, _secrets) do
@@ -715,11 +796,17 @@ defmodule Kodo.LLM.SafeReqAdapter do
   defp decode_codex_sse(_body), do: {:error, :invalid_provider_response}
 
   defp validate_codex_tool_streams(events) do
-    state = Enum.reduce(events, %{calls: MapSet.new(), fragments: %{}}, &track_codex_tool_event/2)
+    state =
+      Enum.reduce(
+        events,
+        %{calls: MapSet.new(), fragments: %{}, valid?: true},
+        &track_codex_tool_event/2
+      )
 
-    if Enum.all?(state.calls, &valid_codex_tool_arguments?(&1, state.fragments)),
-      do: :ok,
-      else: {:error, :invalid_provider_response}
+    if state.valid? and
+         Enum.all?(state.calls, &valid_codex_tool_arguments?(&1, state.fragments)),
+       do: :ok,
+       else: {:error, :invalid_provider_response}
   end
 
   defp track_codex_tool_event(%{data: data} = event, state) when is_map(data) do
@@ -731,19 +818,20 @@ defmodule Kodo.LLM.SafeReqAdapter do
         track_codex_tool_start(state, index, data["item"])
 
       "response.function_call.name.delta" ->
-        if is_binary(data["delta"]), do: add_codex_tool_call(state, index), else: state
+        if is_binary(data["delta"]) and data["delta"] != "",
+          do: add_codex_tool_call(state, index),
+          else: invalidate_codex_tool_stream(state)
 
       "response.function_call.delta" ->
-        if is_binary(get_in(data, ["delta", "name"])),
-          do: add_codex_tool_call(state, index),
-          else: state
+        track_codex_function_delta(state, index, data["delta"])
 
-      type
-      when type in [
-             "response.function_call_arguments.delta",
-             "response.function_call_arguments.done"
-           ] ->
-        append_codex_tool_arguments(state, index, data["delta"] || data["arguments"])
+      "response.function_call_arguments.delta" ->
+        append_codex_tool_arguments(state, index, data["delta"])
+
+      "response.function_call_arguments.done" ->
+        if Map.has_key?(state.fragments, index),
+          do: state,
+          else: append_codex_tool_arguments(state, index, data["arguments"] || data["delta"])
 
       "response.output_item.done" ->
         track_codex_tool_done(state, index, data["item"])
@@ -754,6 +842,21 @@ defmodule Kodo.LLM.SafeReqAdapter do
   end
 
   defp track_codex_tool_event(_event, state), do: state
+
+  defp track_codex_function_delta(state, index, delta) when is_map(delta) do
+    state =
+      if is_binary(delta["name"]) and delta["name"] != "",
+        do: add_codex_tool_call(state, index),
+        else: state
+
+    case delta["arguments"] do
+      nil -> state
+      arguments -> append_codex_tool_arguments(state, index, arguments)
+    end
+  end
+
+  defp track_codex_function_delta(state, _index, _delta),
+    do: invalidate_codex_tool_stream(state)
 
   defp track_codex_tool_start(state, index, %{"type" => "function_call", "name" => name})
        when is_binary(name) and name != "",
@@ -783,6 +886,8 @@ defmodule Kodo.LLM.SafeReqAdapter do
   end
 
   defp append_codex_tool_arguments(state, _index, _fragment), do: state
+
+  defp invalidate_codex_tool_stream(state), do: %{state | valid?: false}
 
   defp valid_codex_tool_arguments?(index, fragments) do
     with parts when is_list(parts) <- Map.get(fragments, index),

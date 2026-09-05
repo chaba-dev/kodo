@@ -911,6 +911,46 @@ defmodule Kodo.LLM.ReqLLMTest do
     refute inspect(error) =~ private_detail
   end
 
+  test "rejects malformed promoted message metadata" do
+    private_detail = "private-provider-detail"
+
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body: %{
+            "id" => %{"request_dump" => private_detail},
+            "object" => "response",
+            "model" => "gpt-4o-mini",
+            "output" => [
+              %{
+                "type" => "message",
+                "role" => "assistant",
+                "content" => [
+                  %{"type" => "output_text", "text" => "answer", "annotations" => []}
+                ]
+              }
+            ],
+            "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+          }
+        }
+      ])
+
+    options =
+      []
+      |> Adapter.request_options(@credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+
+    assert {:error, error} =
+             ReqLLM.generate_text(
+               ReqLLM.model!("openai:gpt-4o-mini"),
+               [%{"role" => "user", "content" => "answer"}],
+               options
+             )
+
+    refute inspect(error) =~ private_detail
+  end
+
   test "rejects credentials reconstructed from Codex SSE output" do
     credential = %{
       @credential
@@ -984,6 +1024,8 @@ defmodule Kodo.LLM.ReqLLMTest do
         account_id: "request-local-account"
     }
 
+    private_marker = "private-prompt-marker"
+
     added =
       Jason.encode!(%{
         "type" => "response.output_item.added",
@@ -991,16 +1033,22 @@ defmodule Kodo.LLM.ReqLLMTest do
         "item" => %{
           "type" => "function_call",
           "name" => "read_file",
-          "call_id" => credential.token
+          "call_id" => private_marker
         }
       })
-      |> String.replace("request-local-access", "\\u0072equest-local-access")
 
     delta =
       Jason.encode!(%{
         "type" => "response.function_call_arguments.delta",
         "output_index" => 0,
         "delta" => "{"
+      })
+
+    done =
+      Jason.encode!(%{
+        "type" => "response.function_call_arguments.done",
+        "output_index" => 0,
+        "arguments" => "}"
       })
 
     completed =
@@ -1018,6 +1066,7 @@ defmodule Kodo.LLM.ReqLLMTest do
     body =
       "event: response.output_item.added\ndata: #{added}\n\n" <>
         "event: response.function_call_arguments.delta\ndata: #{delta}\n\n" <>
+        "event: response.function_call_arguments.done\ndata: #{done}\n\n" <>
         "event: response.completed\ndata: #{completed}\n\n"
 
     safe_added =
@@ -1034,9 +1083,17 @@ defmodule Kodo.LLM.ReqLLMTest do
         "delta" => ~s({"path":"mix.exs"})
       })
 
+    safe_done =
+      Jason.encode!(%{
+        "type" => "response.function_call_arguments.done",
+        "output_index" => 0,
+        "arguments" => ~s({"path":"mix.exs"})
+      })
+
     safe_body =
       "event: response.output_item.added\ndata: #{safe_added}\n\n" <>
         "event: response.function_call_arguments.delta\ndata: #{safe_delta}\n\n" <>
+        "event: response.function_call_arguments.done\ndata: #{safe_done}\n\n" <>
         "event: response.completed\ndata: #{completed}\n\n"
 
     server =
@@ -1074,11 +1131,11 @@ defmodule Kodo.LLM.ReqLLMTest do
                    options
                  )
 
-        refute inspect(error) =~ credential.token
+        refute inspect(error) =~ private_marker
       end)
 
     refute_receive {:tool_diagnostic, [:req_llm, :tool_call_args_lost], _, _}
-    refute log =~ credential.token
+    refute log =~ private_marker
 
     assert {:ok, response} =
              ReqLLM.generate_text(
@@ -1090,6 +1147,123 @@ defmodule Kodo.LLM.ReqLLMTest do
     assert [%{id: "call-1"} = call] = ReqLLM.Response.tool_calls(response)
     assert ReqLLM.ToolCall.args_map(call) == %{"path" => "mix.exs"}
     refute_receive {:tool_diagnostic, [:req_llm, :tool_call_args_lost], _, _}
+  end
+
+  test "bounds malformed Codex event shapes before decoding" do
+    private_marker = "private-prompt-marker"
+
+    malformed =
+      Jason.encode!(%{
+        "type" => "response.function_call.delta",
+        "delta" => private_marker
+      })
+
+    completed =
+      Jason.encode!(%{
+        "type" => "response.completed",
+        "response" => %{
+          "id" => "resp_test",
+          "model" => "gpt-5.4",
+          "status" => "completed",
+          "output" => [],
+          "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+        }
+      })
+
+    body =
+      "event: response.function_call.delta\ndata: #{malformed}\n\n" <>
+        "event: response.completed\ndata: #{completed}\n\n"
+
+    server =
+      start_provider_server([
+        %{status: 200, body: body, content_type: "text/event-stream"}
+      ])
+
+    credential = %{
+      @credential
+      | provider: "openai_codex",
+        authentication_type: "oauth",
+        billing_path: :subscription,
+        token: "request-local-access",
+        account_id: "request-local-account"
+    }
+
+    options =
+      []
+      |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+
+    log =
+      capture_log(fn ->
+        assert {:error, error} =
+                 ReqLLM.generate_text(
+                   ReqLLM.model!("openai_codex:gpt-5.4"),
+                   [%{"role" => "user", "content" => "private prompt"}],
+                   options
+                 )
+
+        refute inspect(error) =~ private_marker
+      end)
+
+    refute log =~ private_marker
+  end
+
+  test "accepts Codex native structured output" do
+    delta =
+      Jason.encode!(%{
+        "type" => "response.output_text.delta",
+        "delta" => ~s({"answer":"ok"})
+      })
+
+    completed =
+      Jason.encode!(%{
+        "type" => "response.completed",
+        "response" => %{
+          "id" => "resp_object",
+          "model" => "gpt-5.4",
+          "status" => "completed",
+          "output" => [],
+          "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+        }
+      })
+
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body:
+            "event: response.output_text.delta\ndata: #{delta}\n\n" <>
+              "event: response.completed\ndata: #{completed}\n\n",
+          content_type: "text/event-stream"
+        }
+      ])
+
+    credential = %{
+      @credential
+      | provider: "openai_codex",
+        authentication_type: "oauth",
+        billing_path: :subscription,
+        token: "request-local-access",
+        account_id: "request-local-account"
+    }
+
+    options =
+      []
+      |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+      |> Keyword.put(:output_validation, :strict)
+
+    schema = %{"type" => "object", "properties" => %{"answer" => %{"type" => "string"}}}
+
+    assert {:ok, response} =
+             ReqLLM.generate_object(
+               ReqLLM.model!("openai_codex:gpt-5.4"),
+               [%{"role" => "user", "content" => "return an answer"}],
+               schema,
+               options
+             )
+
+    assert ReqLLM.Response.object(response) == %{"answer" => "ok"}
   end
 
   test "Kodo rejects empty Anthropic inference responses without crashing" do
