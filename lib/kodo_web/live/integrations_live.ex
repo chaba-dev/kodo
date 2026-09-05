@@ -2,7 +2,7 @@ defmodule KodoWeb.IntegrationsLive do
   use KodoWeb, :live_view
 
   alias Kodo.Integrations
-  alias Kodo.Integrations.OpenAIValidation
+  alias Kodo.Integrations.APIKeyValidation
 
   @provider "openai"
   @actions ~w(connect replace disconnect)
@@ -214,7 +214,7 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   defp start_validation(socket, integration) do
-    task = OpenAIValidation.start(socket.assigns.current_scope, integration)
+    task = APIKeyValidation.start(socket.assigns.current_scope, integration)
 
     update(socket, :validation_tasks, fn tasks ->
       Map.put(tasks, task.ref, {integration.id, integration.credential_generation})

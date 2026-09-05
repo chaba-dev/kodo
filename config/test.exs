@@ -22,7 +22,7 @@ config :kodo, Kodo.Integrations.CredentialEncryption,
   current_key_version: "test-v1",
   keys: %{"test-v1" => :binary.copy(<<1>>, 32), "test-old" => :binary.copy(<<2>>, 32)}
 
-config :kodo, :openai_validation_client, Kodo.Test.FakeOpenAIValidationClient
+config :kodo, :api_key_validation_client, Kodo.Test.FakeAPIKeyValidationClient
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.

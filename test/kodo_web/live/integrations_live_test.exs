@@ -101,9 +101,9 @@ defmodule KodoWeb.IntegrationsLiveTest do
     conn: conn,
     scope: scope
   } do
-    Application.put_env(:kodo, :fake_openai_validation_test_pid, self())
+    Application.put_env(:kodo, :fake_api_key_validation_test_pid, self())
 
-    on_exit(fn -> Application.delete_env(:kodo, :fake_openai_validation_test_pid) end)
+    on_exit(fn -> Application.delete_env(:kodo, :fake_api_key_validation_test_pid) end)
     Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
     {:ok, _integration} = connect_openai(scope, "blocking-manual-check")
     {:ok, view, _html} = live(conn, ~p"/integrations")
@@ -283,9 +283,9 @@ defmodule KodoWeb.IntegrationsLiveTest do
     conn: conn,
     scope: scope
   } do
-    Application.put_env(:kodo, :fake_openai_validation_test_pid, self())
+    Application.put_env(:kodo, :fake_api_key_validation_test_pid, self())
 
-    on_exit(fn -> Application.delete_env(:kodo, :fake_openai_validation_test_pid) end)
+    on_exit(fn -> Application.delete_env(:kodo, :fake_api_key_validation_test_pid) end)
     Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
 
     {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
@@ -319,9 +319,9 @@ defmodule KodoWeb.IntegrationsLiveTest do
     conn: conn,
     scope: scope
   } do
-    Application.put_env(:kodo, :fake_openai_validation_test_pid, self())
+    Application.put_env(:kodo, :fake_api_key_validation_test_pid, self())
 
-    on_exit(fn -> Application.delete_env(:kodo, :fake_openai_validation_test_pid) end)
+    on_exit(fn -> Application.delete_env(:kodo, :fake_api_key_validation_test_pid) end)
     Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
 
     {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")

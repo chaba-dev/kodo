@@ -1,30 +1,32 @@
-defmodule Kodo.Integrations.ReqOpenAIValidationClient do
+defmodule Kodo.Integrations.ReqAPIKeyValidationClient do
   @moduledoc """
-  Performs OpenAI validation against Kodo's fixed metadata endpoint.
+  Performs API-key validation against Kodo's fixed provider metadata endpoints.
 
   Redirects are deliberately disabled for credential-bearing requests. Even a
   same-origin endpoint move must be reviewed in code rather than forwarding a
   user's API key to a response-selected destination.
   """
 
-  @behaviour Kodo.Integrations.OpenAIValidationClient
+  @behaviour Kodo.Integrations.APIKeyValidationClient
 
-  @models_url "https://api.openai.com/v1/models"
   @timeout 5_000
 
   @impl true
-  def get_models(api_key), do: get_models(api_key, [])
+  def get_metadata(provider, api_key), do: get_metadata(provider, api_key, [])
 
   @doc false
-  def get_models(api_key, req_options) when is_binary(api_key) and is_list(req_options) do
+  def get_metadata(provider, api_key, req_options)
+      when provider in ~w(openai anthropic openrouter) and is_binary(api_key) and
+             is_list(req_options) do
     # Tests may replace only the transport boundary; the credential-bearing
     # origin and redirect policy remain immutable even through these seams.
     req_options = Keyword.take(req_options, [:plug, :finch_request])
+    {url, headers} = request_identity(provider, api_key)
 
     options =
       [
-        url: @models_url,
-        headers: [{"authorization", "Bearer #{api_key}"}],
+        url: url,
+        headers: headers,
         max_redirects: 0,
         retry: false,
         receive_timeout: @timeout,
@@ -63,6 +65,19 @@ defmodule Kodo.Integrations.ReqOpenAIValidationClient do
           reraise exception, __STACKTRACE__
         end
     end
+  end
+
+  defp request_identity("openai", api_key) do
+    {"https://api.openai.com/v1/models", [{"authorization", "Bearer #{api_key}"}]}
+  end
+
+  defp request_identity("anthropic", api_key) do
+    {"https://api.anthropic.com/v1/models",
+     [{"x-api-key", api_key}, {"anthropic-version", "2023-06-01"}]}
+  end
+
+  defp request_identity("openrouter", api_key) do
+    {"https://openrouter.ai/api/v1/key", [{"authorization", "Bearer #{api_key}"}]}
   end
 
   defp transport_error(:timeout), do: :timeout
