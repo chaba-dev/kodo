@@ -95,7 +95,6 @@ defmodule KodoWeb.Router do
       live "/integrations", IntegrationsLive, :index
     end
 
-    get "/users/reauthenticate/:provider/:action", UserSessionController, :reauthenticate
     post "/users/update-password", UserSessionController, :update_password
   end
 

@@ -1,12 +1,11 @@
 defmodule KodoWeb.IntegrationsLive do
   use KodoWeb, :live_view
 
-  alias Kodo.Accounts
   alias Kodo.Integrations
   alias Kodo.Integrations.OpenAIValidation
 
   @provider "openai"
-  @sensitive_actions ~w(connect replace disconnect)
+  @actions ~w(connect replace disconnect)
   @max_api_key_bytes 4_096
 
   @impl true
@@ -26,22 +25,15 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   @impl true
-  def handle_params(%{"action" => action}, _uri, socket) when action in @sensitive_actions do
-    if sudo_mode?(socket) do
-      socket = load_integration(socket)
+  def handle_params(%{"action" => action}, _uri, socket) when action in @actions do
+    socket = load_integration(socket)
 
-      case action_target(action, socket.assigns.integration) do
-        {:ok, target} ->
-          {:noreply, socket |> assign(:action, action) |> assign(:action_target, target)}
+    case action_target(action, socket.assigns.integration) do
+      {:ok, target} ->
+        {:noreply, socket |> assign(:action, action) |> assign(:action_target, target)}
 
-        :error ->
-          stale_action(socket)
-      end
-    else
-      {:noreply,
-       socket
-       |> put_flash(:error, "Re-authenticate before continuing. Your API key was not retained.")
-       |> redirect(to: reauthentication_path(action))}
+      :error ->
+        stale_action(socket)
     end
   end
 
@@ -56,17 +48,16 @@ defmodule KodoWeb.IntegrationsLive do
   @impl true
   def handle_event("save_api_key", %{"integration" => %{"api_key" => api_key}}, socket) do
     with true <- socket.assigns.action in ~w(connect replace),
-         true <- sudo_mode?(socket),
          :ok <- validate_api_key(api_key),
          {:ok, integration} <- save_api_key(socket, api_key) do
       {:noreply,
        socket
        |> start_validation(integration)
-       |> put_flash(:info, "OpenAI API key saved. Validation is pending.")
+       |> put_flash(:info, "OpenAI API key saved. Checking access.")
        |> push_patch(to: ~p"/integrations")}
     else
       false ->
-        reauthenticate(socket)
+        stale_action(socket)
 
       {:error, :invalid_api_key_input} ->
         {:noreply, put_flash(socket, :error, "Enter an API key.")}
@@ -82,9 +73,24 @@ defmodule KodoWeb.IntegrationsLive do
     end
   end
 
+  def handle_event("check_access", _params, socket) do
+    socket = load_integration(socket)
+
+    case socket.assigns.integration do
+      %{connection_status: "connected"} = integration ->
+        if validation_running?(socket.assigns.validation_tasks, integration) do
+          {:noreply, socket}
+        else
+          {:noreply, start_validation(socket, integration)}
+        end
+
+      _integration ->
+        stale_action(socket)
+    end
+  end
+
   def handle_event("disconnect", _params, socket) do
     with true <- socket.assigns.action == "disconnect",
-         true <- sudo_mode?(socket),
          %{id: id, credential_generation: generation, connection_status: "connected"} <-
            socket.assigns.action_target,
          {:ok, _integration} <-
@@ -95,7 +101,7 @@ defmodule KodoWeb.IntegrationsLive do
        |> push_patch(to: ~p"/integrations")}
     else
       false ->
-        reauthenticate(socket)
+        stale_action(socket)
 
       nil ->
         stale_action(socket)
@@ -226,26 +232,12 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp validate_api_key(_api_key), do: {:error, :invalid_api_key_input}
 
-  defp sudo_mode?(socket), do: Accounts.sudo_mode?(socket.assigns.current_scope.user, -10)
-
-  defp reauthenticate(socket) do
-    action = socket.assigns.action || "connect"
-
-    {:noreply,
-     socket
-     |> put_flash(:error, "Re-authenticate and enter the API key again.")
-     |> redirect(to: reauthentication_path(action))}
-  end
-
   defp stale_action(socket) do
     {:noreply,
      socket
      |> put_flash(:error, "The integration changed in another session. Review its current state.")
      |> push_patch(to: ~p"/integrations")}
   end
-
-  defp reauthentication_path(action),
-    do: ~p"/users/reauthenticate/#{@provider}/#{action}"
 
   defp action_target("connect", nil), do: {:ok, :missing}
 
@@ -276,10 +268,28 @@ defmodule KodoWeb.IntegrationsLive do
   defp status_label(%{connection_status: "reauthorization_required"}), do: "Action required"
   defp status_label(%{connection_status: "disconnected"}), do: "Disconnected"
 
-  defp validation_label(%{validation_status: "unverified"}), do: "Pending validation"
-  defp validation_label(%{validation_status: "valid"}), do: "Validated"
-  defp validation_label(%{validation_status: "invalid"}), do: "Invalid credential"
-  defp validation_label(%{validation_status: "unavailable"}), do: "Validation unavailable"
+  defp validation_label(%{validation_status: "unverified"}), do: "Not checked"
+  defp validation_label(%{validation_status: "valid"}), do: "Valid"
+  defp validation_label(%{validation_status: "invalid"}), do: "Invalid"
+  defp validation_label(%{validation_status: "unavailable"}), do: "Unable to verify"
+
+  defp validation_class(%{validation_status: "valid"}),
+    do: "text-green-700 dark:text-green-400"
+
+  defp validation_class(%{validation_status: "invalid"}),
+    do: "text-red-700 dark:text-red-400"
+
+  defp validation_class(_integration), do: "text-zinc-900 dark:text-zinc-100"
+
+  defp validation_detail(%{validation_status: "invalid"}) do
+    "The provider rejected these credentials. Update the connection and check access again."
+  end
+
+  defp validation_detail(%{validation_status: "unavailable"}) do
+    "We couldn't confirm access right now. The connection remains saved. Try again."
+  end
+
+  defp validation_detail(_integration), do: nil
 
   @impl true
   def render(assigns) do
@@ -323,8 +333,7 @@ defmodule KodoWeb.IntegrationsLive do
             class="flex items-center gap-2 text-xs font-medium text-zinc-500"
             role="status"
           >
-            <span class="size-2 animate-pulse rounded-full bg-amber-500"></span>
-            Checking OpenAI connection…
+            <span class="size-2 animate-pulse rounded-full bg-amber-500"></span> Checking access…
           </p>
 
           <section
@@ -359,12 +368,19 @@ defmodule KodoWeb.IntegrationsLive do
                       </dd>
                     </div>
                     <div :if={integration_connected?(@integration)}>
-                      <dt class="text-zinc-500">Validation</dt>
-                      <dd class="mt-0.5 font-semibold text-zinc-900 dark:text-zinc-100">
+                      <dt class="text-zinc-500">Access</dt>
+                      <dd class={["mt-0.5 font-semibold", validation_class(@integration)]}>
                         {validation_label(@integration)}
                       </dd>
                     </div>
                   </dl>
+                  <p
+                    :if={validation_detail(@integration)}
+                    id="openai-access-detail"
+                    class="mt-2 max-w-xl text-xs leading-5 text-zinc-500 dark:text-zinc-400"
+                  >
+                    {validation_detail(@integration)}
+                  </p>
                 </div>
               </div>
 
@@ -377,7 +393,31 @@ defmodule KodoWeb.IntegrationsLive do
                   Connect
                 </.link>
               </div>
-              <div :if={integration_connected?(@integration)} class="flex shrink-0 gap-2">
+              <div
+                :if={integration_connected?(@integration)}
+                class="flex shrink-0 flex-wrap justify-end gap-2"
+              >
+                <button
+                  id="openai-check-access"
+                  type="button"
+                  phx-click="check_access"
+                  disabled={validation_running?(@validation_tasks, @integration)}
+                  aria-describedby="openai-status"
+                  class="inline-flex items-center gap-1.5 rounded-xl border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:text-zinc-950 disabled:cursor-wait disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-white"
+                >
+                  <.icon
+                    name="hero-arrow-path"
+                    class={[
+                      "size-4",
+                      validation_running?(@validation_tasks, @integration) &&
+                        "motion-safe:animate-spin"
+                    ]}
+                  />
+                  {if(validation_running?(@validation_tasks, @integration),
+                    do: "Checking…",
+                    else: "Check access"
+                  )}
+                </button>
                 <.link
                   id="openai-replace"
                   patch={~p"/integrations?action=replace"}

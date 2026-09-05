@@ -42,118 +42,118 @@ manufactured after that no-go decision.
 
 * Phase 1A: Establish the credential security foundation
 
-- [ ] Generate migrations for one durable integration per user/provider pair,
+- [X] Generate migrations for one durable integration per user/provider pair,
   separate connection and validation states, non-secret status metadata,
   credential generation, and encryption-key version. Treat this as a fresh
   encrypted schema with no plaintext, environment-key, or legacy integration
   import path.
-- [ ] Enforce the connection-validation matrix through context transition
+- [X] Enforce the connection-validation matrix through context transition
   functions and database constraints where practical: only
   ~disconnected+unverified~ without a payload,
   ~reauthorization_required+unverified~ with the provisional payload, and
   ~connected~ with any validation state. Only connected credentials not marked
   invalid admit new provider requests.
-- [ ] Enforce ~ON DELETE CASCADE~ from users to integrations; account deletion
+- [X] Enforce ~ON DELETE CASCADE~ from users to integrations; account deletion
   must not depend on a successful provider call.
-- [ ] Add authenticated encryption with unique nonces, versioned keys, and AEAD
+- [X] Add authenticated encryption with unique nonces, versioned keys, and AEAD
   associated data binding integration ID, user ID, provider, authentication
   type, and payload format version; keep provider account and workspace
   identifiers inside the encrypted payload.
-- [ ] Add safe redaction and production configuration that distinguishes the
+- [X] Add safe redaction and production configuration that distinguishes the
   Kodo credential-encryption key ring from all LLM provider credentials,
   validates every current and previous key before replica readiness, and fails
   closed on missing keys or payload authentication failures.
-- [ ] Do not derive or persist API-key hashes, suffixes, or fingerprints and
+- [X] Do not derive or persist API-key hashes, suffixes, or fingerprints and
   never fingerprint OAuth tokens; permit only provider-supplied labels that are
   explicitly classified as non-secret by the reviewed provider contract.
-- [ ] Implement scope-first integration context operations for listing,
+- [X] Implement scope-first integration context operations for listing,
   connecting, replacing, validating, and disconnecting credentials without
   accepting browser-supplied ownership; disconnect clears the encrypted payload
   but preserves the row, and every credential change advances its generation.
-- [ ] Implement explicit generation-fenced transitions for connect, replace,
+- [X] Implement explicit generation-fenced transitions for connect, replace,
   validation success, confirmed invalidity, transient validation failure,
   revalidation, disconnect, refresh ~invalid_grant~, delayed refresh success,
   and OAuth success. Failed or cancelled authorization attempts terminate the
   attempt without changing the integration's prior connection-validation pair.
-- [ ] Add a typed, non-secret ~Kodo.LLM~ integration reference containing
+- [X] Add a typed, non-secret ~Kodo.LLM~ integration reference containing
   integration and provider identity. Require authenticated scope plus that
   reference in text/tool and structured-output callbacks, and update primary,
   search, review, and every direct adapter caller to supply them.
-- [ ] Make the scoped resolver the only component that rechecks reference
+- [X] Make the scoped resolver the only component that rechecks reference
   ownership and generation, decrypts the payload, and constructs the private
   operation-local credential translated into ReqLLM options; public callers
   cannot supply raw API keys, OAuth tokens, or internal credential values.
-- [ ] Resolve each model through ~ReqLLM.model/1~, allow only ~openai~,
+- [X] Resolve each model through ~ReqLLM.model/1~, allow only ~openai~,
   ~openai_codex~, ~anthropic~, and ~openrouter~, and fetch the session owner's
   integration using the resulting ~LLMDB.Model.provider~; replace model-string
   splitting with that resolved provider when storing derived display data.
-- [ ] Persist exact model identity separately from execution provider and
+- [X] Persist exact model identity separately from execution provider and
   billing route in every session role mapping. Define identity as the exact
   provider-neutral selector, including an immutable version when both routes
   expose one, without claiming rolling aliases are identical backend snapshots;
   user and repository default changes affect new sessions only.
-- [ ] Require exact equality between resolved model and credential providers
+- [X] Require exact equality between resolved model and credential providers
   before recording an invocation or making an HTTP request, with actionable
   missing, invalid, disconnected, reauthorization-required, malformed-model,
   unsupported-provider, and mismatch errors; allow ~unverified~ and
   validation-~unavailable~ credentials.
-- [ ] Persist credential-free invocation provenance containing canonical
+- [X] Persist credential-free invocation provenance containing canonical
   provider, authentication type, and Platform, subscription, or aggregator
   billing path.
-- [ ] Remove provider-key environment lookup from the production adapter and
+- [X] Remove provider-key environment lookup from the production adapter and
   make missing user integrations fail closed; update the evaluation runner,
   development setup, and opt-in live-provider checks to require an explicit
   test user with encrypted integrations through the same Kodo-owned boundary.
-- [ ] Pass only API keys or current OAuth access tokens and required account
+- [X] Pass only API keys or current OAuth access tokens and required account
   identifiers into ReqLLM; keep refresh tokens, expiry, generation, and rotation
   state inside Kodo.
-- [ ] Preflight every role integration before accepting a turn, resolve again
+- [X] Preflight every role integration before accepting a turn, resolve again
   immediately before every generation call, and normalize Req/ReqLLM failures
   into bounded domain errors before persistence, inspection, logging,
   telemetry, or browser display.
-- [ ] Represent quota exhaustion and billing-required responses only as bounded
+- [X] Represent quota exhaustion and billing-required responses only as bounded
   outcomes on the affected invocation. Do not mutate or persist integration
   state or run background quota checks; preserve the session work and provide
   retry plus links to provider billing and the relevant integration settings.
-- [ ] Batch preflight metadata through indexed user/provider queries without
+- [X] Batch preflight metadata through indexed user/provider queries without
   decryption; immediately before each credential-bearing external operation,
   perform the bounded current integration or authorization-attempt lookup and
   local decryption without holding a database transaction or lock across the
   request.
-- [ ] Keep plaintext credentials out of GenServers, ETS, persistent terms,
+- [X] Keep plaintext credentials out of GenServers, ETS, persistent terms,
   session state, and unnecessary process messages; discard operation-local
   references after use without claiming BEAM memory zeroization. Do not add an
   encrypted cache without measured database pressure and a separate consistency
   review.
-- [ ] Define operation admission as the final successful ownership, state, and
+- [X] Define operation admission as the final successful ownership, state, and
   generation check for the operation-local decrypted payload. For model calls,
   recheck generation while durably recording invocation start and billing
   provenance before permitting HTTP; allow admitted operations to complete
   after replacement, disconnection, or deletion, but require every later call
   and continuation to seek admission again.
-- [ ] Centralize exact HTTPS provider-origin allowlists and disable automatic
+- [X] Centralize exact HTTPS provider-origin allowlists and disable automatic
   redirects for every credential-bearing validation, inference, authorization,
   polling, exchange, and refresh request; classify every ~3xx~, including
   same-origin redirects, as provider unavailable without a follow-up request.
-- [ ] Maintain a transport security matrix covering buffered Req/ReqLLM calls,
+- [X] Maintain a transport security matrix covering buffered Req/ReqLLM calls,
   Finch streaming, Req OAuth operations, and Codex-specific inference. Require
   every new or changed transport to enforce exact origins, reject redirects,
   and accept credentials only from the scoped operation-local value.
-- [ ] Add every provider secret field to Phoenix parameter filtering and test
+- [X] Add every provider secret field to Phoenix parameter filtering and test
   that filtered request logs, changeset errors, exception inspection, and
   LiveView events cannot expose credential material.
-- [ ] Keep API keys out of LiveView socket assigns and rendered forms: accept
+- [X] Keep API keys out of LiveView socket assigns and rendered forms: accept
   them only in a ~phx-submit~ event with no secret-field ~phx-change~, pass the
   event value directly to the scoped encryption context, never echo it through
   validation errors or diffs, and clear the browser input after a successful
   save.
-- [ ] Add the credential-free security audit framework and API-key lifecycle
+- [X] Add the credential-free security audit framework and API-key lifecycle
   events; permit internal actor and integration IDs only in audit records,
   never metric labels.
-- [ ] Verify provider credentials never reach runner registration, runner
+- [X] Verify provider credentials never reach runner registration, runner
   WebSockets, tool subprocesses, session events, browser responses, exception
   inspection, or telemetry metadata.
-- [ ] Test encryption round trips and redaction, ownership isolation,
+- [X] Test encryption round trips and redaction, ownership isolation,
   ciphertext swaps between users and providers, tampering, wrong and missing
   keys, unknown payload versions, nonce uniqueness, lifecycle transitions,
   generation fencing, provider mismatches, owned text and object generation,
@@ -167,58 +167,63 @@ manufactured after that no-go decision.
   before and after admission, forged and cross-user references, and
   application-level non-retention in process state and messages without
   asserting physical memory erasure.
-- [ ] Add contract tests for every transport and operation in the matrix. For
+- [X] Add contract tests for every transport and operation in the matrix. For
   same-origin and cross-origin redirects, assert no follow-up request and no
   forwarded authorization material. Configure sentinel provider environment
   keys, ReqLLM global credentials, and OAuth files, then prove scoped requests
   send only the user integration credential and missing integrations fail
   before network admission without fallback.
-- [ ] Add table-driven tests for every allowed connection-validation pair,
+- [X] Add table-driven tests for every allowed connection-validation pair,
   rejection of impossible pairs and payload combinations, each legal transition,
   generation fencing, invalid-to-valid and invalid-to-unavailable revalidation,
   and request admission for connected unverified or unavailable credentials but
   not invalid credentials.
-- [ ] Do not expose a credential form or permit a production provider request
+- [X] Do not expose a credential form or permit a production provider request
   until every Phase 1A security boundary and test is complete.
 
 * Phase 1B: Add OpenAI API integration and settings
 
-- [ ] Build a shared responsive settings shell with Account and Integrations
+- [X] Build a shared responsive settings shell with Account and Integrations
   navigation, a framed desktop/tablet workspace, compact persistent rail,
   deep-linkable detail pane, clear return action, accessible narrow-screen
   section navigation, and consistent page headings and action placement that
   preserve the RFD interface sketches' hierarchy.
-- [ ] Show only implemented user-owned settings; do not add a Personal/Workspace
+- [X] Show only implemented user-owned settings; do not add a Personal/Workspace
   switch or placeholder categories before Kodo defines workspace-owned
   configuration and authorization.
-- [ ] Restyle the existing account email and password forms as distinct,
+- [X] Restyle the existing account email and password forms as distinct,
   balanced settings surfaces without changing generated authentication,
   confirmation, or sudo-mode behavior.
-- [ ] Add ~/integrations~ to the existing authenticated LiveView session and
-  browser pipeline; require a fresh server-side sudo check before displaying
-  and again when submitting an API-key form, replacing a credential, or
-  disconnecting; preserve only provider and intended action, never the key,
-  across reauthentication; and implement the OpenAI Platform API-key provider
-  card, contextual form, connection status, loading state, and accessible
-  feedback.
+- [X] Add ~/integrations~ to the existing authenticated LiveView session and
+  browser pipeline. Use the normal authenticated-user boundary for viewing and
+  managing user-owned integrations, including submission, replacement, and
+  disconnection; do not require renewed sudo mode. Implement the OpenAI
+  Platform API-key provider card, contextual form, connection status, loading
+  state, and accessible feedback.
 - [ ] Add baseline onboarding and model-settings feedback that links users to
   the OpenAI integration required by their selected role mapping.
-- [ ] Save OpenAI API keys encrypted as ~unverified~ before asynchronously
+- [X] Save OpenAI API keys encrypted as ~unverified~ before asynchronously
   probing the non-inference ~GET /v1/models~ metadata endpoint in a bounded
   generation-fenced task. Mark only an explicit ~invalid_api_key~ or revoked-key
   response invalid; classify other authentication contexts, permission, network,
   TLS, timeout, redirect, rate-limit, and provider failures as unavailable.
-- [ ] Never run billed inference during automatic validation. Offer a Test model
-  request only after explicit confirmation identifies the exact provider and
-  model and warns of possible charges; require ownership but not fresh sudo.
-- [ ] State in disconnect confirmation that future Kodo requests stop while an
+- [X] Never run billed inference during automatic or user-requested credential
+  validation.
+- [X] Offer a generic Check access action that reruns the same bounded,
+  generation-fenced non-inference metadata probe against the saved credential
+  without returning it to the browser. Present Valid and Invalid as explicit
+  green and red outcomes and keep Not checked and Unable to verify neutral.
+- [ ] Offer a Test model request only after explicit confirmation identifies the
+  exact provider and model and warns of possible charges; require authenticated
+  ownership and confirmation under the normal authenticated-user boundary.
+- [X] State in disconnect confirmation that future Kodo requests stop while an
   already-admitted or sent provider operation and its billing may continue, and
   link to provider-side revocation when Kodo cannot revoke the credential
   directly.
-- [ ] Add LiveView selector tests for the settings shell, section navigation,
+- [X] Add LiveView selector tests for the settings shell, section navigation,
   OpenAI provider card, and contextual API-key form, plus representative desktop,
   tablet, and narrow-mobile browser checks for the sketched layouts.
-- [ ] Render connection state before validation state and show validation only
+- [X] Render connection state before validation state and show validation only
   for connected integrations; add selector coverage proving the UI cannot
   display impossible combinations such as disconnected plus valid or a
   request-scoped quota badge.
@@ -231,19 +236,21 @@ manufactured after that no-go decision.
   silently rerouting existing sessions.
 - [ ] Test concurrent users with different OpenAI keys, key replacement during
   a session, missing integration behavior, catalog aliases, inline model specs,
-  malformed models, billing provenance, cross-user sensitive actions, expired
-  sudo mode, and stale LiveView sockets. Cover request admission followed by
+  malformed models, billing provenance, cross-user actions, aged authenticated
+  sessions, and stale LiveView sockets. Cover request admission followed by
   disconnect, completion with original provenance, failure of the next request
   or tool continuation, and rejection of late validation updates. Verify save
   succeeds during outage, stale validation cannot overwrite a newer generation,
   permission-limited probes do not mark a key invalid, and no automatic path
   sends a billed model request.
-- [ ] Test that the API-key field is unavailable before sudo, has no
-  ~phx-change~, is never copied into socket assigns or rendered diffs, is
-  cleared after success, and must be re-entered if sudo expires at submission.
-- [ ] Emit and test credential-free audit events for OpenAI API-key submission,
-  replacement, validation, Test confirmation/outcome, and disconnection through
-  the Phase 1A audit framework.
+- [X] Test that the API-key field is available only to an authenticated owner,
+  has no ~phx-change~, is never copied into socket assigns or rendered diffs,
+  and is cleared after success.
+- [X] Emit and test credential-free audit events for OpenAI API-key submission,
+  replacement, validation, and disconnection through the Phase 1A audit
+  framework.
+- [ ] Emit and test credential-free Test confirmation and outcome audit events
+  when the optional billed Test model request is implemented.
 
 * Phase 2: Add Anthropic and OpenRouter API keys
 
@@ -355,15 +362,15 @@ manufactured after that no-go decision.
   explanation, progress state, cancellation, disconnect, and reauthorization to
   the authenticated integrations page; show subscription quota errors only on
   the affected session or turn with retry and billing guidance.
-- [ ] Require a fresh server-side sudo check to start authorization or
-  reauthorization. Permit the same active generation-fenced attempt to complete
-  after sudo expiry, require authenticated ownership but not fresh sudo for
-  cancellation, and preserve only provider/action context across
-  reauthentication.
+- [ ] Use the normal authenticated-user boundary to start authorization or
+  reauthorization and to cancel an owned attempt; do not require renewed sudo
+  mode. Permit the same active generation-fenced attempt to complete while its
+  ownership and generation checks continue to succeed.
 - [ ] Add LiveView selector tests for device-flow start, verification code,
   progress, expiry, completion, cancellation, and reauthorization states, plus
-  post-sudo completion, ownership-checked cancellation, stale sockets, and
-  representative responsive browser checks. Verify the short-lived device code
+  completion from aged authenticated sessions, ownership-checked cancellation,
+  stale sockets, and representative responsive browser checks. Verify the
+  short-lived device code
   has an accessible Copy action, is retained only while needed to present the
   active attempt, and disappears after every terminal state without entering
   logs or telemetry.
