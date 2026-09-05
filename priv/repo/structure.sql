@@ -113,6 +113,50 @@ CREATE TABLE public.control_plane_instances (
 
 
 --
+-- Name: integration_audit_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.integration_audit_events (
+    id uuid NOT NULL,
+    actor_user_id bigint NOT NULL,
+    integration_id uuid NOT NULL,
+    provider character varying(32) NOT NULL,
+    event_type character varying(64) NOT NULL,
+    credential_generation bigint NOT NULL,
+    inserted_at timestamp without time zone NOT NULL
+);
+
+
+--
+-- Name: provider_integrations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.provider_integrations (
+    id uuid NOT NULL,
+    user_id bigint NOT NULL,
+    provider character varying(32) NOT NULL,
+    authentication_type character varying(32) NOT NULL,
+    connection_status character varying(32) DEFAULT 'disconnected'::character varying NOT NULL,
+    validation_status character varying(32) DEFAULT 'unverified'::character varying NOT NULL,
+    encrypted_credentials bytea,
+    encryption_key_version character varying(64),
+    credential_format_version integer,
+    credential_generation bigint DEFAULT 0 NOT NULL,
+    expires_at timestamp without time zone,
+    validated_at timestamp without time zone,
+    refreshed_at timestamp without time zone,
+    validation_error_code character varying(64),
+    inserted_at timestamp without time zone NOT NULL,
+    updated_at timestamp without time zone NOT NULL,
+    CONSTRAINT provider_integrations_authentication_type_valid CHECK (((authentication_type)::text = ANY ((ARRAY['api_key'::character varying, 'oauth'::character varying])::text[]))),
+    CONSTRAINT provider_integrations_credential_generation_valid CHECK ((credential_generation >= 0)),
+    CONSTRAINT provider_integrations_provider_authentication_valid CHECK (((((provider)::text = 'openai_codex'::text) AND ((authentication_type)::text = 'oauth'::text)) OR (((provider)::text = ANY ((ARRAY['openai'::character varying, 'anthropic'::character varying, 'openrouter'::character varying])::text[])) AND ((authentication_type)::text = 'api_key'::text)))),
+    CONSTRAINT provider_integrations_provider_valid CHECK (((provider)::text = ANY ((ARRAY['openai'::character varying, 'openai_codex'::character varying, 'anthropic'::character varying, 'openrouter'::character varying])::text[]))),
+    CONSTRAINT provider_integrations_state_valid CHECK (((((connection_status)::text = 'disconnected'::text) AND ((validation_status)::text = 'unverified'::text) AND (encrypted_credentials IS NULL) AND (encryption_key_version IS NULL) AND (credential_format_version IS NULL) AND (expires_at IS NULL) AND (validated_at IS NULL) AND (refreshed_at IS NULL) AND (validation_error_code IS NULL)) OR (((connection_status)::text = 'connected'::text) AND ((validation_status)::text = ANY ((ARRAY['unverified'::character varying, 'valid'::character varying, 'invalid'::character varying, 'unavailable'::character varying])::text[])) AND (encrypted_credentials IS NOT NULL) AND (encryption_key_version IS NOT NULL) AND (credential_format_version IS NOT NULL)) OR (((connection_status)::text = 'reauthorization_required'::text) AND ((validation_status)::text = 'unverified'::text) AND (encrypted_credentials IS NOT NULL) AND (encryption_key_version IS NOT NULL) AND (credential_format_version IS NOT NULL))))
+);
+
+
+--
 -- Name: runners; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -297,6 +341,22 @@ ALTER TABLE ONLY public.control_plane_instances
 
 
 --
+-- Name: integration_audit_events integration_audit_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_audit_events
+    ADD CONSTRAINT integration_audit_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: provider_integrations provider_integrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.provider_integrations
+    ADD CONSTRAINT provider_integrations_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: runners runners_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -391,6 +451,27 @@ CREATE INDEX control_plane_instances_deployment_generation_artifact_revision ON 
 --
 
 CREATE INDEX control_plane_instances_last_seen_at_index ON public.control_plane_instances USING btree (last_seen_at);
+
+
+--
+-- Name: integration_audit_events_actor_user_id_inserted_at_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX integration_audit_events_actor_user_id_inserted_at_index ON public.integration_audit_events USING btree (actor_user_id, inserted_at);
+
+
+--
+-- Name: integration_audit_events_integration_id_inserted_at_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX integration_audit_events_integration_id_inserted_at_index ON public.integration_audit_events USING btree (integration_id, inserted_at);
+
+
+--
+-- Name: provider_integrations_user_id_provider_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX provider_integrations_user_id_provider_index ON public.provider_integrations USING btree (user_id, provider);
 
 
 --
@@ -509,6 +590,30 @@ ALTER TABLE ONLY public.cluster_placement_overrides
 
 
 --
+-- Name: integration_audit_events integration_audit_events_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_audit_events
+    ADD CONSTRAINT integration_audit_events_actor_user_id_fkey FOREIGN KEY (actor_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: integration_audit_events integration_audit_events_integration_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_audit_events
+    ADD CONSTRAINT integration_audit_events_integration_id_fkey FOREIGN KEY (integration_id) REFERENCES public.provider_integrations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: provider_integrations provider_integrations_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.provider_integrations
+    ADD CONSTRAINT provider_integrations_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: runners runners_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -575,3 +680,5 @@ INSERT INTO public."schema_migrations" (version) VALUES (20260815051344);
 INSERT INTO public."schema_migrations" (version) VALUES (20260822084328);
 INSERT INTO public."schema_migrations" (version) VALUES (20260824012010);
 INSERT INTO public."schema_migrations" (version) VALUES (20260825042101);
+INSERT INTO public."schema_migrations" (version) VALUES (20260903201206);
+INSERT INTO public."schema_migrations" (version) VALUES (20260904051620);
