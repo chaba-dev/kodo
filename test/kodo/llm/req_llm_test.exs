@@ -612,6 +612,158 @@ defmodule Kodo.LLM.ReqLLMTest do
     refute inspect(error) =~ secret
   end
 
+  test "rejects credentials reconstructed from sibling text parts" do
+    secret = "request-local-key"
+
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body: %{
+            "id" => "chat_split_key",
+            "model" => "anthropic/claude-sonnet-4",
+            "choices" => [
+              %{
+                "index" => 0,
+                "message" => %{
+                  "role" => "assistant",
+                  "content" => [
+                    %{"type" => "text", "text" => "request-local-"},
+                    %{"type" => "text", "text" => "key"}
+                  ]
+                },
+                "finish_reason" => "stop"
+              }
+            ],
+            "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+          }
+        },
+        %{
+          status: 200,
+          body: %{
+            "id" => "chat_safe_parts",
+            "model" => "anthropic/claude-sonnet-4",
+            "choices" => [
+              %{
+                "index" => 0,
+                "message" => %{
+                  "role" => "assistant",
+                  "content" => [
+                    %{"type" => "text", "text" => "safe "},
+                    %{"type" => "text", "text" => "answer"}
+                  ]
+                },
+                "finish_reason" => "stop"
+              }
+            ],
+            "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+          }
+        }
+      ])
+
+    previous = Application.get_env(:req_llm, :openrouter)
+    Application.put_env(:req_llm, :openrouter, base_url: server.base_url)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:req_llm, :openrouter, previous),
+        else: Application.delete_env(:req_llm, :openrouter)
+    end)
+
+    credential = %{@credential | provider: "openrouter", billing_path: :aggregator}
+    model = ReqLLM.model!("openrouter:anthropic/claude-sonnet-4")
+
+    assert {:error, %Kodo.LLM.ProviderError{kind: :request_failed} = error} =
+             Adapter.generate(model, [%{"role" => "user", "content" => "answer"}], [], credential,
+               timeout: 5_000,
+               reasoning: "none"
+             )
+
+    refute inspect(error) =~ secret
+
+    assert {:ok, %{text: "safe answer"}} =
+             Adapter.generate(model, [%{"role" => "user", "content" => "answer"}], [], credential,
+               timeout: 5_000,
+               reasoning: "none"
+             )
+  end
+
+  test "persists only reviewed OpenRouter reasoning continuation fields" do
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body: %{
+            "id" => "chat_reasoning",
+            "model" => "anthropic/claude-sonnet-4",
+            "choices" => [
+              %{
+                "index" => 0,
+                "message" => %{
+                  "role" => "assistant",
+                  "content" => "answer",
+                  "reasoning_details" => [
+                    %{
+                      "type" => "reasoning.text",
+                      "text" => "Checking the result.",
+                      "signature" => "signed-reasoning",
+                      "id" => "reasoning-1",
+                      "format" => "anthropic-claude-v1",
+                      "index" => 0,
+                      "debug" => %{
+                        "request_dump" => "private-provider-detail",
+                        "arbitrary_field" => "unreviewed metadata"
+                      }
+                    }
+                  ]
+                },
+                "finish_reason" => "stop"
+              }
+            ],
+            "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+          }
+        }
+      ])
+
+    previous = Application.get_env(:req_llm, :openrouter)
+    Application.put_env(:req_llm, :openrouter, base_url: server.base_url)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:req_llm, :openrouter, previous),
+        else: Application.delete_env(:req_llm, :openrouter)
+    end)
+
+    credential = %{@credential | provider: "openrouter", billing_path: :aggregator}
+
+    assert {:ok, %{assistant: assistant}} =
+             Adapter.generate(
+               ReqLLM.model!("openrouter:anthropic/claude-sonnet-4"),
+               [%{"role" => "user", "content" => "answer"}],
+               [],
+               credential,
+               timeout: 5_000,
+               reasoning: "none"
+             )
+
+    assert [detail] = assistant["reasoning_details"]
+    assert detail["signature"] == "signed-reasoning"
+
+    assert detail["provider_data"] == %{
+             "$kodo_type" => "map",
+             "entries" => [["id", "reasoning-1"], ["type", "reasoning.text"]]
+           }
+
+    assert [%{reasoning_details: [restored]}] =
+             Adapter.build_context([
+               %{"role" => "assistant", "provider_state" => assistant}
+             ]).messages
+
+    assert restored.provider_data == %{"id" => "reasoning-1", "type" => "reasoning.text"}
+    refute inspect(assistant) =~ "private-provider-detail"
+    refute inspect(assistant) =~ "unreviewed metadata"
+  end
+
   test "rejects credentials reconstructed from Codex SSE output" do
     credential = %{
       @credential

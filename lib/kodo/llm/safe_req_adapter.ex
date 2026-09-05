@@ -266,7 +266,19 @@ defmodule Kodo.LLM.SafeReqAdapter do
   defp credential_in_key?(_value, _secrets), do: false
 
   defp sanitize_decoded_response(response, secrets) do
-    if credential_in_response?(response, secrets), do: :error, else: canonicalize_usage(response)
+    with false <- credential_in_response?(response, secrets),
+         false <- credential_in_composed_output?(response, secrets),
+         {:ok, response} <- canonicalize_assistant_metadata(response),
+         {:ok, response} <- canonicalize_usage(response) do
+      {:ok, response}
+    else
+      _unsafe -> :error
+    end
+  end
+
+  defp credential_in_composed_output?(response, secrets) do
+    [ReqLLM.Response.text(response), ReqLLM.Response.thinking(response)]
+    |> Enum.any?(&credential_present?(&1, secrets))
   end
 
   defp credential_in_response?(%ReqLLM.Response{} = response, secrets) do
@@ -305,6 +317,94 @@ defmodule Kodo.LLM.SafeReqAdapter do
     do: value |> Tuple.to_list() |> credential_present?(secrets)
 
   defp credential_present?(_value, _secrets), do: false
+
+  # ReqLLM intentionally retains unknown provider fields for lossless proxying.
+  # Kodo persists assistant state, so keep only documented continuation fields
+  # until ReqLLM exposes a bounded representation for that trust boundary.
+  defp canonicalize_assistant_metadata(
+         %ReqLLM.Response{message: %ReqLLM.Message{} = message} = response
+       ) do
+    with {:ok, message} <- canonicalize_message(message) do
+      context = canonicalize_response_context(response.context, message)
+      {:ok, %{response | message: message, context: context}}
+    end
+  end
+
+  defp canonicalize_assistant_metadata(_response), do: :error
+
+  defp canonicalize_message(%ReqLLM.Message{reasoning_details: nil} = message),
+    do: {:ok, message}
+
+  defp canonicalize_message(%ReqLLM.Message{reasoning_details: details} = message)
+       when is_list(details) do
+    if Enum.all?(details, &match?(%ReqLLM.Message.ReasoningDetails{}, &1)) do
+      details = Enum.map(details, &canonicalize_reasoning_detail/1)
+      {:ok, %{message | reasoning_details: details}}
+    else
+      :error
+    end
+  end
+
+  defp canonicalize_message(_message), do: :error
+
+  defp canonicalize_reasoning_detail(%ReqLLM.Message.ReasoningDetails{} = detail) do
+    %{detail | provider_data: canonical_reasoning_provider_data(detail)}
+  end
+
+  defp canonical_reasoning_provider_data(%{provider: :openrouter, provider_data: data})
+       when is_map(data) do
+    %{}
+    |> maybe_put_reasoning_field(
+      "type",
+      data,
+      ~w(reasoning.text reasoning.summary reasoning.encrypted)
+    )
+    |> maybe_put_reasoning_string("id", data)
+    |> maybe_put_reasoning_string("data", data)
+    |> maybe_put_reasoning_string("summary", data)
+  end
+
+  defp canonical_reasoning_provider_data(%{provider: provider, provider_data: data})
+       when provider in [:openai, :openai_codex] and is_map(data) do
+    %{}
+    |> maybe_put_reasoning_field("type", data, ["reasoning"])
+    |> maybe_put_reasoning_string("id", data)
+  end
+
+  defp canonical_reasoning_provider_data(%{provider: :google, provider_data: data})
+       when is_map(data) do
+    if map_value(data, "thought") == true, do: %{"thought" => true}, else: %{}
+  end
+
+  defp canonical_reasoning_provider_data(_detail), do: %{}
+
+  defp maybe_put_reasoning_field(result, key, data, allowed) do
+    case map_value(data, key) do
+      value -> if value in allowed, do: Map.put(result, key, value), else: result
+    end
+  end
+
+  defp maybe_put_reasoning_string(result, key, data) do
+    case map_value(data, key) do
+      value when is_binary(value) -> Map.put(result, key, value)
+      _other -> result
+    end
+  end
+
+  defp map_value(map, "type"), do: Map.get(map, "type", Map.get(map, :type))
+  defp map_value(map, "id"), do: Map.get(map, "id", Map.get(map, :id))
+  defp map_value(map, "data"), do: Map.get(map, "data", Map.get(map, :data))
+  defp map_value(map, "summary"), do: Map.get(map, "summary", Map.get(map, :summary))
+  defp map_value(map, "thought"), do: Map.get(map, "thought", Map.get(map, :thought))
+
+  defp canonicalize_response_context(
+         %ReqLLM.Context{messages: [_first | _rest]} = context,
+         message
+       ) do
+    %{context | messages: List.replace_at(context.messages, -1, message)}
+  end
+
+  defp canonicalize_response_context(context, _message), do: context
 
   defp canonicalize_usage(%ReqLLM.Response{usage: nil} = response), do: {:ok, response}
 
