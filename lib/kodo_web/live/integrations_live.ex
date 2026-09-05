@@ -1,12 +1,11 @@
 defmodule KodoWeb.IntegrationsLive do
   use KodoWeb, :live_view
 
-  alias Kodo.Accounts
   alias Kodo.Integrations
   alias Kodo.Integrations.OpenAIValidation
 
   @provider "openai"
-  @sensitive_actions ~w(connect replace disconnect)
+  @actions ~w(connect replace disconnect)
   @max_api_key_bytes 4_096
 
   @impl true
@@ -26,22 +25,15 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   @impl true
-  def handle_params(%{"action" => action}, _uri, socket) when action in @sensitive_actions do
-    if sudo_mode?(socket) do
-      socket = load_integration(socket)
+  def handle_params(%{"action" => action}, _uri, socket) when action in @actions do
+    socket = load_integration(socket)
 
-      case action_target(action, socket.assigns.integration) do
-        {:ok, target} ->
-          {:noreply, socket |> assign(:action, action) |> assign(:action_target, target)}
+    case action_target(action, socket.assigns.integration) do
+      {:ok, target} ->
+        {:noreply, socket |> assign(:action, action) |> assign(:action_target, target)}
 
-        :error ->
-          stale_action(socket)
-      end
-    else
-      {:noreply,
-       socket
-       |> put_flash(:error, "Re-authenticate before continuing. Your API key was not retained.")
-       |> redirect(to: reauthentication_path(action))}
+      :error ->
+        stale_action(socket)
     end
   end
 
@@ -56,7 +48,6 @@ defmodule KodoWeb.IntegrationsLive do
   @impl true
   def handle_event("save_api_key", %{"integration" => %{"api_key" => api_key}}, socket) do
     with true <- socket.assigns.action in ~w(connect replace),
-         true <- sudo_mode?(socket),
          :ok <- validate_api_key(api_key),
          {:ok, integration} <- save_api_key(socket, api_key) do
       {:noreply,
@@ -66,7 +57,7 @@ defmodule KodoWeb.IntegrationsLive do
        |> push_patch(to: ~p"/integrations")}
     else
       false ->
-        reauthenticate(socket)
+        stale_action(socket)
 
       {:error, :invalid_api_key_input} ->
         {:noreply, put_flash(socket, :error, "Enter an API key.")}
@@ -100,7 +91,6 @@ defmodule KodoWeb.IntegrationsLive do
 
   def handle_event("disconnect", _params, socket) do
     with true <- socket.assigns.action == "disconnect",
-         true <- sudo_mode?(socket),
          %{id: id, credential_generation: generation, connection_status: "connected"} <-
            socket.assigns.action_target,
          {:ok, _integration} <-
@@ -111,7 +101,7 @@ defmodule KodoWeb.IntegrationsLive do
        |> push_patch(to: ~p"/integrations")}
     else
       false ->
-        reauthenticate(socket)
+        stale_action(socket)
 
       nil ->
         stale_action(socket)
@@ -242,26 +232,12 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp validate_api_key(_api_key), do: {:error, :invalid_api_key_input}
 
-  defp sudo_mode?(socket), do: Accounts.sudo_mode?(socket.assigns.current_scope.user, -10)
-
-  defp reauthenticate(socket) do
-    action = socket.assigns.action || "connect"
-
-    {:noreply,
-     socket
-     |> put_flash(:error, "Re-authenticate and enter the API key again.")
-     |> redirect(to: reauthentication_path(action))}
-  end
-
   defp stale_action(socket) do
     {:noreply,
      socket
      |> put_flash(:error, "The integration changed in another session. Review its current state.")
      |> push_patch(to: ~p"/integrations")}
   end
-
-  defp reauthentication_path(action),
-    do: ~p"/users/reauthenticate/#{@provider}/#{action}"
 
   defp action_target("connect", nil), do: {:ok, :missing}
 

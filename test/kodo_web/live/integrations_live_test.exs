@@ -29,15 +29,15 @@ defmodule KodoWeb.IntegrationsLiveTest do
              build_conn() |> live(~p"/integrations")
   end
 
-  test "requires fresh sudo before displaying the API-key form", %{user: user} do
+  test "allows a normally authenticated session to display the API-key form", %{user: user} do
     conn =
       build_conn()
       |> log_in_user(user,
         token_authenticated_at: DateTime.add(DateTime.utc_now(:second), -11, :minute)
       )
 
-    assert {:error, {:redirect, %{to: path}}} = live(conn, ~p"/integrations?action=connect")
-    assert path == ~p"/users/reauthenticate/openai/connect"
+    assert {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
+    assert has_element?(view, "#openai-api-key-form")
   end
 
   test "connects without assigning or rendering the submitted key", %{conn: conn, scope: scope} do
@@ -351,36 +351,39 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert_receive {:DOWN, ^first_validation_ref, :process, ^first_validation, _reason}
   end
 
-  test "requires fresh sudo again when submitting without retaining the key", %{
+  test "allows saving after the authenticated session leaves sudo mode", %{
     conn: conn,
     scope: scope
   } do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
     {:ok, view, _html} = live(conn, ~p"/integrations?action=connect")
     expire_sudo(view)
-    secret = "expired-sudo-secret"
+    secret = "valid-aged-session-secret"
 
     response =
       view
       |> form("#openai-api-key-form", %{"integration" => %{"api_key" => secret}})
       |> render_submit()
 
-    assert_redirect(view, ~p"/users/reauthenticate/openai/connect")
+    assert_receive {:integration_validation_finished, _id, _generation}
     refute inspect(response) =~ secret
 
-    assert {:error, :integration_not_found} =
-             Integrations.get_integration_by_provider(scope, "openai")
+    assert {:ok, integration} = Integrations.get_integration_by_provider(scope, "openai")
+    assert {:ok, %{"api_key" => ^secret}} = CredentialEncryption.decrypt(integration)
   end
 
-  test "requires fresh sudo again before disconnecting", %{conn: conn, scope: scope} do
+  test "allows disconnecting after the authenticated session leaves sudo mode", %{
+    conn: conn,
+    scope: scope
+  } do
     {:ok, integration} = connect_openai(scope, "disconnect-secret")
     {:ok, view, _html} = live(conn, ~p"/integrations?action=disconnect")
     expire_sudo(view)
 
     view |> element("#openai-confirm-disconnect") |> render_click()
 
-    assert_redirect(view, ~p"/users/reauthenticate/openai/disconnect")
     assert {:ok, persisted} = Integrations.get_integration(scope, integration.id)
-    assert persisted.connection_status == "connected"
+    assert persisted.connection_status == "disconnected"
   end
 
   test "disconnect confirmation explains admitted requests and clears credentials", %{
