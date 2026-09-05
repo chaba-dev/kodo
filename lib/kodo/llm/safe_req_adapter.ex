@@ -379,11 +379,19 @@ defmodule Kodo.LLM.SafeReqAdapter do
   end
 
   defp canonicalize_reasoning_detail(%ReqLLM.Message.ReasoningDetails{} = detail) do
-    if optional_binary?(detail.text) and optional_binary?(detail.signature) and
-         is_boolean(detail.encrypted?) and
-         detail.provider in [:anthropic, :google, :openai, :openai_codex, :openrouter] and
-         optional_binary?(detail.format) and is_integer(detail.index) and detail.index >= 0 and
-         (is_nil(detail.provider_data) or is_map(detail.provider_data)) do
+    valid? =
+      Enum.all?([
+        optional_binary?(detail.text),
+        optional_binary?(detail.signature),
+        is_boolean(detail.encrypted?),
+        detail.provider in [:anthropic, :google, :openai, :openai_codex, :openrouter],
+        optional_binary?(detail.format),
+        is_integer(detail.index),
+        is_integer(detail.index) && detail.index >= 0,
+        is_nil(detail.provider_data) || is_map(detail.provider_data)
+      ])
+
+    if valid? do
       {:ok, %{detail | provider_data: canonical_reasoning_provider_data(detail)}}
     else
       :error
@@ -600,14 +608,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
   defp canonicalize_usage(_response), do: :error
 
   defp canonical_usage_counters(usage) do
-    with {:ok, counters} <-
-           Enum.reduce_while(@usage_fields, {:ok, %{}}, fn field, {:ok, acc} ->
-             value = Map.get(usage, field, Map.get(usage, Atom.to_string(field), 0))
-
-             if valid_usage_count?(value),
-               do: {:cont, {:ok, Map.put(acc, field, value)}},
-               else: {:halt, :error}
-           end),
+    with {:ok, counters} <- canonical_required_usage_counters(usage),
          total <-
            Map.get(
              usage,
@@ -620,6 +621,16 @@ defmodule Kodo.LLM.SafeReqAdapter do
     else
       _invalid -> :error
     end
+  end
+
+  defp canonical_required_usage_counters(usage) do
+    Enum.reduce_while(@usage_fields, {:ok, %{}}, fn field, {:ok, acc} ->
+      value = Map.get(usage, field, Map.get(usage, Atom.to_string(field), 0))
+
+      if valid_usage_count?(value),
+        do: {:cont, {:ok, Map.put(acc, field, value)}},
+        else: {:halt, :error}
+    end)
   end
 
   defp valid_usage_count?(value),
@@ -736,17 +747,17 @@ defmodule Kodo.LLM.SafeReqAdapter do
     Map.update(usage, field, nil, fn
       details when is_map(details) ->
         allowed = Enum.map(@openai_tool_usage_bases, &(&1 <> suffix))
-
-        Enum.reduce(details, %{}, fn {key, count}, acc ->
-          if key in allowed and is_number(count) and count > 0 and
-               count <= @max_tool_usage_count,
-             do: Map.put(acc, key, count),
-             else: acc
-        end)
+        Enum.reduce(details, %{}, &put_sanitized_usage_entry(&1, &2, allowed))
 
       _details ->
         %{}
     end)
+  end
+
+  defp put_sanitized_usage_entry({key, count}, usage, allowed) do
+    if key in allowed and is_number(count) and count > 0 and count <= @max_tool_usage_count,
+      do: Map.put(usage, key, count),
+      else: usage
   end
 
   defp redact(value, secrets) when is_binary(value) do
@@ -897,35 +908,36 @@ defmodule Kodo.LLM.SafeReqAdapter do
     type = event[:event] || data["event"] || data["type"]
     index = data["output_index"] || data["index"] || 0
 
-    case type do
-      "response.output_item.added" ->
-        track_codex_tool_start(state, index, data["item"])
-
-      "response.function_call.name.delta" ->
-        if is_binary(data["delta"]) and data["delta"] != "",
-          do: put_codex_tool_call(state, index, :function),
-          else: invalidate_codex_tool_stream(state)
-
-      "response.function_call.delta" ->
-        track_codex_function_delta(state, index, data["delta"])
-
-      "response.function_call_arguments.delta" ->
-        append_codex_tool_arguments(state, index, data["delta"])
-
-      "response.function_call_arguments.done" ->
-        if Map.has_key?(state.fragments, index),
-          do: state,
-          else: append_codex_tool_arguments(state, index, data["arguments"] || data["delta"])
-
-      "response.output_item.done" ->
-        track_codex_item_done(state, index, data["item"])
-
-      _other ->
-        state
-    end
+    track_codex_tool_event(type, state, index, data)
   end
 
   defp track_codex_tool_event(_event, state), do: state
+
+  defp track_codex_tool_event("response.output_item.added", state, index, data),
+    do: track_codex_tool_start(state, index, data["item"])
+
+  defp track_codex_tool_event("response.function_call.name.delta", state, index, data) do
+    if is_binary(data["delta"]) and data["delta"] != "",
+      do: put_codex_tool_call(state, index, :function),
+      else: invalidate_codex_tool_stream(state)
+  end
+
+  defp track_codex_tool_event("response.function_call.delta", state, index, data),
+    do: track_codex_function_delta(state, index, data["delta"])
+
+  defp track_codex_tool_event("response.function_call_arguments.delta", state, index, data),
+    do: append_codex_tool_arguments(state, index, data["delta"])
+
+  defp track_codex_tool_event("response.function_call_arguments.done", state, index, data) do
+    if Map.has_key?(state.fragments, index),
+      do: state,
+      else: append_codex_tool_arguments(state, index, data["arguments"] || data["delta"])
+  end
+
+  defp track_codex_tool_event("response.output_item.done", state, index, data),
+    do: track_codex_item_done(state, index, data["item"])
+
+  defp track_codex_tool_event(_type, state, _index, _data), do: state
 
   defp track_codex_function_delta(state, index, delta) when is_map(delta) do
     state =
