@@ -35,6 +35,20 @@ defmodule Kodo.LLM.SafeReqAdapter do
     web_search web_search_preview file_search mcp x_search code_interpreter
   )
   @max_tool_usage_count 1_000_000
+  @max_token_count 1_000_000_000
+  @usage_fields ~w(
+    input_tokens output_tokens reasoning_tokens cached_tokens cache_creation_tokens
+  )a
+  @tool_usage_keys %{
+    "web_search" => :web_search,
+    "web_search_preview" => :web_search_preview,
+    "web_fetch" => :web_fetch,
+    "file_search" => :file_search,
+    "mcp" => :mcp,
+    "x_search" => :x_search,
+    "code_interpreter" => :code_interpreter
+  }
+  @tool_usage_units %{"call" => :call, "request" => :request, "source" => :source}
   @safe_error_types ~w(authentication_error billing_error permission_error rate_limit_error invalid_request_error)
   @anthropic_workspace_required_message "anthropic-workspace-id is required when authenticating with an identity-linked API key"
   @anthropic_spend_limit_prefixes [
@@ -166,16 +180,20 @@ defmodule Kodo.LLM.SafeReqAdapter do
        when status in 200..299 do
     case decode_success(request, response, provider) do
       {:ok, response} ->
-        request = request |> scrub_request() |> protect_response_decoding()
-        {request, sanitize_success(response, provider, secrets)}
+        if credential_in_key?(response.body, secrets) do
+          {scrub_request(request), safe_transport_error(:invalid_provider_response)}
+        else
+          request = request |> scrub_request() |> protect_response_decoding()
+          {request, sanitize_success(response, provider, secrets)}
+        end
 
       {:error, reason} ->
         {scrub_request(request), safe_transport_error(reason)}
     end
   end
 
-  defp sanitize_result({request, %Req.Response{} = response}, _secrets, _provider),
-    do: {scrub_request(request), scrub_error_response(response)}
+  defp sanitize_result({request, %Req.Response{} = response}, _secrets, provider),
+    do: {scrub_request(request), scrub_error_response(response, provider)}
 
   defp sanitize_result({request, exception}, _secrets, _provider) when is_exception(exception),
     do: {scrub_request(request), safe_transport_error(exception)}
@@ -188,7 +206,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
       Enum.map(request.response_steps, fn
         {name, step} when is_function(step, 1) ->
           {name,
-           fn request_and_response -> run_safe_response_step(step, request_and_response) end}
+           fn request_and_response -> run_safe_response_step(name, step, request_and_response) end}
 
         step ->
           step
@@ -197,8 +215,15 @@ defmodule Kodo.LLM.SafeReqAdapter do
     %{request | response_steps: steps}
   end
 
-  defp run_safe_response_step(step, {%Req.Request{} = request, %Req.Response{}} = input) do
+  defp run_safe_response_step(name, step, {%Req.Request{} = request, %Req.Response{}} = input) do
     case step.(input) do
+      {%Req.Request{} = request, %Req.Response{body: %ReqLLM.Response{} = body} = response}
+      when name == :llm_decode_response ->
+        case canonicalize_usage(body) do
+          {:ok, body} -> {request, %{response | body: body}}
+          :error -> {scrub_request(request), safe_transport_error(:invalid_provider_response)}
+        end
+
       {%Req.Request{} = request, exception} when is_exception(exception) ->
         {scrub_request(request), safe_transport_error(exception)}
 
@@ -217,6 +242,95 @@ defmodule Kodo.LLM.SafeReqAdapter do
     |> Enum.map(&String.replace_prefix(&1, "Bearer ", ""))
     |> Enum.reject(&(&1 == ""))
   end
+
+  defp credential_in_key?(value, secrets) when is_map(value) do
+    Enum.any?(value, fn {key, nested} ->
+      (is_binary(key) and Enum.any?(secrets, &String.contains?(key, &1))) or
+        credential_in_key?(nested, secrets)
+    end)
+  end
+
+  defp credential_in_key?(value, secrets) when is_list(value),
+    do: Enum.any?(value, &credential_in_key?(&1, secrets))
+
+  defp credential_in_key?(_value, _secrets), do: false
+
+  defp canonicalize_usage(%ReqLLM.Response{usage: nil} = response), do: {:ok, response}
+
+  defp canonicalize_usage(%ReqLLM.Response{usage: usage} = response) when is_map(usage) do
+    with {:ok, counters} <- canonical_usage_counters(usage),
+         {:ok, tool_usage} <- canonical_tool_usage(usage[:tool_usage] || usage["tool_usage"]) do
+      {:ok, %{response | usage: Map.put(counters, :tool_usage, tool_usage)}}
+    end
+  end
+
+  defp canonicalize_usage(_response), do: :error
+
+  defp canonical_usage_counters(usage) do
+    with {:ok, counters} <-
+           Enum.reduce_while(@usage_fields, {:ok, %{}}, fn field, {:ok, acc} ->
+             value = Map.get(usage, field, Map.get(usage, Atom.to_string(field), 0))
+
+             if valid_usage_count?(value),
+               do: {:cont, {:ok, Map.put(acc, field, value)}},
+               else: {:halt, :error}
+           end),
+         total <-
+           Map.get(
+             usage,
+             :total_tokens,
+             Map.get(usage, "total_tokens", counters.input_tokens + counters.output_tokens)
+           ),
+         true <- valid_usage_count?(total) do
+      {:ok, Map.put(counters, :total_tokens, total)}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp valid_usage_count?(value),
+    do: is_integer(value) and value >= 0 and value <= @max_token_count
+
+  defp canonical_tool_usage(nil), do: {:ok, %{}}
+
+  defp canonical_tool_usage(usage) when is_map(usage) do
+    Enum.reduce_while(usage, {:ok, %{}}, fn {key, entry}, {:ok, acc} ->
+      with {:ok, key} <- canonical_tool_key(key),
+           {:ok, entry} <- canonical_tool_entry(entry) do
+        {:cont, {:ok, Map.put(acc, key, entry)}}
+      else
+        :error -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp canonical_tool_usage(_usage), do: :error
+
+  defp canonical_tool_key(key) when is_atom(key), do: canonical_tool_key(Atom.to_string(key))
+
+  defp canonical_tool_key(key) when is_binary(key) do
+    Map.fetch(@tool_usage_keys, key)
+  end
+
+  defp canonical_tool_key(_key), do: :error
+
+  defp canonical_tool_entry(entry) when is_map(entry) do
+    count = entry[:count] || entry["count"]
+    unit = entry[:unit] || entry["unit"] || :call
+
+    with true <- is_integer(count) and count > 0 and count <= @max_tool_usage_count,
+         {:ok, unit} <- canonical_tool_unit(unit) do
+      {:ok, %{count: count, unit: unit}}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp canonical_tool_entry(_entry), do: :error
+
+  defp canonical_tool_unit(unit) when is_atom(unit), do: canonical_tool_unit(Atom.to_string(unit))
+  defp canonical_tool_unit(unit) when is_binary(unit), do: Map.fetch(@tool_usage_units, unit)
+  defp canonical_tool_unit(_unit), do: :error
 
   defp scrub_request(request) do
     request = Enum.reduce(@credential_headers, request, &Req.Request.delete_header(&2, &1))
@@ -292,10 +406,10 @@ defmodule Kodo.LLM.SafeReqAdapter do
   defp redact(value, secrets) when is_list(value), do: Enum.map(value, &redact(&1, secrets))
   defp redact(value, _secrets), do: value
 
-  defp scrub_error_response(%Req.Response{body: body} = response) do
+  defp scrub_error_response(%Req.Response{body: body} = response, provider) do
     %{
       response
-      | body: safe_error_body(body),
+      | body: safe_error_body(body, provider),
         headers: Req.Fields.new([]),
         trailers: Req.Fields.new([])
     }
@@ -386,29 +500,32 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp safe_codex_event?(_event), do: false
 
-  defp safe_error_body(body) when is_binary(body) do
+  defp safe_error_body(body, provider) when is_binary(body) do
     case Jason.decode(body) do
-      {:ok, decoded} -> safe_error_body(decoded)
+      {:ok, decoded} -> safe_error_body(decoded, provider)
       {:error, _reason} -> %{}
     end
   end
 
-  defp safe_error_body(%{"error" => error}) when is_map(error) do
-    safe_error = safe_error(error)
+  defp safe_error_body(%{"error" => error}, provider) when is_map(error) do
+    safe_error = safe_error(error, provider)
 
     %{"error" => safe_error}
   end
 
-  defp safe_error_body(_body), do: %{}
+  defp safe_error_body(_body, _provider), do: %{}
 
   defp maybe_put_safe(map, key, value, allowed) do
     if value in allowed, do: Map.put(map, key, value), else: map
   end
 
-  defp safe_error(%{
-         "type" => "invalid_request_error",
-         "message" => message
-       })
+  defp safe_error(
+         %{
+           "type" => "invalid_request_error",
+           "message" => message
+         },
+         "anthropic"
+       )
        when is_binary(message) do
     cond do
       message == @anthropic_workspace_required_message ->
@@ -422,10 +539,13 @@ defmodule Kodo.LLM.SafeReqAdapter do
     end
   end
 
-  defp safe_error(%{"details" => %{"error_code" => "enforced_spend_limit_reached"}}),
-    do: %{"code" => "enforced_spend_limit_reached"}
+  defp safe_error(
+         %{"details" => %{"error_code" => "enforced_spend_limit_reached"}},
+         "anthropic"
+       ),
+       do: %{"code" => "enforced_spend_limit_reached"}
 
-  defp safe_error(error) do
+  defp safe_error(error, _provider) do
     %{}
     |> maybe_put_safe("code", error["code"], @safe_error_codes)
     |> maybe_put_safe("type", error["type"], @safe_error_types)

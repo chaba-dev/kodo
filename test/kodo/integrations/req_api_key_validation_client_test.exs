@@ -128,4 +128,32 @@ defmodule Kodo.Integrations.ReqAPIKeyValidationClientTest do
                finch_request: finch_request
              )
   end
+
+  test "preserves OpenAI's invalid-key code from the complete error envelope" do
+    finch_request = fn request, _finch_request, _finch_name, _options ->
+      {request,
+       %Req.Response{
+         status: 401,
+         body: %{
+           "error" => %{
+             "message" => "Incorrect API key provided: private detail",
+             "type" => "invalid_request_error",
+             "param" => nil,
+             "code" => "invalid_api_key"
+           }
+         }
+       }}
+    end
+
+    assert {:ok, 401,
+            %{
+              "error" => %{
+                "code" => "invalid_api_key",
+                "type" => "invalid_request_error"
+              }
+            }} =
+             ReqAPIKeyValidationClient.get_metadata("openai", "invalid-secret",
+               finch_request: finch_request
+             )
+  end
 end

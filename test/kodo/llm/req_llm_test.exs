@@ -225,6 +225,7 @@ defmodule Kodo.LLM.ReqLLMTest do
           body: %{
             "error" => %{
               "code" => "invalid_api_key",
+              "type" => "invalid_request_error",
               "message" => "provider echoed #{secret}"
             }
           }
@@ -427,6 +428,121 @@ defmodule Kodo.LLM.ReqLLMTest do
     refute inspect({measurements, metadata}) =~ prompt
   end
 
+  test "rejects unsafe decoded usage before telemetry or persistence" do
+    secret = "decoded-usage-secret"
+    prompt = "private decoded-usage prompt"
+    test_pid = self()
+    handler_id = "safe-decoded-usage-#{System.unique_integer()}"
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [[:req_llm, :token_usage], [:req_llm, :request, :stop], [:req_llm, :request, :exception]],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:decoded_usage_telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    cases = [
+      {
+        ReqLLM.model!("openai:gpt-4o-mini"),
+        @credential,
+        %{
+          "id" => "resp_unsafe",
+          "object" => "response",
+          "model" => "gpt-4o-mini",
+          "output" => [
+            %{
+              "type" => "message",
+              "role" => "assistant",
+              "content" => [%{"type" => "output_text", "text" => "ok", "annotations" => []}]
+            },
+            %{"type" => "#{secret} #{prompt}_call"}
+          ],
+          "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+        }
+      },
+      {
+        ReqLLM.model!("openrouter:anthropic/claude-sonnet-4"),
+        %{@credential | provider: "openrouter", billing_path: :aggregator},
+        %{
+          "id" => "chat_unsafe",
+          "model" => "anthropic/claude-sonnet-4",
+          "choices" => [
+            %{
+              "index" => 0,
+              "message" => %{"role" => "assistant", "content" => "ok"},
+              "finish_reason" => "stop"
+            }
+          ],
+          "usage" => %{
+            "prompt_tokens" => 1,
+            "completion_tokens" => 1,
+            "total_tokens" => 2,
+            "tool_usage" => %{
+              "#{secret} #{prompt}" => %{"count" => 1, "unit" => "private-detail"}
+            }
+          }
+        }
+      },
+      {
+        ReqLLM.model!("openrouter:anthropic/claude-sonnet-4"),
+        %{@credential | provider: "openrouter", billing_path: :aggregator},
+        %{
+          "id" => "chat_bad_total",
+          "model" => "anthropic/claude-sonnet-4",
+          "choices" => [
+            %{
+              "index" => 0,
+              "message" => %{"role" => "assistant", "content" => "ok"},
+              "finish_reason" => "stop"
+            }
+          ],
+          "usage" => %{
+            "prompt_tokens" => 1,
+            "completion_tokens" => 1,
+            "total_tokens" => "#{secret} #{prompt}"
+          }
+        }
+      }
+    ]
+
+    for {model, credential, body} <- cases do
+      server = start_provider_server([%{status: 200, body: body}])
+
+      options =
+        []
+        |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+        |> Keyword.put(:base_url, server.base_url)
+
+      log =
+        capture_log(fn ->
+          assert {:error, error} =
+                   ReqLLM.generate_text(
+                     model,
+                     [%{"role" => "user", "content" => prompt}],
+                     options
+                   )
+
+          refute inspect(error) =~ secret
+          refute inspect(error) =~ prompt
+        end)
+
+      assert_receive {:decoded_usage_telemetry, [:req_llm, :request, :exception], measurements,
+                      metadata}
+
+      refute inspect({measurements, metadata}) =~ secret
+      refute inspect({measurements, metadata}) =~ prompt
+      refute log =~ secret
+      refute log =~ prompt
+      refute_receive {:decoded_usage_telemetry, [:req_llm, :token_usage], _, _}
+      refute_receive {:decoded_usage_telemetry, [:req_llm, :request, :stop], _, _}
+    end
+  end
+
   test "Kodo rejects empty Anthropic inference responses without crashing" do
     server =
       start_provider_server([
@@ -437,6 +553,25 @@ defmodule Kodo.LLM.ReqLLMTest do
             "id" => "msg_empty",
             "type" => "message",
             "content" => [],
+            "model" => "claude-3-5-haiku-latest"
+          }
+        },
+        %{
+          status: 200,
+          body: %{
+            "id" => "msg_tool",
+            "type" => "message",
+            "content" => [
+              %{
+                "type" => "tool_use",
+                "id" => "call-1",
+                "name" => "read_file",
+                "input" => %{
+                  "path" => "README.md",
+                  "request-local-key" => "echo"
+                }
+              }
+            ],
             "model" => "claude-3-5-haiku-latest"
           }
         }
@@ -454,8 +589,8 @@ defmodule Kodo.LLM.ReqLLMTest do
     credential = %{@credential | provider: "anthropic"}
     model = ReqLLM.model!("anthropic:claude-3-5-haiku-latest")
 
-    for _response <- 1..2 do
-      assert {:error, %Kodo.LLM.ProviderError{kind: :request_failed, retryable: false}} =
+    for _response <- 1..3 do
+      assert {:error, %Kodo.LLM.ProviderError{kind: :request_failed, retryable: false} = error} =
                Adapter.generate(
                  model,
                  [%{"role" => "user", "content" => "private prompt"}],
@@ -464,6 +599,8 @@ defmodule Kodo.LLM.ReqLLMTest do
                  timeout: 5_000,
                  reasoning: "none"
                )
+
+      refute inspect(error) =~ credential.token
     end
   end
 
