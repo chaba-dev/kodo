@@ -4,7 +4,33 @@ defmodule KodoWeb.IntegrationsLive do
   alias Kodo.Integrations
   alias Kodo.Integrations.APIKeyValidation
 
-  @provider "openai"
+  @provider_configs [
+    %{
+      id: "openai",
+      name: "OpenAI API",
+      badge: "Platform billing",
+      description: "Use an OpenAI Platform API key for compatible model requests.",
+      key_label: "OpenAI API key",
+      revoke_url: "https://platform.openai.com/api-keys"
+    },
+    %{
+      id: "anthropic",
+      name: "Anthropic",
+      badge: "Platform billing",
+      description: "Use a workspace-scoped Anthropic Console API key for Claude models.",
+      key_label: "Anthropic API key",
+      revoke_url: "https://console.anthropic.com/settings/keys"
+    },
+    %{
+      id: "openrouter",
+      name: "OpenRouter",
+      badge: "Aggregator billing",
+      description: "Use an OpenRouter API key for models billed through OpenRouter.",
+      key_label: "OpenRouter API key",
+      revoke_url: "https://openrouter.ai/settings/keys"
+    }
+  ]
+  @providers Enum.map(@provider_configs, & &1.id)
   @actions ~w(connect replace disconnect)
   @max_api_key_bytes 4_096
 
@@ -17,32 +43,49 @@ defmodule KodoWeb.IntegrationsLive do
     {:ok,
      socket
      |> assign(:action, nil)
+     |> assign(:action_provider, nil)
      |> assign(:action_target, nil)
+     |> assign(:provider_configs, @provider_configs)
      |> assign(:max_api_key_bytes, @max_api_key_bytes)
      |> assign(:api_key_form, to_form(%{"api_key" => ""}, as: :integration))
      |> assign(:validation_tasks, %{})
-     |> load_integration()}
+     |> load_integrations()}
   end
 
   @impl true
+  def handle_params(%{"provider" => provider, "action" => action}, _uri, socket)
+      when provider in @providers and action in @actions do
+    open_action(socket, provider, action)
+  end
+
+  # Keep existing OpenAI action links valid while provider-qualified links roll out.
   def handle_params(%{"action" => action}, _uri, socket) when action in @actions do
-    socket = load_integration(socket)
-
-    case action_target(action, socket.assigns.integration) do
-      {:ok, target} ->
-        {:noreply, socket |> assign(:action, action) |> assign(:action_target, target)}
-
-      :error ->
-        stale_action(socket)
-    end
+    open_action(socket, "openai", action)
   end
 
   def handle_params(_params, _uri, socket) do
     {:noreply,
      socket
      |> assign(:action, nil)
+     |> assign(:action_provider, nil)
      |> assign(:action_target, nil)
-     |> load_integration()}
+     |> load_integrations()}
+  end
+
+  defp open_action(socket, provider, action) do
+    socket = load_integrations(socket)
+
+    case action_target(action, integration_for(socket.assigns.integrations, provider)) do
+      {:ok, target} ->
+        {:noreply,
+         socket
+         |> assign(:action, action)
+         |> assign(:action_provider, provider)
+         |> assign(:action_target, target)}
+
+      :error ->
+        stale_action(socket)
+    end
   end
 
   @impl true
@@ -53,7 +96,10 @@ defmodule KodoWeb.IntegrationsLive do
       {:noreply,
        socket
        |> start_validation(integration)
-       |> put_flash(:info, "OpenAI API key saved. Checking access.")
+       |> put_flash(
+         :info,
+         "#{provider_name(socket.assigns.action_provider)} API key saved. Checking access."
+       )
        |> push_patch(to: ~p"/integrations")}
     else
       false ->
@@ -73,10 +119,11 @@ defmodule KodoWeb.IntegrationsLive do
     end
   end
 
-  def handle_event("check_access", _params, socket) do
-    socket = load_integration(socket)
+  def handle_event("check_access", %{"provider" => provider}, socket)
+      when provider in @providers do
+    socket = load_integrations(socket)
 
-    case socket.assigns.integration do
+    case integration_for(socket.assigns.integrations, provider) do
       %{connection_status: "connected"} = integration ->
         if validation_running?(socket.assigns.validation_tasks, integration) do
           {:noreply, socket}
@@ -89,15 +136,18 @@ defmodule KodoWeb.IntegrationsLive do
     end
   end
 
+  def handle_event("check_access", _params, socket), do: stale_action(socket)
+
   def handle_event("disconnect", _params, socket) do
-    with true <- socket.assigns.action == "disconnect",
+    with provider when provider in @providers <- socket.assigns.action_provider,
+         true <- socket.assigns.action == "disconnect",
          %{id: id, credential_generation: generation, connection_status: "connected"} <-
            socket.assigns.action_target,
          {:ok, _integration} <-
            Integrations.disconnect(socket.assigns.current_scope, id, generation) do
       {:noreply,
        socket
-       |> put_flash(:info, "OpenAI disconnected from Kodo.")
+       |> put_flash(:info, "#{provider_name(provider)} disconnected from Kodo.")
        |> push_patch(to: ~p"/integrations")}
     else
       false ->
@@ -110,7 +160,12 @@ defmodule KodoWeb.IntegrationsLive do
         stale_action(socket)
 
       {:error, _reason} ->
-        {:noreply, put_flash(socket, :error, "OpenAI could not be disconnected.")}
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "#{provider_name(socket.assigns.action_provider)} could not be disconnected."
+         )}
     end
   end
 
@@ -118,7 +173,7 @@ defmodule KodoWeb.IntegrationsLive do
   def handle_info({reference, _result}, socket) when is_reference(reference) do
     if Map.has_key?(socket.assigns.validation_tasks, reference) do
       Process.demonitor(reference, [:flush])
-      {:noreply, socket |> drop_validation_task(reference) |> load_integration()}
+      {:noreply, socket |> drop_validation_task(reference) |> load_integrations()}
     else
       {:noreply, socket}
     end
@@ -126,23 +181,28 @@ defmodule KodoWeb.IntegrationsLive do
 
   def handle_info({:DOWN, reference, :process, _pid, _reason}, socket) do
     if Map.has_key?(socket.assigns.validation_tasks, reference) do
-      {:noreply, socket |> drop_validation_task(reference) |> load_integration()}
+      {:noreply, socket |> drop_validation_task(reference) |> load_integrations()}
     else
       {:noreply, socket}
     end
   end
 
   def handle_info({:integration_validation_finished, _id, _generation}, socket) do
-    {:noreply, load_integration(socket)}
+    {:noreply, load_integrations(socket)}
   end
 
   defp save_api_key(
          %{assigns: %{action: "connect", action_target: :missing}} = socket,
          api_key
        ) do
-    Integrations.connect(socket.assigns.current_scope, @provider, "api_key", %{
-      "api_key" => api_key
-    })
+    Integrations.connect(
+      socket.assigns.current_scope,
+      socket.assigns.action_provider,
+      "api_key",
+      %{
+        "api_key" => api_key
+      }
+    )
   end
 
   defp save_api_key(
@@ -189,14 +249,13 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp save_api_key(_socket, _api_key), do: {:error, :stale_credential_generation}
 
-  defp load_integration(socket) do
-    integration =
-      case Integrations.get_integration_by_provider(socket.assigns.current_scope, @provider) do
-        {:ok, integration} -> integration_metadata(integration)
-        {:error, :integration_not_found} -> nil
-      end
+  defp load_integrations(socket) do
+    integrations =
+      socket.assigns.current_scope
+      |> Integrations.list_integrations()
+      |> Map.new(fn integration -> {integration.provider, integration_metadata(integration)} end)
 
-    assign(socket, :integration, integration)
+    assign(socket, :integrations, integrations)
   end
 
   # Browser-facing state needs lifecycle metadata only. In particular, keeping
@@ -291,6 +350,24 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp validation_detail(_integration), do: nil
 
+  defp integration_for(integrations, provider), do: Map.get(integrations, provider)
+
+  defp provider_config(provider) do
+    Enum.find(@provider_configs, &(&1.id == provider))
+  end
+
+  defp provider_name(provider) do
+    case provider_config(provider) do
+      %{name: name} -> name
+      nil -> "Provider"
+    end
+  end
+
+  defp action_path(provider, action),
+    do: ~p"/integrations?#{[provider: provider, action: action]}"
+
+  defp dom_id(provider, suffix), do: "#{provider}-#{suffix}"
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -327,196 +404,202 @@ defmodule KodoWeb.IntegrationsLive do
             </p>
           </div>
 
-          <p
-            :if={validation_running?(@validation_tasks, @integration)}
-            id="openai-validation-progress"
-            class="flex items-center gap-2 text-xs font-medium text-zinc-500"
-            role="status"
-          >
-            <span class="size-2 animate-pulse rounded-full bg-amber-500"></span> Checking access…
-          </p>
-
-          <section
-            id="openai-integration"
-            class="overflow-hidden rounded-2xl border border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/40"
-          >
-            <div class="flex flex-col gap-5 p-5 sm:flex-row sm:items-start sm:justify-between sm:p-6">
-              <div class="flex min-w-0 gap-4">
-                <div class="flex size-11 shrink-0 items-center justify-center rounded-xl bg-zinc-950 text-white shadow-sm dark:bg-white dark:text-zinc-950">
-                  <.icon name="hero-sparkles" class="size-5" />
-                </div>
-                <div class="min-w-0">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <h3 class="font-semibold text-zinc-950 dark:text-white">OpenAI API</h3>
-                    <span class="rounded-full bg-zinc-200/80 px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                      Platform billing
-                    </span>
-                  </div>
-                  <p class="mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-                    Use a user-owned OpenAI Platform API key for compatible model requests.
-                  </p>
-                  <dl
-                    id="openai-status"
-                    aria-live="polite"
-                    aria-atomic="true"
-                    class="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs"
-                  >
-                    <div>
-                      <dt class="text-zinc-500">Connection</dt>
-                      <dd class="mt-0.5 font-semibold text-zinc-900 dark:text-zinc-100">
-                        {status_label(@integration)}
-                      </dd>
-                    </div>
-                    <div :if={integration_connected?(@integration)}>
-                      <dt class="text-zinc-500">Access</dt>
-                      <dd class={["mt-0.5 font-semibold", validation_class(@integration)]}>
-                        {validation_label(@integration)}
-                      </dd>
-                    </div>
-                  </dl>
-                  <p
-                    :if={validation_detail(@integration)}
-                    id="openai-access-detail"
-                    class="mt-2 max-w-xl text-xs leading-5 text-zinc-500 dark:text-zinc-400"
-                  >
-                    {validation_detail(@integration)}
-                  </p>
-                </div>
-              </div>
-
-              <div :if={!integration_connected?(@integration)} class="shrink-0">
-                <.link
-                  id="openai-connect"
-                  patch={~p"/integrations?action=connect"}
-                  class="inline-flex items-center justify-center rounded-xl bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-zinc-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
-                >
-                  Connect
-                </.link>
-              </div>
-              <div
-                :if={integration_connected?(@integration)}
-                class="flex shrink-0 flex-wrap justify-end gap-2"
-              >
-                <button
-                  id="openai-check-access"
-                  type="button"
-                  phx-click="check_access"
-                  disabled={validation_running?(@validation_tasks, @integration)}
-                  aria-describedby="openai-status"
-                  class="inline-flex items-center gap-1.5 rounded-xl border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:text-zinc-950 disabled:cursor-wait disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-white"
-                >
-                  <.icon
-                    name="hero-arrow-path"
-                    class={[
-                      "size-4",
-                      validation_running?(@validation_tasks, @integration) &&
-                        "motion-safe:animate-spin"
-                    ]}
-                  />
-                  {if(validation_running?(@validation_tasks, @integration),
-                    do: "Checking…",
-                    else: "Check access"
-                  )}
-                </button>
-                <.link
-                  id="openai-replace"
-                  patch={~p"/integrations?action=replace"}
-                  class="rounded-xl border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:text-zinc-950 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-white"
-                >
-                  Replace
-                </.link>
-                <.link
-                  id="openai-disconnect"
-                  patch={~p"/integrations?action=disconnect"}
-                  class="rounded-xl border border-red-200 bg-white px-3.5 py-2 text-sm font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-50 dark:border-red-950 dark:bg-zinc-900 dark:text-red-400 dark:hover:bg-red-950/30"
-                >
-                  Disconnect
-                </.link>
-              </div>
-            </div>
-
-            <div
-              :if={@action in ~w(connect replace)}
-              id="openai-api-key-panel"
-              class="border-t border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900 sm:p-6"
+          <%= for provider <- @provider_configs do %>
+            <% integration = integration_for(@integrations, provider.id) %>
+            <p
+              :if={validation_running?(@validation_tasks, integration)}
+              id={dom_id(provider.id, "validation-progress")}
+              class="flex items-center gap-2 text-xs font-medium text-zinc-500"
+              role="status"
             >
-              <h4 class="font-semibold text-zinc-950 dark:text-white">
-                {if(@action == "replace", do: "Replace API key", else: "Connect OpenAI")}
-              </h4>
-              <p class="mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-                The key is encrypted immediately and is never shown again.
-              </p>
-              <.form
-                for={@api_key_form}
-                id="openai-api-key-form"
-                phx-submit="save_api_key"
-                class="mt-4 max-w-xl"
+              <span class="size-2 animate-pulse rounded-full bg-amber-500"></span> Checking access…
+            </p>
+
+            <section
+              id={dom_id(provider.id, "integration")}
+              class="overflow-hidden rounded-2xl border border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/40"
+            >
+              <div class="flex flex-col gap-5 p-5 sm:flex-row sm:items-start sm:justify-between sm:p-6">
+                <div class="flex min-w-0 gap-4">
+                  <div class="flex size-11 shrink-0 items-center justify-center rounded-xl bg-zinc-950 text-white shadow-sm dark:bg-white dark:text-zinc-950">
+                    <.icon name="hero-sparkles" class="size-5" />
+                  </div>
+                  <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <h3 class="font-semibold text-zinc-950 dark:text-white">{provider.name}</h3>
+                      <span class="rounded-full bg-zinc-200/80 px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                        {provider.badge}
+                      </span>
+                    </div>
+                    <p class="mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+                      {provider.description}
+                    </p>
+                    <dl
+                      id={dom_id(provider.id, "status")}
+                      aria-live="polite"
+                      aria-atomic="true"
+                      class="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs"
+                    >
+                      <div>
+                        <dt class="text-zinc-500">Connection</dt>
+                        <dd class="mt-0.5 font-semibold text-zinc-900 dark:text-zinc-100">
+                          {status_label(integration)}
+                        </dd>
+                      </div>
+                      <div :if={integration_connected?(integration)}>
+                        <dt class="text-zinc-500">Access</dt>
+                        <dd class={["mt-0.5 font-semibold", validation_class(integration)]}>
+                          {validation_label(integration)}
+                        </dd>
+                      </div>
+                    </dl>
+                    <p
+                      :if={validation_detail(integration)}
+                      id={dom_id(provider.id, "access-detail")}
+                      class="mt-2 max-w-xl text-xs leading-5 text-zinc-500 dark:text-zinc-400"
+                    >
+                      {validation_detail(integration)}
+                    </p>
+                  </div>
+                </div>
+
+                <div :if={!integration_connected?(integration)} class="shrink-0">
+                  <.link
+                    id={dom_id(provider.id, "connect")}
+                    patch={action_path(provider.id, "connect")}
+                    class="inline-flex items-center justify-center rounded-xl bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-zinc-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+                  >
+                    Connect
+                  </.link>
+                </div>
+                <div
+                  :if={integration_connected?(integration)}
+                  class="flex shrink-0 flex-wrap justify-end gap-2"
+                >
+                  <button
+                    id={dom_id(provider.id, "check-access")}
+                    type="button"
+                    phx-click="check_access"
+                    phx-value-provider={provider.id}
+                    disabled={validation_running?(@validation_tasks, integration)}
+                    aria-describedby={dom_id(provider.id, "status")}
+                    class="inline-flex items-center gap-1.5 rounded-xl border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:text-zinc-950 disabled:cursor-wait disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-white"
+                  >
+                    <.icon
+                      name="hero-arrow-path"
+                      class={[
+                        "size-4",
+                        validation_running?(@validation_tasks, integration) &&
+                          "motion-safe:animate-spin"
+                      ]}
+                    />
+                    {if(validation_running?(@validation_tasks, integration),
+                      do: "Checking…",
+                      else: "Check access"
+                    )}
+                  </button>
+                  <.link
+                    id={dom_id(provider.id, "replace")}
+                    patch={action_path(provider.id, "replace")}
+                    class="rounded-xl border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:text-zinc-950 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-white"
+                  >
+                    Replace
+                  </.link>
+                  <.link
+                    id={dom_id(provider.id, "disconnect")}
+                    patch={action_path(provider.id, "disconnect")}
+                    class="rounded-xl border border-red-200 bg-white px-3.5 py-2 text-sm font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-50 dark:border-red-950 dark:bg-zinc-900 dark:text-red-400 dark:hover:bg-red-950/30"
+                  >
+                    Disconnect
+                  </.link>
+                </div>
+              </div>
+
+              <div
+                :if={@action_provider == provider.id and @action in ~w(connect replace)}
+                id={dom_id(provider.id, "api-key-panel")}
+                class="border-t border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900 sm:p-6"
               >
-                <.input
-                  field={@api_key_form[:api_key]}
-                  type="password"
-                  label="OpenAI API key"
-                  autocomplete="off"
-                  maxlength={@max_api_key_bytes}
-                  required
-                />
+                <h4 class="font-semibold text-zinc-950 dark:text-white">
+                  {if(@action == "replace", do: "Replace API key", else: "Connect #{provider.name}")}
+                </h4>
+                <p class="mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+                  The key is encrypted immediately and is never shown again.
+                </p>
+                <.form
+                  for={@api_key_form}
+                  id={dom_id(provider.id, "api-key-form")}
+                  phx-submit="save_api_key"
+                  class="mt-4 max-w-xl"
+                >
+                  <.input
+                    field={@api_key_form[:api_key]}
+                    type="password"
+                    label={provider.key_label}
+                    autocomplete="off"
+                    maxlength={@max_api_key_bytes}
+                    required
+                  />
+                  <div class="mt-4 flex flex-wrap justify-end gap-2">
+                    <.link
+                      patch={~p"/integrations"}
+                      class="rounded-xl px-4 py-2.5 text-sm font-semibold text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white"
+                    >
+                      Cancel
+                    </.link>
+                    <button
+                      id={dom_id(provider.id, "save-api-key")}
+                      type="submit"
+                      phx-disable-with="Encrypting…"
+                      class="rounded-xl bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-wait disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+                    >
+                      Save API key
+                    </button>
+                  </div>
+                </.form>
+              </div>
+
+              <div
+                :if={@action_provider == provider.id and @action == "disconnect" and integration}
+                id={dom_id(provider.id, "disconnect-panel")}
+                class="border-t border-red-100 bg-red-50/60 p-5 dark:border-red-950 dark:bg-red-950/20 sm:p-6"
+              >
+                <h4 class="font-semibold text-zinc-950 dark:text-white">
+                  Disconnect {provider.name}?
+                </h4>
+                <p class="mt-1 max-w-2xl text-sm leading-6 text-zinc-700 dark:text-zinc-300">
+                  Future Kodo requests will stop. A provider operation already admitted or sent may finish and may still incur charges.
+                  <.link
+                    id={dom_id(provider.id, "revoke-key-link")}
+                    href={provider.revoke_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="font-semibold text-red-800 underline decoration-red-300 underline-offset-2 hover:text-red-950 dark:text-red-300 dark:hover:text-red-200"
+                  >
+                    Revoke the key in {provider.name}<span class="sr-only">(opens in a new tab)</span>
+                  </.link>
+                  if it must stop outside Kodo.
+                </p>
                 <div class="mt-4 flex flex-wrap justify-end gap-2">
                   <.link
                     patch={~p"/integrations"}
-                    class="rounded-xl px-4 py-2.5 text-sm font-semibold text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white"
+                    class="rounded-xl px-4 py-2.5 text-sm font-semibold text-zinc-600 transition hover:bg-white dark:text-zinc-400 dark:hover:bg-zinc-800"
                   >
-                    Cancel
+                    Keep connected
                   </.link>
                   <button
-                    id="openai-save-api-key"
-                    type="submit"
-                    phx-disable-with="Encrypting…"
-                    class="rounded-xl bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-wait disabled:opacity-60 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
+                    id={dom_id(provider.id, "confirm-disconnect")}
+                    type="button"
+                    phx-click="disconnect"
+                    phx-disable-with="Disconnecting…"
+                    class="rounded-xl bg-red-700 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-800 disabled:cursor-wait disabled:opacity-60"
                   >
-                    Save API key
+                    Disconnect
                   </button>
                 </div>
-              </.form>
-            </div>
-
-            <div
-              :if={@action == "disconnect" and @integration}
-              id="openai-disconnect-panel"
-              class="border-t border-red-100 bg-red-50/60 p-5 dark:border-red-950 dark:bg-red-950/20 sm:p-6"
-            >
-              <h4 class="font-semibold text-zinc-950 dark:text-white">Disconnect OpenAI?</h4>
-              <p class="mt-1 max-w-2xl text-sm leading-6 text-zinc-700 dark:text-zinc-300">
-                Future Kodo requests will stop. A provider operation already admitted or sent may finish and may still incur charges.
-                <.link
-                  id="openai-revoke-key-link"
-                  href="https://platform.openai.com/api-keys"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="font-semibold text-red-800 underline decoration-red-300 underline-offset-2 hover:text-red-950 dark:text-red-300 dark:hover:text-red-200"
-                >
-                  Revoke the key in OpenAI <span class="sr-only">(opens in a new tab)</span>
-                </.link>
-                if it must stop outside Kodo.
-              </p>
-              <div class="mt-4 flex flex-wrap justify-end gap-2">
-                <.link
-                  patch={~p"/integrations"}
-                  class="rounded-xl px-4 py-2.5 text-sm font-semibold text-zinc-600 transition hover:bg-white dark:text-zinc-400 dark:hover:bg-zinc-800"
-                >
-                  Keep connected
-                </.link>
-                <button
-                  id="openai-confirm-disconnect"
-                  type="button"
-                  phx-click="disconnect"
-                  phx-disable-with="Disconnecting…"
-                  class="rounded-xl bg-red-700 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-800 disabled:cursor-wait disabled:opacity-60"
-                >
-                  Disconnect
-                </button>
               </div>
-            </div>
-          </section>
+            </section>
+          <% end %>
         </div>
       </Layouts.settings_shell>
     </Layouts.app>

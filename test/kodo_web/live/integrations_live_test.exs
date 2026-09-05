@@ -12,16 +12,27 @@ defmodule KodoWeb.IntegrationsLiveTest do
     %{conn: log_in_user(conn, user), scope: Kodo.Accounts.Scope.for_user(user), user: user}
   end
 
-  test "renders the authenticated settings shell and disconnected OpenAI card", %{conn: conn} do
+  test "renders the authenticated settings shell and disconnected provider cards", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/integrations")
 
     assert has_element?(view, "#settings-shell")
     assert has_element?(view, "#settings-nav-integrations[aria-current='page']")
     assert has_element?(view, "#settings-nav-account")
-    assert has_element?(view, "#openai-integration #openai-connect")
-    assert has_element?(view, "#openai-status", "Not connected")
-    refute has_element?(view, "#openai-status", "Access")
-    assert has_element?(view, "#openai-status[aria-live='polite'][aria-atomic='true']")
+
+    for {provider, name} <-
+          [{"openai", "OpenAI API"}, {"anthropic", "Anthropic"}, {"openrouter", "OpenRouter"}] do
+      assert has_element?(view, "##{provider}-integration", name)
+      assert has_element?(view, "##{provider}-integration ##{provider}-connect")
+      assert has_element?(view, "##{provider}-status", "Not connected")
+      refute has_element?(view, "##{provider}-status", "Access")
+
+      assert has_element?(
+               view,
+               "##{provider}-status[aria-live='polite'][aria-atomic='true']"
+             )
+    end
+
+    assert has_element?(view, "#openrouter-integration", "Aggregator billing")
   end
 
   test "requires authentication", %{conn: _conn} do
@@ -422,9 +433,102 @@ defmodule KodoWeb.IntegrationsLiveTest do
     refute has_element?(view, "#openai-status", "Access")
   end
 
-  defp connect_openai(scope, key) do
-    Integrations.connect(scope, "openai", "api_key", %{"api_key" => key})
+  test "connects and validates Anthropic and OpenRouter independently", %{
+    conn: conn,
+    scope: scope
+  } do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
+
+    for provider <- ~w(anthropic openrouter) do
+      secret = "valid-#{provider}-live-secret"
+
+      {:ok, view, _html} =
+        live(conn, ~p"/integrations?#{[provider: provider, action: "connect"]}")
+
+      assert has_element?(view, "##{provider}-api-key-form")
+      refute has_element?(view, "##{provider}-api-key-form[phx-change]")
+      refute has_element?(view, "#openai-api-key-panel")
+
+      view
+      |> form("##{provider}-api-key-form", %{"integration" => %{"api_key" => secret}})
+      |> render_submit()
+
+      assert_receive message = {:integration_validation_finished, _id, _generation}
+      send(view.pid, message)
+      _ = :sys.get_state(view.pid)
+
+      assert has_element?(view, "##{provider}-status", "Connected")
+      assert has_element?(view, "##{provider}-status dd.text-green-700", "Valid")
+      refute render(view) =~ secret
+      refute inspect(:sys.get_state(view.pid)) =~ secret
+
+      assert {:ok, integration} = Integrations.get_integration_by_provider(scope, provider)
+      assert {:ok, %{"api_key" => ^secret}} = CredentialEncryption.decrypt(integration)
+    end
   end
+
+  test "shows provider-specific rejected credentials as invalid", %{conn: conn, scope: scope} do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
+
+    for provider <- ~w(anthropic openrouter) do
+      {:ok, view, _html} =
+        live(conn, ~p"/integrations?#{[provider: provider, action: "connect"]}")
+
+      view
+      |> form("##{provider}-api-key-form", %{
+        "integration" => %{"api_key" => "invalid-#{provider}-live-secret"}
+      })
+      |> render_submit()
+
+      assert_receive message = {:integration_validation_finished, _id, _generation}
+      send(view.pid, message)
+      _ = :sys.get_state(view.pid)
+
+      assert has_element?(view, "##{provider}-status dd.text-red-700", "Invalid")
+      assert has_element?(view, "##{provider}-access-detail", "provider rejected")
+    end
+  end
+
+  test "replaces and disconnects each additional API-key provider", %{conn: conn, scope: scope} do
+    for {provider, revoke_url} <- [
+          {"anthropic", "https://console.anthropic.com/settings/keys"},
+          {"openrouter", "https://openrouter.ai/settings/keys"}
+        ] do
+      {:ok, original} = connect_provider(scope, provider, "first-#{provider}-secret")
+
+      {:ok, view, _html} =
+        live(conn, ~p"/integrations?#{[provider: provider, action: "replace"]}")
+
+      view
+      |> form("##{provider}-api-key-form", %{
+        "integration" => %{"api_key" => "valid-replacement-#{provider}"}
+      })
+      |> render_submit()
+
+      assert {:ok, replaced} = Integrations.get_integration_by_provider(scope, provider)
+      assert replaced.credential_generation == original.credential_generation + 1
+
+      render_patch(view, ~p"/integrations?#{[provider: provider, action: "disconnect"]}")
+
+      assert has_element?(
+               view,
+               "##{provider}-revoke-key-link[href='#{revoke_url}'][target='_blank']"
+             )
+
+      view |> element("##{provider}-confirm-disconnect") |> render_click()
+
+      assert {:ok, disconnected} = Integrations.get_integration(scope, original.id)
+      assert disconnected.connection_status == "disconnected"
+      assert is_nil(disconnected.encrypted_credentials)
+    end
+  end
+
+  defp connect_openai(scope, key) do
+    connect_provider(scope, "openai", key)
+  end
+
+  defp connect_provider(scope, provider, key),
+    do: Integrations.connect(scope, provider, "api_key", %{"api_key" => key})
 
   defp expire_sudo(view) do
     :sys.replace_state(view.pid, fn state ->
