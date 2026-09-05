@@ -11,7 +11,7 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
   @moduletag live_provider: true, timeout: 240_000
 
   @live_session_timeout 180_000
-  @prompt "Change greeting.txt from its current misspelling to exactly hello followed by a newline. Run a focused shell command to verify the exact file content, poll that command until it exits, and only then finish."
+  @prompt "Delegate one focused read-only search to inspect greeting.txt first. Then change greeting.txt from its current misspelling to exactly hello followed by a newline. Run a focused shell command to verify the exact file content, poll that command until it exits, and only then finish."
   @http_created_status 201
   @http_accepted_status 202
 
@@ -123,6 +123,7 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
     replay = Stack.replay!(context.stack.base_url, session_id, context.token)
 
     Stack.assert_live_outcome!(replay, context.workspace)
+    assert_role_invocations(replay, context)
 
     Stack.terminate_session!(session_id)
     assert {:ok, projection} = Sessions.active_state(session_id)
@@ -135,5 +136,20 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
 
   defp provider_key_env(provider) do
     flunk("live provider #{provider} is not supported; use openai, anthropic, or openrouter")
+  end
+
+  defp assert_role_invocations(replay, context) do
+    for {role, event_type} <- [
+          {"primary", "model_invocation_started"},
+          {"search", "subagent_invocation_started"},
+          {"review", "review_invocation_started"}
+        ] do
+      assert Enum.any?(replay["events"], fn event ->
+               event["type"] == event_type and event["payload"]["role"] == role and
+                 event["payload"]["provider"] == context.provider and
+                 event["payload"]["model"] == context.model
+             end),
+             "expected #{role} to execute with #{context.model}"
+    end
   end
 end
