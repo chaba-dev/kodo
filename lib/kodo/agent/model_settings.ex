@@ -212,10 +212,12 @@ defmodule Kodo.Agent.ModelSettings do
   end
 
   defp provider_name("openai"), do: "OpenAI API"
+  defp provider_name("openai_codex"), do: "ChatGPT"
   defp provider_name("anthropic"), do: "Anthropic"
   defp provider_name("openrouter"), do: "OpenRouter"
   defp provider_name(provider), do: provider
 
+  defp billing_path("openai_codex"), do: "subscription"
   defp billing_path("openrouter"), do: "aggregator"
   defp billing_path(_provider), do: "platform"
 end

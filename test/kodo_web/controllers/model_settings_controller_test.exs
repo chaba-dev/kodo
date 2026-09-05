@@ -115,6 +115,26 @@ defmodule KodoWeb.ModelSettingsControllerTest do
            }
   end
 
+  test "reports Codex models as ChatGPT subscription billed", %{conn: conn, scope: scope} do
+    assert {:ok, _override} =
+             Kodo.Agent.ModelSettings.put_user_override(scope, :primary, %{
+               model: "openai_codex:gpt-5.4"
+             })
+
+    response =
+      conn
+      |> get(~p"/api/model-settings")
+      |> json_response(200)
+
+    assert response["integration_feedback"]["primary"] == %{
+             "provider" => "openai_codex",
+             "provider_name" => "ChatGPT",
+             "billing_path" => "subscription",
+             "status" => "action_required",
+             "settings_path" => "/integrations"
+           }
+  end
+
   defp runner_attrs do
     %{
       workspace_root: "/work/#{Ecto.UUID.generate()}",
