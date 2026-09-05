@@ -1,0 +1,93 @@
+defmodule Kodo.LLM.SafeReqAdapterTest do
+  use ExUnit.Case, async: true
+
+  import ExUnit.CaptureIO
+
+  alias Kodo.LLM.SafeReqAdapter
+
+  test "removes operation secrets and untrusted details before error steps" do
+    request =
+      Req.new(
+        method: :post,
+        url: "https://provider.example/v1/messages",
+        headers: [{"x-api-key", "operation-secret"}],
+        body: ~s({"prompt":"private work"}),
+        finch_request: fn request, _finch_request, _finch_name, _options ->
+          {request,
+           Req.Response.new(
+             status: 401,
+             headers: [{"x-provider-debug", "operation-secret"}],
+             body: %{
+               "error" => %{
+                 "code" => "invalid_api_key",
+                 "message" => "echo operation-secret"
+               }
+             }
+           )}
+        end
+      )
+      |> Req.Request.register_options([:api_key])
+      |> Req.Request.put_option(:api_key, "operation-secret")
+
+    {scrubbed_request, response} =
+      capture_io(:stderr, fn -> send(self(), {:result, SafeReqAdapter.run(request)}) end)
+      |> then(fn _output ->
+        assert_receive {:result, result}
+        result
+      end)
+
+    assert scrubbed_request.body == nil
+    assert Req.Request.get_header(scrubbed_request, "x-api-key") == []
+    refute Map.has_key?(scrubbed_request.options, :api_key)
+    assert response.headers == Req.Fields.new([])
+    assert response.body == %{"error" => %{"code" => "invalid_api_key"}}
+    refute inspect({scrubbed_request, response}) =~ "operation-secret"
+    refute inspect({scrubbed_request, response}) =~ "private work"
+  end
+
+  test "redacts an echoed credential from successful provider output" do
+    request =
+      Req.new(
+        method: :post,
+        url: "https://provider.example/v1/messages",
+        headers: [{"authorization", "Bearer operation-secret"}],
+        body: "request",
+        finch_request: fn request, _finch_request, _finch_name, _options ->
+          {request, Req.Response.new(status: 200, body: %{"content" => "echo operation-secret"})}
+        end
+      )
+
+    {_request, response} =
+      capture_io(:stderr, fn -> send(self(), {:result, SafeReqAdapter.run(request)}) end)
+      |> then(fn _output ->
+        assert_receive {:result, result}
+        result
+      end)
+
+    assert response.body == %{"content" => "echo [REDACTED]"}
+  end
+
+  test "normalizes transport exceptions without retaining their details" do
+    request =
+      Req.new(
+        method: :post,
+        url: "https://provider.example/v1/messages",
+        headers: [{"authorization", "Bearer operation-secret"}],
+        body: "private work",
+        finch_request: fn request, _finch_request, _finch_name, _options ->
+          {request, Req.TransportError.exception(reason: :econnrefused)}
+        end
+      )
+
+    {scrubbed_request, error} =
+      capture_io(:stderr, fn -> send(self(), {:result, SafeReqAdapter.run(request)}) end)
+      |> then(fn _output ->
+        assert_receive {:result, result}
+        result
+      end)
+
+    assert %Kodo.LLM.SafeTransportError{reason: :network} = error
+    refute inspect({scrubbed_request, error}) =~ "operation-secret"
+    refute inspect({scrubbed_request, error}) =~ "private work"
+  end
+end

@@ -1,5 +1,7 @@
 defmodule Kodo.LLM.ReqLLMTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
 
   alias Kodo.LLM.ReqLLM, as: Adapter
 
@@ -44,6 +46,14 @@ defmodule Kodo.LLM.ReqLLMTest do
 
     assert options[:receive_timeout] == 12_345
     assert options[:total_timeout] == 12_345
+    assert options[:max_retries] == 0
+    assert options[:telemetry] == [payloads: :none]
+
+    assert options[:req_http_options] == [
+             adapter: Kodo.LLM.SafeReqAdapter,
+             redirect: false,
+             redirect_log_level: false
+           ]
   end
 
   test "overrides ambient API keys with the operation-local credential" do
@@ -162,6 +172,141 @@ defmodule Kodo.LLM.ReqLLMTest do
     end
   end
 
+  test "distinguishes confirmed invalid OpenAI credentials from other 401 access failures" do
+    model = ReqLLM.model!("openai:gpt-4o-mini")
+
+    invalid =
+      ReqLLM.Error.API.Request.exception(
+        status: 401,
+        response_body: %{"error" => %{"code" => "invalid_api_key"}}
+      )
+
+    restricted = ReqLLM.Error.API.Request.exception(status: 401, response_body: %{})
+
+    assert Adapter.normalize_error(invalid, model, @credential).kind == :authentication_rejected
+    assert Adapter.normalize_error(restricted, model, @credential).kind == :access_restricted
+  end
+
+  test "classifies sanitized transport and redirect failures as retryable availability errors" do
+    model = ReqLLM.model!("openai:gpt-4o-mini")
+
+    transport =
+      ReqLLM.Error.API.Request.exception(
+        cause: Kodo.LLM.SafeTransportError.exception(reason: :network)
+      )
+
+    redirect = ReqLLM.Error.API.Request.exception(status: 307)
+
+    assert %{kind: :provider_unavailable, retryable: true} =
+             Adapter.normalize_error(transport, model, @credential)
+
+    assert %{kind: :provider_unavailable, retryable: true} =
+             Adapter.normalize_error(redirect, model, @credential)
+  end
+
+  test "scrubs provider errors before ReqLLM telemetry and debug logging" do
+    secret = "operation-local-secret"
+
+    server =
+      start_provider_server([
+        %{
+          status: 401,
+          body: %{
+            "error" => %{
+              "code" => "invalid_api_key",
+              "message" => "provider echoed #{secret}"
+            }
+          }
+        }
+      ])
+
+    handler_id = "req-llm-safe-error-#{System.unique_integer()}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:req_llm, :request, :exception],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:req_llm_exception, metadata})
+        end,
+        nil
+      )
+
+    previous_debug = Application.get_env(:req_llm, :debug)
+    Application.put_env(:req_llm, :debug, true)
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+      Application.put_env(:req_llm, :debug, previous_debug)
+    end)
+
+    credential = %{@credential | token: secret}
+
+    log =
+      capture_log(fn ->
+        options =
+          []
+          |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+          |> Keyword.put(:base_url, server.base_url)
+
+        model = ReqLLM.model!("openai:gpt-4o-mini")
+
+        assert {:error, error} =
+                 ReqLLM.generate_text(
+                   model,
+                   [%{"role" => "user", "content" => "private prompt"}],
+                   options
+                 )
+
+        assert Adapter.normalize_error(error, model, credential).kind ==
+                 :authentication_rejected
+      end)
+
+    assert_receive {:req_llm_exception, metadata}
+    refute inspect(metadata) =~ secret
+    refute inspect(metadata) =~ "private prompt"
+    refute log =~ secret
+    refute log =~ "private prompt"
+    assert [%{authorization: ["Bearer " <> ^secret]}] = provider_requests(server)
+  end
+
+  test "text and object inference reject redirects without forwarding credentials" do
+    target = start_provider_server([])
+
+    source =
+      start_provider_server([
+        %{status: 307, headers: [{"location", target.base_url <> "/collect"}], body: %{}},
+        %{status: 307, headers: [{"location", target.base_url <> "/collect"}], body: %{}}
+      ])
+
+    model = ReqLLM.model!("openai:gpt-4o-mini")
+    options = Adapter.request_options([], @credential, timeout: 5_000, reasoning: "none")
+
+    assert {:error, text_error} =
+             ReqLLM.generate_text(
+               model,
+               [%{"role" => "user", "content" => "hello"}],
+               Keyword.put(options, :base_url, source.base_url)
+             )
+
+    assert Adapter.normalize_error(text_error, model, @credential).kind == :provider_unavailable
+
+    assert {:error, object_error} =
+             ReqLLM.generate_object(
+               model,
+               [%{"role" => "user", "content" => "hello"}],
+               %{"type" => "object", "properties" => %{}},
+               Keyword.put(options, :base_url, source.base_url)
+             )
+
+    assert Adapter.normalize_error(object_error, model, @credential).kind ==
+             :provider_unavailable
+
+    assert length(provider_requests(source)) == 2
+    assert provider_requests(target) == []
+  end
+
   test "reconstructs a tool exchange from provider-independent persisted values" do
     context =
       Adapter.build_context([
@@ -246,5 +391,36 @@ defmodule Kodo.LLM.ReqLLMTest do
 
     assert [restored_tool_call] = assistant.tool_calls
     assert restored_tool_call == tool_call
+  end
+
+  defp start_provider_server(responses) do
+    port = free_port()
+
+    agent =
+      start_supervised!(
+        {Agent, fn -> %{requests: [], responses: responses} end},
+        id: {:provider_http_state, port}
+      )
+
+    start_supervised!(
+      {Bandit,
+       plug: {Kodo.Test.ProviderHTTPPlug, agent},
+       scheme: :http,
+       port: port,
+       ip: {127, 0, 0, 1},
+       startup_log: false},
+      id: {:provider_http, port}
+    )
+
+    %{agent: agent, base_url: "http://127.0.0.1:#{port}"}
+  end
+
+  defp provider_requests(server), do: Agent.get(server.agent, & &1.requests)
+
+  defp free_port do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_tcp.close(socket)
+    port
   end
 end

@@ -35,6 +35,10 @@ config :kodo,
     tool_timeout: default_tool_timeout_ms
   ]
 
+# ReqLLM's debug output may include raw request and response bodies. Kodo owns
+# sanitized provider observability at its wrapper boundary instead.
+config :req_llm, debug: false
+
 # Phoenix and LiveView use this list before inspecting request or event parameters.
 config :phoenix, :filter_parameters, [
   "password",

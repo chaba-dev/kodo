@@ -23,6 +23,12 @@ defmodule Kodo.LLM.ReqLLM do
     "max" => :max
   }
 
+  @safe_req_http_options [
+    adapter: Kodo.LLM.SafeReqAdapter,
+    redirect: false,
+    redirect_log_level: false
+  ]
+
   @impl true
   def validate_model(model, role_mapping, contract) do
     with {:ok, resolved} <- resolve_dispatchable_model(model),
@@ -47,6 +53,7 @@ defmodule Kodo.LLM.ReqLLM do
       ]
       |> put_reasoning_effort(opts[:reasoning])
       |> put_credential(credential)
+      |> secure_transport()
 
     case ReqLLM.generate_object(model, build_context(messages), schema, request_opts) do
       {:ok, response} ->
@@ -65,6 +72,7 @@ defmodule Kodo.LLM.ReqLLM do
       total_timeout: Keyword.fetch!(opts, :timeout)
     ]
     |> put_reasoning_effort(opts[:reasoning])
+    |> secure_transport()
   end
 
   @doc false
@@ -129,8 +137,39 @@ defmodule Kodo.LLM.ReqLLM do
     }
   end
 
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           status: 401,
+           response_body: %{"error" => %{"code" => code}}
+         },
+         "openai"
+       )
+       when code in ~w(invalid_api_key key_revoked),
+       do: {:authentication_rejected, false}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: 401}, "openai"),
+    do: {:access_restricted, false}
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           status: 401,
+           response_body: %{"error" => %{"type" => "authentication_error"}}
+         },
+         "anthropic"
+       ),
+       do: {:authentication_rejected, false}
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           status: 401,
+           response_body: %{"error" => %{"code" => 401}}
+         },
+         "openrouter"
+       ),
+       do: {:authentication_rejected, false}
+
   defp error_kind(%ReqLLM.Error.API.Request{status: 401}, _provider),
-    do: {:authentication_rejected, false}
+    do: {:access_restricted, false}
 
   defp error_kind(%ReqLLM.Error.API.Request{status: 402}, _provider),
     do: {:billing_required, false}
@@ -159,6 +198,16 @@ defmodule Kodo.LLM.ReqLLM do
        when is_integer(status) and status >= 500,
        do: {:provider_unavailable, true}
 
+  defp error_kind(%ReqLLM.Error.API.Request{status: status}, _provider)
+       when status in 300..399,
+       do: {:provider_unavailable, true}
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{cause: %Kodo.LLM.SafeTransportError{reason: :network}},
+         _provider
+       ),
+       do: {:provider_unavailable, true}
+
   defp error_kind(%ReqLLM.Error.API.Timeout{}, _provider), do: {:provider_unavailable, true}
   defp error_kind(_error, _provider), do: {:request_failed, false}
 
@@ -181,6 +230,16 @@ defmodule Kodo.LLM.ReqLLM do
     |> Keyword.put(:auth_mode, :oauth)
     |> Keyword.put(:access_token, token)
     |> Keyword.put(:chatgpt_account_id, account_id)
+  end
+
+  # ReqLLM emits terminal errors to telemetry before returning control to Kodo.
+  # The adapter therefore scrubs at the HTTP boundary, while these immutable
+  # options prevent redirects, retries, and caller-selected transports.
+  defp secure_transport(opts) do
+    opts
+    |> Keyword.put(:max_retries, 0)
+    |> Keyword.put(:telemetry, payloads: :none)
+    |> Keyword.put(:req_http_options, @safe_req_http_options)
   end
 
   defp resolve_dispatchable_model(model) do

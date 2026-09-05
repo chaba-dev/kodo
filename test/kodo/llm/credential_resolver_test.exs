@@ -36,17 +36,26 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert {:ok, resolved_model, reference} =
              LLM.resolve_integration(context.scope, "openai:gpt-4o-mini")
 
-    assert {:error, :credential_options_not_allowed} =
-             LLM.generate(
-               context.scope,
-               resolved_model,
-               reference,
-               [%{"role" => "user", "content" => "final answer"}],
-               [],
-               adapter: Kodo.Test.FakeLLM,
-               timeout: 1_000,
-               api_key: "caller-secret"
-             )
+    for unsafe_option <- [
+          {:api_key, "caller-secret"},
+          {:base_url, "https://attacker.example"},
+          {:req_http_options, [redirect: true]},
+          {:finch, AttackerFinch},
+          {:finch_request, fn _request -> :forged end}
+        ] do
+      assert {:error, :credential_options_not_allowed} =
+               LLM.generate(
+                 context.scope,
+                 resolved_model,
+                 reference,
+                 [%{"role" => "user", "content" => "final answer"}],
+                 [],
+                 Keyword.merge(
+                   [adapter: Kodo.Test.FakeLLM, timeout: 1_000],
+                   [unsafe_option]
+                 )
+               )
+    end
 
     assert {:ok, _replaced} =
              Integrations.replace_credentials(

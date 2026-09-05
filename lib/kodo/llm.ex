@@ -13,7 +13,20 @@ defmodule Kodo.LLM do
   alias Kodo.LLM.IntegrationRef
   alias Kodo.LLM.ProviderError
 
-  @credential_option_keys ~w(api_key access_token auth_mode oauth_file auth_file provider_options chatgpt_account_id)a
+  @credential_option_keys ~w(
+    api_key
+    access_token
+    auth_mode
+    oauth_file
+    auth_file
+    provider_options
+    chatgpt_account_id
+    base_url
+    req_http_options
+    finch
+    finch_request
+    adapter
+  )a
 
   @type tool :: %{
           required(:name) => String.t(),
