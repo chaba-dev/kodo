@@ -681,14 +681,27 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp reduce_tool_call(
-         {%{"name" => "delegate_search"} = call, _index},
+         {%{"name" => "delegate_search"} = call, index},
          {:ok, results},
          context
        ) do
     case execute_search_tool(call, context) do
-      {:ok, result} -> {:cont, {:ok, results ++ [result]}}
-      {:error, :rehoming_requested} = error -> {:halt, error}
-      {:error, reason} -> {:halt, {:error, reason}}
+      {:ok, result} ->
+        {:cont, {:ok, results ++ [result]}}
+
+      {:error, :rehoming_requested} = error ->
+        {:halt, error}
+
+      {:error, reason} ->
+        halt_after_tool_failure(
+          context.session_id,
+          context.invocation_id,
+          context.calls,
+          index,
+          call,
+          reason,
+          context.ownership
+        )
     end
   end
 

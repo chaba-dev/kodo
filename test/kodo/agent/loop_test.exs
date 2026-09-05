@@ -494,6 +494,81 @@ defmodule Kodo.Agent.LoopTest do
     refute Enum.any?(events, &(&1.type == "subagent_invocation_started"))
   end
 
+  test "reconciles a delegated provider failure so the next turn has a valid transcript", %{
+    runner: runner,
+    session: session,
+    ownership: ownership
+  } do
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+    previous_test_pid = Application.get_env(:kodo, :fake_llm_test_pid)
+    Application.put_env(:kodo, :fake_llm_test_pid, self())
+    on_exit(fn -> restore_env(:fake_llm_test_pid, previous_test_pid) end)
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "delegate provider failure with sibling"},
+        ownership: ownership
+      )
+
+    assert {:error, %Kodo.LLM.ProviderError{kind: :quota_or_rate_limit}} =
+             Loop.run(session.id,
+               adapter: Kodo.Test.FakeLLM,
+               budgets: budgets([]),
+               ownership: ownership
+             )
+
+    failed_calls =
+      session.id
+      |> Sessions.events_after()
+      |> Enum.filter(&(&1.type == "tool_failed"))
+      |> Map.new(&{&1.payload["tool_call_id"], &1.payload["error"]})
+
+    assert Map.has_key?(failed_calls, "provider-gated-search")
+    assert failed_calls["unreached-read"] =~ "skipped_after_failure"
+
+    {:ok, _event} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "retry provider transcript"},
+        ownership: ownership
+      )
+
+    retry =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:retry_provider_messages, messages}
+
+    tool_result_ids =
+      messages
+      |> Enum.filter(&(&1["role"] == "tool"))
+      |> MapSet.new(& &1["tool_call_id"])
+
+    assert MapSet.subset?(
+             MapSet.new(["provider-gated-search", "unreached-read"]),
+             tool_result_ids
+           )
+
+    assert_receive {:tool_request, review_request}
+    assert review_request["request"]["tool"] == "git_diff"
+
+    broadcast_success(runner, review_request, %{
+      "result" => "output",
+      "content" => "clean diff",
+      "truncated" => false
+    })
+
+    assert {:ok, "Retry completed."} = Task.await(retry)
+  end
+
   test "denies search tools outside the persisted read-only toolset", %{
     session: session,
     ownership: ownership
