@@ -119,12 +119,13 @@ mix test test/e2e/hermetic_full_stack_test.exs
 ```
 
 The release-candidate workflow repeats this acceptance test on Linux and macOS.
-Pull requests can run the opt-in live OpenAI smoke test when a repository owner,
+Pull requests can run the opt-in live provider smoke test when a repository owner,
 member, or collaborator comments exactly `/live-smoke-test`. Configure a
-protected GitHub Environment named `live-smoke` with an `OPENAI_API_KEY` secret
-and, optionally, a `LIVE_LLM_MODEL` variable. Require environment approval and
-use a low-quota key: the workflow intentionally executes the requested PR
-revision with that credential.
+protected GitHub Environment named `live-smoke` with `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY` for the provider selected by the
+optional `LIVE_LLM_MODEL` variable. Require environment approval and use a
+low-quota key: the workflow intentionally installs that key as the test user's
+encrypted integration and executes the requested PR revision with it.
 
 ## Deployment boundary
 
@@ -141,6 +142,12 @@ The live test can also be run locally:
 
 ```sh
 LIVE_LLM_MODEL=openai:gpt-4o-mini OPENAI_API_KEY=... \
+  mix test test/e2e/live_provider_full_stack_test.exs --include live_provider
+
+LIVE_LLM_MODEL=anthropic:claude-3-5-haiku-latest ANTHROPIC_API_KEY=... \
+  mix test test/e2e/live_provider_full_stack_test.exs --include live_provider
+
+LIVE_LLM_MODEL=openrouter:anthropic/claude-sonnet-4 OPENROUTER_API_KEY=... \
   mix test test/e2e/live_provider_full_stack_test.exs --include live_provider
 ```
 
