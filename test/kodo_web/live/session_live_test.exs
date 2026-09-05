@@ -433,6 +433,40 @@ defmodule KodoWeb.SessionLiveTest do
     refute has_element?(remounted, "#provider-action-required")
   end
 
+  test "mount watermark cannot skip or prematurely apply provider remediation", %{
+    scope: scope,
+    session: session
+  } do
+    watermark = Sessions.latest_event_sequence(scope, session.id)
+
+    {:ok, action} =
+      Sessions.append_event(session.id, "provider_action_required", %{
+        "reason" => "billing_required",
+        "provider" => "openai"
+      })
+
+    assert is_nil(Sessions.provider_action_required_event(scope, session.id, watermark))
+
+    projection =
+      Kodo.Sessions.Projection.apply_event(
+        action,
+        Kodo.Sessions.Projection.from_session(session, watermark)
+      )
+
+    assert projection.provider_action_required["reason"] == "billing_required"
+
+    stable_watermark = action.sequence
+
+    {:ok, user_message} =
+      Sessions.append_event(session.id, "user_message", %{"role" => "user", "content" => "retry"})
+
+    assert Sessions.provider_action_required_event(scope, session.id, stable_watermark).id ==
+             action.id
+
+    cleared = Kodo.Sessions.Projection.apply_event(user_message, projection)
+    assert is_nil(cleared.provider_action_required)
+  end
+
   test "resolves a pending approval from the browser", %{
     conn: conn,
     scope: scope,

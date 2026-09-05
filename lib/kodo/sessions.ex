@@ -164,13 +164,14 @@ defmodule Kodo.Sessions do
     |> Repo.one()
   end
 
-  def provider_action_required_event(%Scope{user: user}, session_id) do
+  def provider_action_required_event(%Scope{user: user}, session_id, at_or_before_sequence) do
     Event
     |> join(:inner, [event], session in assoc(event, :session))
     |> where(
       [event, session],
       event.session_id == ^session_id and session.user_id == ^user.id and
-        event.type in ["provider_action_required", "user_message"]
+        event.type in ["provider_action_required", "user_message"] and
+        event.sequence <= ^at_or_before_sequence
     )
     |> order_by([event], desc: event.sequence)
     |> limit(1)

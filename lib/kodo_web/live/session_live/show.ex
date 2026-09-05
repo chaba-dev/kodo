@@ -31,16 +31,17 @@ defmodule KodoWeb.SessionLive.Show do
       :ok = Sessions.subscribe_index(socket.assigns.current_scope)
     end
 
+    last_sequence = Sessions.latest_event_sequence(socket.assigns.current_scope, session.id)
     timeline_page = Sessions.timeline_page(socket.assigns.current_scope, session.id)
     pending_approval = pending_approval(socket.assigns.current_scope, session)
 
     provider_action_required =
-      provider_action_required(socket.assigns.current_scope, session.id)
+      provider_action_required(socket.assigns.current_scope, session.id, last_sequence)
 
     projection =
       Projection.from_session(
         session,
-        Sessions.latest_event_sequence(socket.assigns.current_scope, session.id),
+        last_sequence,
         timeline_page.tool_calls
       )
       |> Map.put(
@@ -265,8 +266,8 @@ defmodule KodoWeb.SessionLive.Show do
 
   defp update_pending_approval(socket, _event), do: socket
 
-  defp provider_action_required(scope, session_id) do
-    case Sessions.provider_action_required_event(scope, session_id) do
+  defp provider_action_required(scope, session_id, last_sequence) do
+    case Sessions.provider_action_required_event(scope, session_id, last_sequence) do
       nil -> nil
       event -> event.payload
     end
