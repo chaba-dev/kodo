@@ -11,6 +11,7 @@ defmodule Kodo.Sessions do
   alias Kodo.ControlPlaneTelemetry
   alias Kodo.Agent.ModelSettings
   alias Kodo.Accounts.User
+  alias Kodo.LLM.ProviderError
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
@@ -862,6 +863,23 @@ defmodule Kodo.Sessions do
       session_id,
       "failed",
       {"session_failed", %{"reason" => inspect(reason)}},
+      opts
+    )
+  end
+
+  def pause_for_provider(session_id, %ProviderError{} = error, opts \\ []) do
+    finalize_session(
+      session_id,
+      "idle",
+      {"provider_action_required",
+       %{
+         "reason" => Atom.to_string(error.kind),
+         "provider" => error.provider,
+         "model" => error.model,
+         "billing_path" => Atom.to_string(error.billing_path),
+         "retryable" => error.retryable,
+         "guidance" => ProviderError.guidance(error)
+       }},
       opts
     )
   end

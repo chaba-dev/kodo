@@ -118,6 +118,50 @@ defmodule Kodo.LLM.ReqLLMTest do
              )
   end
 
+  test "normalizes provider quota and billing errors without retaining provider bodies" do
+    cases = [
+      {"openai", :platform, 429, %{"error" => %{"code" => "rate_limit_exceeded"}},
+       :quota_or_rate_limit, true},
+      {"openai", :platform, 429,
+       %{"error" => %{"code" => "credit_balance_exhausted", "message" => "secret"}},
+       :billing_required, false},
+      {"anthropic", :platform, 402,
+       %{"error" => %{"type" => "billing_error", "message" => "secret"}}, :billing_required,
+       false},
+      {"openrouter", :aggregator, 402, %{"error" => %{"code" => 402, "message" => "secret"}},
+       :billing_required, false},
+      {"openrouter", :aggregator, 429, %{"error" => %{"code" => 429, "message" => "secret"}},
+       :quota_or_rate_limit, true}
+    ]
+
+    for {provider, billing_path, status, body, expected_kind, retryable} <- cases do
+      credential = %{
+        @credential
+        | provider: provider,
+          billing_path: billing_path,
+          token: "operation-local-secret"
+      }
+
+      model = LLMDB.Model.new!(%{id: "provider-model", provider: String.to_atom(provider)})
+
+      error =
+        ReqLLM.Error.API.Request.exception(
+          status: status,
+          reason: "provider exposed operation-local-secret",
+          response_body: body
+        )
+
+      normalized = Adapter.normalize_error(error, model, credential)
+
+      assert normalized.kind == expected_kind
+      assert normalized.provider == provider
+      assert normalized.billing_path == billing_path
+      assert normalized.retryable == retryable
+      refute inspect(normalized) =~ "operation-local-secret"
+      refute inspect(normalized) =~ "secret"
+    end
+  end
+
   test "reconstructs a tool exchange from provider-independent persisted values" do
     context =
       Adapter.build_context([

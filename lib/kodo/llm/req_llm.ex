@@ -5,6 +5,7 @@ defmodule Kodo.LLM.ReqLLM do
 
   alias Kodo.Agent.ModelCapabilities
   alias Kodo.LLM.Credential
+  alias Kodo.LLM.ProviderError
   alias ReqLLM.Context
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
@@ -47,9 +48,12 @@ defmodule Kodo.LLM.ReqLLM do
       |> put_reasoning_effort(opts[:reasoning])
       |> put_credential(credential)
 
-    with {:ok, response} <-
-           ReqLLM.generate_object(model, build_context(messages), schema, request_opts) do
-      {:ok, %{object: Response.object(response), usage: Response.usage(response)}}
+    case ReqLLM.generate_object(model, build_context(messages), schema, request_opts) do
+      {:ok, response} ->
+        {:ok, %{object: Response.object(response), usage: Response.usage(response)}}
+
+      {:error, error} ->
+        {:error, normalize_error(error, model, credential)}
     end
   end
 
@@ -93,20 +97,70 @@ defmodule Kodo.LLM.ReqLLM do
   defp request(model, context, tools, credential, opts) do
     request_opts = request_options(tools, credential, opts)
 
-    with {:ok, response} <- ReqLLM.generate_text(model, context, request_opts) do
-      classified = Response.classify(response)
-      tool_calls = Response.tool_calls(response)
+    case ReqLLM.generate_text(model, context, request_opts) do
+      {:ok, response} ->
+        classified = Response.classify(response)
+        tool_calls = Response.tool_calls(response)
 
-      {:ok,
-       %{
-         type: classified.type,
-         text: classified.text,
-         tool_calls: Enum.map(tool_calls, &normalize_tool_call/1),
-         usage: Response.usage(response),
-         assistant: dump_assistant(response.message, classified.text, tool_calls)
-       }}
+        {:ok,
+         %{
+           type: classified.type,
+           text: classified.text,
+           tool_calls: Enum.map(tool_calls, &normalize_tool_call/1),
+           usage: Response.usage(response),
+           assistant: dump_assistant(response.message, classified.text, tool_calls)
+         }}
+
+      {:error, error} ->
+        {:error, normalize_error(error, model, credential)}
     end
   end
+
+  @doc false
+  def normalize_error(error, %LLMDB.Model{} = model, %Credential{} = credential) do
+    {kind, retryable} = error_kind(error, credential.provider)
+
+    %ProviderError{
+      kind: kind,
+      provider: credential.provider,
+      model: "#{model.provider}:#{model.id}",
+      billing_path: credential.billing_path,
+      retryable: retryable
+    }
+  end
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: 401}, _provider),
+    do: {:authentication_rejected, false}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: 402}, _provider),
+    do: {:billing_required, false}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: 403}, _provider),
+    do: {:access_restricted, false}
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           status: 429,
+           response_body: %{"error" => %{"code" => code}}
+         },
+         "openai"
+       )
+       when code in ~w(
+              credit_balance_exhausted
+              organization_spend_limit_exceeded
+              project_spend_limit_exceeded
+            ),
+       do: {:billing_required, false}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: 429}, _provider),
+    do: {:quota_or_rate_limit, true}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: status}, _provider)
+       when is_integer(status) and status >= 500,
+       do: {:provider_unavailable, true}
+
+  defp error_kind(%ReqLLM.Error.API.Timeout{}, _provider), do: {:provider_unavailable, true}
+  defp error_kind(_error, _provider), do: {:request_failed, false}
 
   defp put_reasoning_effort(opts, reasoning) when reasoning in [nil, "none"], do: opts
 

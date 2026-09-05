@@ -302,6 +302,53 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert Sessions.get_session!(session.id).status == "failed"
   end
 
+  test "preserves the session and integration when provider quota needs user action", %{
+    session: session,
+    scope: scope
+  } do
+    {:ok, integration} = Integrations.get_integration_by_provider(scope, "openai")
+
+    assert {:ok, valid} =
+             Integrations.validation_succeeded(
+               scope,
+               integration.id,
+               integration.credential_generation
+             )
+
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
+
+    assert :ok = Sessions.start_turn(session.id, "provider quota")
+
+    assert_receive {:session_event,
+                    %{
+                      type: "provider_action_required",
+                      payload: %{
+                        "reason" => "quota_or_rate_limit",
+                        "provider" => "openai",
+                        "model" => "openai:gpt-4o-mini",
+                        "billing_path" => "platform",
+                        "retryable" => true,
+                        "guidance" => guidance
+                      }
+                    }}
+
+    assert guidance =~ "retry the turn"
+
+    assert_receive {:session_event,
+                    %{type: "session_status_changed", payload: %{"status" => "idle"}}}
+
+    assert Sessions.get_session!(session.id).status == "idle"
+
+    events = Sessions.events_after(session.id)
+    assert Enum.any?(events, &(&1.type == "user_message"))
+    refute Enum.any?(events, &(&1.type == "session_failed"))
+
+    assert {:ok, current} = Integrations.get_integration(scope, valid.id)
+    assert current.connection_status == "connected"
+    assert current.validation_status == "valid"
+    assert current.validation_error_code == valid.validation_error_code
+  end
+
   test "concurrent cancellation retries reconcile from durable status", %{
     session: session,
     scope: scope
