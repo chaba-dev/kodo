@@ -183,6 +183,11 @@ guarantee that providers will never charge for those endpoints; their contract
 and response classification are verified before each provider ships and when
 that integration contract changes.
 
+The authenticated owner may also choose Check access to rerun the same bounded,
+generation-fenced metadata validation against the saved credential. The key is
+decrypted only for that operation and is not returned to the browser. This
+action does not run model inference or introduce a separately billed probe.
+
 [cols="1,2,2,3",options="header"]
 |===
 | Provider | Valid | Invalid | Unavailable or configuration required
@@ -231,8 +236,8 @@ project, or later quota window.
 Kodo never runs billed inference automatically. A user may explicitly confirm
 a Test model request after the UI identifies the exact provider and model and
 warns that the request may incur provider charges. Testing requires
-authenticated ownership and confirmation but not renewed sudo mode. Saving
-remains successful during provider outages, and `unverified` or `unavailable`
+authenticated ownership and confirmation under the normal session boundary.
+Saving remains successful during provider outages, and `unverified` or `unavailable`
 credentials remain usable while `invalid` blocks provider requests.
 
 A saved credential is never rendered back to the browser. The UI shows
@@ -659,25 +664,19 @@ retrying an ambiguously consumed token.
 Integration management lives at `/integrations` inside the existing
 `:require_authenticated_user` LiveView session and browser pipeline. The route
 requires login because every integration is user-owned and its status controls
-that user's model requests. Submitting or replacing an API key, starting OAuth
-or device reauthorization, and disconnecting an integration require sudo mode
-because they change access to a separately billed external account. Kodo checks
-recent authentication again in the server-side handler for each sensitive
-event rather than trusting a LiveView that was mounted while sudo mode was
-active. API-key forms are shown only after that check, before the user enters a
-secret. If reauthentication is nevertheless required at submission, Kodo
-preserves only the provider and intended action, never the key; the user must
-enter it again. After reauthentication, Kodo returns the user to that action
-without requiring them to rediscover the affected integration.
+that user's model requests. The normal authenticated-user boundary applies to
+viewing status and to submitting, replacing, testing, reauthorizing, or
+disconnecting a user-owned integration; integration management does not require
+renewed sudo mode. Server-side handlers reload the integration through the
+authenticated scope and retain the existing ownership, state, and generation
+checks rather than trusting browser-supplied ownership or stale lifecycle data.
 
-An OAuth or device flow created while sudo mode was active may complete after
-that mode expires only while the same user-owned attempt remains active and its
-generation checks succeed. Cancelling such an attempt requires authenticated
-ownership but not renewed sudo mode. Viewing status, automatic credential
-validation, and ordinary model requests do not require sudo mode. An explicit
-same-model execution-route change uses a clear billing confirmation instead of
-sudo mode so it does not interrupt an active session; the existing turn-boundary
-and exact-model compatibility rules still apply.
+An OAuth or device flow may complete only while the same user-owned attempt
+remains active and its generation checks succeed. Cancelling such an attempt
+also requires authenticated ownership. An explicit same-model execution-route
+change additionally uses a clear billing confirmation so the user understands
+which external account will be charged; the existing turn-boundary and
+exact-model compatibility rules still apply.
 
 The page provides distinct actions for OpenAI API, ChatGPT Subscription,
 Anthropic, and OpenRouter. It explains the billing identity before connection,
@@ -734,6 +733,12 @@ Integrations page uses one provider card per billing identity. Each card gives
 provider purpose, authentication method, billing path, connection status, and
 one clear primary action before exposing secondary actions such as test,
 replace, reconnect, or disconnect.
+
+Connected provider cards show connection state before access-validation state.
+Successful and confirmed-invalid probes appear as the textual outcomes Valid
+and Invalid, with green and red color as supplemental cues. Not checked and
+Unable to verify remain neutral because neither is a verdict that the saved
+credential is invalid.
 
 Connection forms open within the provider's page context rather than placing
 four permanent secret inputs on the screen. Device authorization emphasizes
