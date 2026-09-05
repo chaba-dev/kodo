@@ -356,6 +356,161 @@ defmodule Kodo.LLM.ReqLLMTest do
     assert ReqLLM.Response.object(response) == %{"answer" => "ok"}
   end
 
+  test "successful provider usage cannot create unbounded telemetry keys" do
+    secret = "usage-key-secret"
+    prompt = "private usage-key prompt"
+
+    server =
+      start_provider_server([
+        %{
+          status: 200,
+          body: %{
+            "id" => "resp_test",
+            "object" => "response",
+            "model" => "gpt-4o-mini",
+            "output" => [
+              %{
+                "type" => "message",
+                "role" => "assistant",
+                "content" => [
+                  %{"type" => "output_text", "text" => "ok", "annotations" => []}
+                ]
+              }
+            ],
+            "usage" => %{
+              "input_tokens" => 1,
+              "output_tokens" => 1,
+              "server_side_tool_usage_details" => %{
+                "web_search_calls" => 1,
+                "#{secret} #{prompt}_calls" => 1
+              }
+            }
+          }
+        }
+      ])
+
+    test_pid = self()
+    handler_id = "safe-success-telemetry-#{System.unique_integer()}"
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [[:req_llm, :token_usage], [:req_llm, :request, :stop]],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:success_telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    options =
+      []
+      |> Adapter.request_options(@credential, timeout: 5_000, reasoning: "none")
+      |> Keyword.put(:base_url, server.base_url)
+
+    assert {:ok, response} =
+             ReqLLM.generate_text(
+               ReqLLM.model!("openai:gpt-4o-mini"),
+               [%{"role" => "user", "content" => prompt}],
+               options
+             )
+
+    assert ReqLLM.Response.text(response) == "ok"
+
+    assert_receive {:success_telemetry, [:req_llm, :token_usage], measurements, metadata}
+    refute inspect({measurements, metadata}) =~ secret
+    refute inspect({measurements, metadata}) =~ prompt
+
+    assert_receive {:success_telemetry, [:req_llm, :request, :stop], measurements, metadata}
+    refute inspect({measurements, metadata}) =~ secret
+    refute inspect({measurements, metadata}) =~ prompt
+  end
+
+  test "Kodo rejects empty Anthropic inference responses without crashing" do
+    server =
+      start_provider_server([
+        %{status: 200, body: %{"data" => []}},
+        %{
+          status: 200,
+          body: %{
+            "id" => "msg_empty",
+            "type" => "message",
+            "content" => [],
+            "model" => "claude-3-5-haiku-latest"
+          }
+        }
+      ])
+
+    previous = Application.get_env(:req_llm, :anthropic)
+    Application.put_env(:req_llm, :anthropic, base_url: server.base_url)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:req_llm, :anthropic, previous),
+        else: Application.delete_env(:req_llm, :anthropic)
+    end)
+
+    credential = %{@credential | provider: "anthropic"}
+    model = ReqLLM.model!("anthropic:claude-3-5-haiku-latest")
+
+    for _response <- 1..2 do
+      assert {:error, %Kodo.LLM.ProviderError{kind: :request_failed, retryable: false}} =
+               Adapter.generate(
+                 model,
+                 [%{"role" => "user", "content" => "private prompt"}],
+                 [],
+                 credential,
+                 timeout: 5_000,
+                 reasoning: "none"
+               )
+    end
+  end
+
+  test "classifies documented Anthropic spend caps as billing failures" do
+    cases = [
+      {400,
+       %{
+         "error" => %{
+           "type" => "invalid_request_error",
+           "message" => "You have reached your specified API usage limits; private reset detail"
+         }
+       }},
+      {429,
+       %{
+         "error" => %{
+           "type" => "rate_limit_error",
+           "message" => "private reset detail",
+           "details" => %{"error_code" => "enforced_spend_limit_reached"}
+         }
+       }}
+    ]
+
+    credential = %{@credential | provider: "anthropic"}
+    model = ReqLLM.model!("anthropic:claude-3-5-haiku-latest")
+
+    for {status, body} <- cases do
+      server = start_provider_server([%{status: status, body: body}])
+
+      options =
+        []
+        |> Adapter.request_options(credential, timeout: 5_000, reasoning: "none")
+        |> Keyword.put(:base_url, server.base_url)
+
+      assert {:error, error} =
+               ReqLLM.generate_text(
+                 model,
+                 [%{"role" => "user", "content" => "private prompt"}],
+                 options
+               )
+
+      assert %{kind: :billing_required, retryable: false} =
+               Adapter.normalize_error(error, model, credential)
+
+      refute inspect(error) =~ "private reset detail"
+    end
+  end
+
   test "invalid success bodies expose no prompt or credential telemetry" do
     secret = "malformed-response-secret"
     prompt = "private malformed-response prompt"

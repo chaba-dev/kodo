@@ -153,6 +153,17 @@ defmodule Kodo.Test.FakeLLM do
      }}
   end
 
+  defp initial(%{"content" => "invalid provider response"}) do
+    {:error,
+     %Kodo.LLM.ProviderError{
+       kind: :request_failed,
+       provider: "anthropic",
+       model: "anthropic:claude-3-5-haiku-latest",
+       billing_path: :platform,
+       retryable: false
+     }}
+  end
+
   defp initial(%{"content" => "delegate search"}) do
     tool_call("delegate-search", "delegate_search", %{"question" => "find helper"})
   end

@@ -31,8 +31,16 @@ defmodule Kodo.LLM.SafeReqAdapter do
     "organization_spend_limit_exceeded",
     "project_spend_limit_exceeded"
   ]
+  @openai_tool_usage_bases ~w(
+    web_search web_search_preview file_search mcp x_search code_interpreter
+  )
+  @max_tool_usage_count 1_000_000
   @safe_error_types ~w(authentication_error billing_error permission_error rate_limit_error invalid_request_error)
   @anthropic_workspace_required_message "anthropic-workspace-id is required when authenticating with an identity-linked API key"
+  @anthropic_spend_limit_prefixes [
+    "You have reached your specified API usage limits",
+    "You have reached your specified workspace API usage limits"
+  ]
 
   def run(%Req.Request{} = request) do
     run(request, nil)
@@ -156,10 +164,10 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp sanitize_result({request, %Req.Response{status: status} = response}, secrets, provider)
        when status in 200..299 do
-    case decode_success(response, provider) do
+    case decode_success(request, response, provider) do
       {:ok, response} ->
         request = request |> scrub_request() |> protect_response_decoding()
-        {request, redact_success(response, secrets)}
+        {request, sanitize_success(response, provider, secrets)}
 
       {:error, reason} ->
         {scrub_request(request), safe_transport_error(reason)}
@@ -230,13 +238,47 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp scrub_provider_options(_options), do: nil
 
-  defp redact_success(%Req.Response{body: body} = response, secrets) do
+  defp sanitize_success(%Req.Response{body: body} = response, provider, secrets) do
     %{
       response
-      | body: redact(body, secrets),
+      | body: body |> sanitize_provider_success(provider) |> redact(secrets),
         headers: Req.Fields.new([]),
         trailers: Req.Fields.new([])
     }
+  end
+
+  # ReqLLM 1.19 preserves unknown OpenAI server-tool usage keys in telemetry.
+  # Keep only reviewed identifiers until that dependency bounds them itself.
+  defp sanitize_provider_success(body, "openai") when is_map(body) do
+    if is_map(body["usage"]) do
+      Map.update!(body, "usage", fn usage ->
+        usage
+        |> sanitize_usage_map("server_side_tool_usage_details", "_calls")
+        |> sanitize_usage_map("server_side_tool_usage", "_calls")
+        |> sanitize_usage_map("server_tool_use", "_requests")
+      end)
+    else
+      body
+    end
+  end
+
+  defp sanitize_provider_success(body, _provider), do: body
+
+  defp sanitize_usage_map(usage, field, suffix) do
+    Map.update(usage, field, nil, fn
+      details when is_map(details) ->
+        allowed = Enum.map(@openai_tool_usage_bases, &(&1 <> suffix))
+
+        Enum.reduce(details, %{}, fn {key, count}, acc ->
+          if key in allowed and is_number(count) and count > 0 and
+               count <= @max_tool_usage_count,
+             do: Map.put(acc, key, count),
+             else: acc
+        end)
+
+      _details ->
+        %{}
+    end)
   end
 
   defp redact(value, secrets) when is_binary(value) do
@@ -259,7 +301,7 @@ defmodule Kodo.LLM.SafeReqAdapter do
     }
   end
 
-  defp decode_success(%Req.Response{} = response, "openai_codex") do
+  defp decode_success(_request, %Req.Response{} = response, "openai_codex") do
     with true <- event_stream_response?(response),
          :ok <- validate_codex_sse(response.body) do
       {:ok, response}
@@ -268,15 +310,15 @@ defmodule Kodo.LLM.SafeReqAdapter do
     end
   end
 
-  defp decode_success(%Req.Response{} = response, provider) do
+  defp decode_success(request, %Req.Response{} = response, provider) do
     case response.body do
       body when is_map(body) ->
-        validate_json_shape(response, body, provider)
+        validate_json_shape(response, body, provider, request.url.path)
 
       body when is_binary(body) ->
         with true <- json_response?(response),
              {:ok, decoded} when is_map(decoded) <- Jason.decode(body),
-             true <- valid_json_shape?(provider, decoded) do
+             true <- valid_json_shape?(provider, request.url.path, decoded) do
           {:ok, %{response | body: decoded}}
         else
           _invalid -> {:error, :invalid_provider_response}
@@ -287,22 +329,32 @@ defmodule Kodo.LLM.SafeReqAdapter do
     end
   end
 
-  defp validate_json_shape(response, body, provider) do
-    if valid_json_shape?(provider, body),
+  defp validate_json_shape(response, body, provider, path) do
+    if valid_json_shape?(provider, path, body),
       do: {:ok, response},
       else: {:error, :invalid_provider_response}
   end
 
-  defp valid_json_shape?("openai", body),
-    do: is_list(body["output"]) or is_list(body["choices"]) or is_list(body["data"])
+  defp valid_json_shape?("openai", path, body) when path in ["/v1/models", "/models"],
+    do: is_list(body["data"])
 
-  defp valid_json_shape?("anthropic", body),
-    do: is_list(body["content"]) or is_list(body["data"])
+  defp valid_json_shape?("openai", path, body) do
+    if String.ends_with?(path, "/responses"),
+      do: is_list(body["output"]),
+      else: is_list(body["choices"])
+  end
 
-  defp valid_json_shape?("openrouter", body),
-    do: is_list(body["choices"]) or is_map(body["data"])
+  defp valid_json_shape?("anthropic", path, body) when path in ["/v1/models", "/models"],
+    do: is_list(body["data"])
 
-  defp valid_json_shape?(_provider, _body), do: false
+  defp valid_json_shape?("anthropic", _path, body),
+    do: body["type"] == "message" and is_list(body["content"]) and body["content"] != []
+
+  defp valid_json_shape?("openrouter", path, body) when path in ["/api/v1/key", "/key"],
+    do: is_map(body["data"])
+
+  defp valid_json_shape?("openrouter", _path, body), do: is_list(body["choices"])
+  defp valid_json_shape?(_provider, _path, _body), do: false
 
   defp content_type?(response, expected) do
     response
@@ -358,10 +410,20 @@ defmodule Kodo.LLM.SafeReqAdapter do
          "message" => message
        })
        when is_binary(message) do
-    if message == @anthropic_workspace_required_message,
-      do: %{"code" => "workspace_selection_required"},
-      else: %{"type" => "invalid_request_error"}
+    cond do
+      message == @anthropic_workspace_required_message ->
+        %{"code" => "workspace_selection_required"}
+
+      Enum.any?(@anthropic_spend_limit_prefixes, &String.starts_with?(message, &1)) ->
+        %{"code" => "spend_limit_reached"}
+
+      true ->
+        %{"type" => "invalid_request_error"}
+    end
   end
+
+  defp safe_error(%{"details" => %{"error_code" => "enforced_spend_limit_reached"}}),
+    do: %{"code" => "enforced_spend_limit_reached"}
 
   defp safe_error(error) do
     %{}
@@ -372,6 +434,9 @@ defmodule Kodo.LLM.SafeReqAdapter do
   defp safe_transport_error(%Req.TransportError{reason: reason})
        when reason in [:closed, :timeout, :econnrefused, :nxdomain],
        do: Kodo.LLM.SafeTransportError.exception(reason: :network)
+
+  defp safe_transport_error(%Mint.TransportError{}),
+    do: Kodo.LLM.SafeTransportError.exception(reason: :network)
 
   defp safe_transport_error(%Kodo.LLM.SafeTransportError{reason: reason})
        when reason in [:network, :tls, :request, :invalid_origin],
@@ -386,6 +451,9 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp safe_mint_error(%Mint.TransportError{reason: {:tls_alert, _detail}}),
     do: Kodo.LLM.SafeTransportError.exception(reason: :tls)
+
+  defp safe_mint_error(%Mint.TransportError{}),
+    do: Kodo.LLM.SafeTransportError.exception(reason: :network)
 
   defp safe_mint_error(_reason),
     do: Kodo.LLM.SafeTransportError.exception(reason: :request)

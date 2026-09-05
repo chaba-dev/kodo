@@ -67,7 +67,7 @@ defmodule Kodo.LLM.SafeReqAdapterTest do
           {request,
            Req.Response.new(
              status: 200,
-             body: %{"choices" => [%{"content" => "echo operation-secret"}]}
+             body: %{"output" => [%{"content" => "echo operation-secret"}]}
            )}
         end
       )
@@ -79,7 +79,7 @@ defmodule Kodo.LLM.SafeReqAdapterTest do
         result
       end)
 
-    assert response.body == %{"choices" => [%{"content" => "echo [REDACTED]"}]}
+    assert response.body == %{"output" => [%{"content" => "echo [REDACTED]"}]}
   end
 
   test "normalizes transport exceptions without retaining their details" do
@@ -104,6 +104,22 @@ defmodule Kodo.LLM.SafeReqAdapterTest do
     assert %Kodo.LLM.SafeTransportError{reason: :network} = error
     refute inspect({scrubbed_request, error}) =~ "operation-secret"
     refute inspect({scrubbed_request, error}) =~ "private work"
+  end
+
+  test "classifies all Mint transport failures as retryable network errors" do
+    for reason <- [:econnreset, :enetunreach] do
+      request =
+        Req.new(
+          method: :post,
+          url: "https://api.openai.com/v1/responses",
+          finch_request: fn request, _finch_request, _finch_name, _options ->
+            {request, %Mint.TransportError{reason: reason}}
+          end
+        )
+
+      {_request, error} = run_for("openai", request)
+      assert %Kodo.LLM.SafeTransportError{reason: :network} = error
+    end
   end
 
   test "rejects an alternate initial origin before dispatch" do

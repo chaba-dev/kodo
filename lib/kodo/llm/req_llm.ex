@@ -101,7 +101,7 @@ defmodule Kodo.LLM.ReqLLM do
     request_opts = request_options(tools, credential, opts)
 
     case ReqLLM.generate_text(model, context, request_opts) do
-      {:ok, response} ->
+      {:ok, %Response{message: %Message{}} = response} ->
         classified = Response.classify(response)
         tool_calls = Response.tool_calls(response)
 
@@ -114,6 +114,9 @@ defmodule Kodo.LLM.ReqLLM do
            assistant: dump_assistant(response.message, classified.text, tool_calls)
          }}
 
+      {:ok, _invalid_response} ->
+        {:error, provider_error(:request_failed, false, model, credential)}
+
       {:error, error} ->
         {:error, normalize_error(error, model, credential)}
     end
@@ -123,6 +126,10 @@ defmodule Kodo.LLM.ReqLLM do
   def normalize_error(error, %LLMDB.Model{} = model, %Credential{} = credential) do
     {kind, retryable} = error_kind(error, credential.provider)
 
+    provider_error(kind, retryable, model, credential)
+  end
+
+  defp provider_error(kind, retryable, model, credential) do
     %ProviderError{
       kind: kind,
       provider: credential.provider,
@@ -171,6 +178,19 @@ defmodule Kodo.LLM.ReqLLM do
 
   defp error_kind(%ReqLLM.Error.API.Request{status: 403}, _provider),
     do: {:access_restricted, false}
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           status: status,
+           response_body: %{"error" => %{"code" => code}}
+         },
+         "anthropic"
+       )
+       when {status, code} in [
+              {400, "spend_limit_reached"},
+              {429, "enforced_spend_limit_reached"}
+            ],
+       do: {:billing_required, false}
 
   defp error_kind(
          %ReqLLM.Error.API.Request{

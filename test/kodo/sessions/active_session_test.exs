@@ -352,6 +352,29 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert current.validation_error_code == valid.validation_error_code
   end
 
+  test "pauses durably when a provider returns an invalid success response", %{session: session} do
+    :ok = Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{session.id}")
+
+    assert :ok = Sessions.start_turn(session.id, "invalid provider response")
+
+    assert_receive {:session_event,
+                    %{
+                      type: "provider_action_required",
+                      payload: %{
+                        "reason" => "request_failed",
+                        "provider" => "anthropic",
+                        "retryable" => false
+                      }
+                    }}
+
+    assert_receive {:session_event,
+                    %{type: "session_status_changed", payload: %{"status" => "idle"}}}
+
+    events = Sessions.events_after(session.id)
+    assert Enum.any?(events, &(&1.type == "user_message"))
+    refute Enum.any?(events, &(&1.type == "session_failed"))
+  end
+
   test "concurrent cancellation retries reconcile from durable status", %{
     session: session,
     scope: scope
