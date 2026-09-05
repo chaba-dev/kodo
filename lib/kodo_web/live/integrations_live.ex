@@ -427,7 +427,7 @@ defmodule KodoWeb.IntegrationsLive do
               id={dom_id(provider.id, "integration")}
               class="overflow-hidden rounded-2xl border border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-950/40"
             >
-              <div class="flex flex-col gap-5 p-5 sm:flex-row sm:items-start sm:justify-between sm:p-6">
+              <div class="flex flex-col gap-5 p-5 sm:p-6 2xl:flex-row 2xl:items-start 2xl:justify-between">
                 <div class="flex min-w-0 gap-4">
                   <div class="flex size-11 shrink-0 items-center justify-center rounded-xl bg-zinc-950 text-white shadow-sm dark:bg-white dark:text-zinc-950">
                     <.icon name="hero-sparkles" class="size-5" />
@@ -471,7 +471,7 @@ defmodule KodoWeb.IntegrationsLive do
                   </div>
                 </div>
 
-                <div :if={!integration_connected?(integration)} class="shrink-0">
+                <div :if={!integration_connected?(integration)} class="shrink-0 self-start">
                   <.link
                     id={dom_id(provider.id, "connect")}
                     patch={action_path(provider.id, "connect")}
@@ -482,7 +482,7 @@ defmodule KodoWeb.IntegrationsLive do
                 </div>
                 <div
                   :if={integration_connected?(integration)}
-                  class="flex shrink-0 flex-wrap justify-end gap-2"
+                  class="flex shrink-0 flex-wrap gap-2 self-start"
                 >
                   <button
                     id={dom_id(provider.id, "check-access")}
