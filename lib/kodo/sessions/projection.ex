@@ -14,6 +14,7 @@ defmodule Kodo.Sessions.Projection do
     approval_policy: "standard",
     status: "idle",
     pending_approval_id: nil,
+    provider_action_required: nil,
     last_sequence: @before_first_event_sequence,
     messages: [],
     tool_calls: %{}
@@ -94,8 +95,21 @@ defmodule Kodo.Sessions.Projection do
     end
   end
 
-  defp reduce(projection, type, payload)
-       when type in ["user_message", "assistant_message_completed"] do
+  defp reduce(projection, "provider_action_required", payload) do
+    %{projection | provider_action_required: payload}
+  end
+
+  defp reduce(projection, "user_message", payload) do
+    message = %{"role" => payload["role"], "content" => payload["content"]}
+
+    %{
+      projection
+      | messages: projection.messages ++ [message],
+        provider_action_required: nil
+    }
+  end
+
+  defp reduce(projection, "assistant_message_completed", payload) do
     message = %{"role" => payload["role"], "content" => payload["content"]}
     %{projection | messages: projection.messages ++ [message]}
   end

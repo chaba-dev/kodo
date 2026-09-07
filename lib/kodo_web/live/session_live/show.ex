@@ -31,19 +31,24 @@ defmodule KodoWeb.SessionLive.Show do
       :ok = Sessions.subscribe_index(socket.assigns.current_scope)
     end
 
+    last_sequence = Sessions.latest_event_sequence(socket.assigns.current_scope, session.id)
     timeline_page = Sessions.timeline_page(socket.assigns.current_scope, session.id)
     pending_approval = pending_approval(socket.assigns.current_scope, session)
+
+    provider_action_required =
+      provider_action_required(socket.assigns.current_scope, session.id, last_sequence)
 
     projection =
       Projection.from_session(
         session,
-        Sessions.latest_event_sequence(socket.assigns.current_scope, session.id),
+        last_sequence,
         timeline_page.tool_calls
       )
       |> Map.put(
         :pending_approval_id,
         pending_approval && pending_approval["approval_id"]
       )
+      |> Map.put(:provider_action_required, provider_action_required)
 
     {sessions, sessions_cursor} = Sessions.list_sessions_page(socket.assigns.current_scope)
     sessions = include_selected_session(sessions, socket.assigns.current_scope, session.id)
@@ -260,6 +265,19 @@ defmodule KodoWeb.SessionLive.Show do
     do: assign(socket, :pending_approval, nil)
 
   defp update_pending_approval(socket, _event), do: socket
+
+  defp provider_action_required(scope, session_id, last_sequence) do
+    case Sessions.provider_action_required_event(scope, session_id, last_sequence) do
+      nil -> nil
+      event -> event.payload
+    end
+  end
+
+  defp integration_settings_path(%{"settings_path" => "/integrations" <> _ = path}), do: path
+  defp integration_settings_path(_payload), do: ~p"/integrations"
+
+  defp safe_provider_help_url(%{"provider_help_url" => "https://" <> _ = url}), do: url
+  defp safe_provider_help_url(_payload), do: nil
 
   defp update_diff(socket, %{type: "tool_completed", payload: %{"name" => "git_diff"}} = event),
     do: assign(socket, :diff, diff_content(event.payload))

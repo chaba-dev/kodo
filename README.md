@@ -44,19 +44,17 @@ by `docker compose` on port 5435.
 ## Configure a model provider
 
 The balanced MVP profile uses OpenAI `gpt-4o-mini` for its primary, search, and
-review roles. Export the provider credential before starting Phoenix so ReqLLM
-can dispatch those requests:
+review roles. Start Phoenix, sign in, and connect the matching API key under
+**Settings → Integrations**. Kodo encrypts the key in the control plane and
+resolves it only for that user's provider requests; do not pass provider keys to
+the runner or configure process-wide provider credentials.
 
-```sh
-export OPENAI_API_KEY="..."
-mix phx.server
-```
-
-Keep provider keys only in the control-plane environment; do not pass them to
-the runner. `--model provider:model` overrides the primary role for one session.
-The selected model must support the role contract's tool use and context
-requirements, and its provider's standard ReqLLM credential must be configured.
-The live-provider smoke test below is the quickest configuration check.
+`--model provider:model` overrides the primary role for one session. The
+selected model must support the role contract's tool use and context
+requirements, and the signed-in user must have a usable integration for that
+provider. Use **Check access** on the integration card for a non-inference
+credential check. The opt-in live-provider smoke test below exercises a billed
+model request and should use a low-quota test key.
 
 ## Start and resume CLI sessions
 
@@ -119,12 +117,14 @@ mix test test/e2e/hermetic_full_stack_test.exs
 ```
 
 The release-candidate workflow repeats this acceptance test on Linux and macOS.
-Pull requests can run the opt-in live OpenAI smoke test when a repository owner,
+Pull requests can run the opt-in live provider smoke test when a repository owner,
 member, or collaborator comments exactly `/live-smoke-test`. Configure a
-protected GitHub Environment named `live-smoke` with an `OPENAI_API_KEY` secret
-and, optionally, a `LIVE_LLM_MODEL` variable. Require environment approval and
-use a low-quota key: the workflow intentionally executes the requested PR
-revision with that credential.
+protected GitHub Environment named `live-smoke` with one `LIVE_LLM_API_KEY`
+secret matching the provider selected by the optional `LIVE_LLM_MODEL` variable.
+Require environment approval and use a low-quota key: the workflow intentionally
+installs that key as the test user's encrypted integration and executes the
+requested PR revision with it. Keeping one selected credential in the environment
+avoids exposing unrelated provider keys to that revision.
 
 ## Deployment boundary
 
@@ -140,7 +140,13 @@ failure behavior, BEAM networking, and Kubernetes rollout requirements.
 The live test can also be run locally:
 
 ```sh
-LIVE_LLM_MODEL=openai:gpt-4o-mini OPENAI_API_KEY=... \
+LIVE_LLM_MODEL=openai:gpt-4o-mini LIVE_LLM_API_KEY=... \
+  mix test test/e2e/live_provider_full_stack_test.exs --include live_provider
+
+LIVE_LLM_MODEL=anthropic:claude-3-5-haiku-latest LIVE_LLM_API_KEY=... \
+  mix test test/e2e/live_provider_full_stack_test.exs --include live_provider
+
+LIVE_LLM_MODEL=openrouter:anthropic/claude-sonnet-4 LIVE_LLM_API_KEY=... \
   mix test test/e2e/live_provider_full_stack_test.exs --include live_provider
 ```
 

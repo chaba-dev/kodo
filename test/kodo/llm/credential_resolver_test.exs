@@ -36,17 +36,26 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert {:ok, resolved_model, reference} =
              LLM.resolve_integration(context.scope, "openai:gpt-4o-mini")
 
-    assert {:error, :credential_options_not_allowed} =
-             LLM.generate(
-               context.scope,
-               resolved_model,
-               reference,
-               [%{"role" => "user", "content" => "final answer"}],
-               [],
-               adapter: Kodo.Test.FakeLLM,
-               timeout: 1_000,
-               api_key: "caller-secret"
-             )
+    for unsafe_option <- [
+          {:api_key, "caller-secret"},
+          {:base_url, "https://attacker.example"},
+          {:req_http_options, [redirect: true]},
+          {:finch, AttackerFinch},
+          {:finch_request, fn _request -> :forged end}
+        ] do
+      assert {:error, :credential_options_not_allowed} =
+               LLM.generate(
+                 context.scope,
+                 resolved_model,
+                 reference,
+                 [%{"role" => "user", "content" => "final answer"}],
+                 [],
+                 Keyword.merge(
+                   [adapter: Kodo.Test.FakeLLM, timeout: 1_000],
+                   [unsafe_option]
+                 )
+               )
+    end
 
     assert {:ok, _replaced} =
              Integrations.replace_credentials(
@@ -56,7 +65,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
                %{"api_key" => "replacement"}
              )
 
-    assert {:error, :stale_credential_generation} =
+    assert {:error, %Kodo.LLM.ProviderError{} = error} =
              LLM.generate(
                context.scope,
                resolved_model,
@@ -66,6 +75,39 @@ defmodule Kodo.LLM.CredentialResolverTest do
                adapter: Kodo.Test.FakeLLM,
                timeout: 1_000
              )
+
+    assert error.kind == :integration_changed
+    assert Kodo.LLM.ProviderError.guidance(error) =~ "Retry the turn"
+    assert Kodo.LLM.ProviderError.settings_path(error) == "/integrations"
+  end
+
+  test "the public facade returns actionable missing-provider feedback" do
+    scope = AccountsFixtures.user_scope_fixture()
+
+    assert {:error, error} = LLM.resolve_integration(scope, "anthropic:claude-3-5-haiku-latest")
+    assert error.kind == :integration_required
+    assert error.provider == "anthropic"
+    assert error.model == "anthropic:claude-3-5-haiku-20241022"
+    assert error.billing_path == :platform
+
+    assert Kodo.LLM.ProviderError.guidance(error) =~
+             "Connect or activate an account for Anthropic"
+
+    assert {:error, openrouter_error} =
+             LLM.resolve_integration(scope, "openrouter:anthropic/claude-sonnet-4")
+
+    assert openrouter_error.provider == "openrouter"
+    assert openrouter_error.billing_path == :aggregator
+
+    assert {:error, codex_error} = LLM.resolve_integration(scope, "openai_codex:gpt-5.4")
+    assert codex_error.kind == :integration_required
+    assert codex_error.provider == "openai_codex"
+    assert codex_error.billing_path == :subscription
+
+    assert Kodo.LLM.ProviderError.guidance(codex_error) =~
+             "Choose models from connected API-key providers for the required roles, then start a new session"
+
+    assert Kodo.LLM.ProviderError.settings_path(codex_error) == "/integrations"
   end
 
   test "rejects forged and cross-user references", context do
@@ -166,6 +208,29 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert invalid.credential_generation == reference.credential_generation
   end
 
+  test "keeps admitted references pinned while new preflight selects the activated account",
+       context do
+    assert {:ok, second} =
+             Integrations.connect(context.scope, "openai", "api_key", %{
+               "api_key" => "second-secret"
+             })
+
+    assert {:ok, _activated} =
+             Integrations.activate(context.scope, second.id, second.credential_generation)
+
+    assert {:ok, admitted} = resolve(context)
+    assert admitted.integration_id == context.integration.id
+    assert admitted.token == "scoped-secret"
+
+    assert {:ok, next_reference} = CredentialResolver.reference(context.scope, model())
+    assert next_reference.integration_id == second.id
+
+    assert {:ok, next_credential} =
+             CredentialResolver.resolve(context.scope, model(), next_reference)
+
+    assert next_credential.token == "second-secret"
+  end
+
   test "requires exact model, reference, and stored providers", context do
     anthropic_model = LLMDB.Model.new!(%{id: "claude", provider: :anthropic})
 
@@ -216,6 +281,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
       id: Ecto.UUID.generate(),
       user_id: scope.user.id,
       provider: "openai_codex",
+      display_name: "ChatGPT",
       authentication_type: "oauth"
     }
 
@@ -244,6 +310,54 @@ defmodule Kodo.LLM.CredentialResolverTest do
     refute inspected =~ "access-secret"
     refute inspected =~ "refresh-secret"
     refute inspected =~ "account-secret"
+  end
+
+  test "resolves direct Anthropic and aggregator OpenRouter credentials independently" do
+    scope = AccountsFixtures.user_scope_fixture()
+
+    assert {:ok, anthropic} =
+             Integrations.connect(scope, "anthropic", "api_key", %{
+               "api_key" => "anthropic-secret"
+             })
+
+    assert {:ok, openrouter} =
+             Integrations.connect(scope, "openrouter", "api_key", %{
+               "api_key" => "openrouter-secret"
+             })
+
+    anthropic_model = LLMDB.Model.new!(%{id: "claude", provider: :anthropic})
+
+    openrouter_model =
+      LLMDB.Model.new!(%{id: "anthropic/claude", provider: :openrouter})
+
+    assert {:ok, anthropic_credential} =
+             CredentialResolver.resolve(
+               scope,
+               anthropic_model,
+               IntegrationRef.from_integration(anthropic)
+             )
+
+    assert anthropic_credential.provider == "anthropic"
+    assert anthropic_credential.billing_path == :platform
+    assert anthropic_credential.token == "anthropic-secret"
+
+    assert {:ok, openrouter_credential} =
+             CredentialResolver.resolve(
+               scope,
+               openrouter_model,
+               IntegrationRef.from_integration(openrouter)
+             )
+
+    assert openrouter_credential.provider == "openrouter"
+    assert openrouter_credential.billing_path == :aggregator
+    assert openrouter_credential.token == "openrouter-secret"
+
+    assert {:error, :integration_provider_mismatch} =
+             CredentialResolver.resolve(
+               scope,
+               openrouter_model,
+               IntegrationRef.from_integration(anthropic)
+             )
   end
 
   defp resolve(context) do

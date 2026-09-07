@@ -22,7 +22,7 @@ defmodule Kodo.LLM.CredentialResolver do
     provider = Atom.to_string(model_provider)
 
     with :ok <- require_supported_provider(provider),
-         {:ok, integration} <- Integrations.get_integration_by_provider(scope, provider),
+         {:ok, integration} <- Integrations.get_active_integration_by_provider(scope, provider),
          :ok <- require_usable(integration) do
       {:ok, IntegrationRef.from_integration(integration)}
     end

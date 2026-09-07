@@ -11,6 +11,7 @@ defmodule Kodo.Sessions do
   alias Kodo.ControlPlaneTelemetry
   alias Kodo.Agent.ModelSettings
   alias Kodo.Accounts.User
+  alias Kodo.LLM.ProviderError
   alias Kodo.Repo
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
@@ -161,6 +162,24 @@ defmodule Kodo.Sessions do
     |> order_by([event], desc: event.sequence)
     |> limit(1)
     |> Repo.one()
+  end
+
+  def provider_action_required_event(%Scope{user: user}, session_id, at_or_before_sequence) do
+    Event
+    |> join(:inner, [event], session in assoc(event, :session))
+    |> where(
+      [event, session],
+      event.session_id == ^session_id and session.user_id == ^user.id and
+        event.type in ["provider_action_required", "user_message"] and
+        event.sequence <= ^at_or_before_sequence
+    )
+    |> order_by([event], desc: event.sequence)
+    |> limit(1)
+    |> Repo.one()
+    |> case do
+      %{type: "provider_action_required"} = event -> event
+      _superseded_or_missing -> nil
+    end
   end
 
   def latest_completed_tool_event(%Scope{user: user}, session_id, name) do
@@ -862,6 +881,25 @@ defmodule Kodo.Sessions do
       session_id,
       "failed",
       {"session_failed", %{"reason" => inspect(reason)}},
+      opts
+    )
+  end
+
+  def pause_for_provider(session_id, %ProviderError{} = error, opts \\ []) do
+    finalize_session(
+      session_id,
+      "idle",
+      {"provider_action_required",
+       %{
+         "reason" => Atom.to_string(error.kind),
+         "provider" => error.provider,
+         "model" => error.model,
+         "billing_path" => Atom.to_string(error.billing_path),
+         "retryable" => error.retryable,
+         "guidance" => ProviderError.guidance(error),
+         "provider_help_url" => ProviderError.provider_help_url(error),
+         "settings_path" => ProviderError.settings_path(error)
+       }},
       opts
     )
   end

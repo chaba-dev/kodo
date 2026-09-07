@@ -21,6 +21,8 @@ defmodule Kodo.IntegrationsTest do
       assert integration.user_id == scope.user.id
       assert integration.connection_status == "connected"
       assert integration.validation_status == "unverified"
+      assert integration.active
+      assert integration.display_name == "OpenAI API"
       assert integration.credential_generation == 1
       assert {:ok, %{"api_key" => "owner-secret"}} = CredentialEncryption.decrypt(integration)
 
@@ -35,9 +37,97 @@ defmodule Kodo.IntegrationsTest do
                Integrations.get_integration_by_provider(other_scope, "openai")
     end
 
-    test "enforces one integration per user and provider", %{scope: scope} do
-      assert {:ok, _integration} = connect(scope)
-      assert {:error, :integration_already_exists} = connect(scope)
+    test "supports multiple provider accounts with one explicitly active", %{scope: scope} do
+      assert {:ok, first} = connect(scope, "first-secret", display_name: "Personal")
+      assert {:ok, second} = connect(scope, "second-secret", display_name: "Work")
+
+      assert first.active
+      refute second.active
+      assert second.display_name == "Work"
+      assert {:ok, active} = Integrations.get_active_integration_by_provider(scope, "openai")
+      assert active.id == first.id
+
+      assert {:ok, activated} =
+               Integrations.activate(scope, second.id, second.credential_generation)
+
+      assert activated.active
+      assert {:ok, active} = Integrations.get_active_integration_by_provider(scope, "openai")
+      assert active.id == second.id
+      refute Repo.reload!(first).active
+
+      assert {:ok, disconnected} =
+               Integrations.disconnect(scope, second.id, second.credential_generation)
+
+      refute disconnected.active
+
+      assert {:error, :integration_not_found} =
+               Integrations.get_active_integration_by_provider(scope, "openai")
+
+      assert {:ok, reactivated} =
+               Integrations.activate(scope, first.id, first.credential_generation)
+
+      assert reactivated.active
+    end
+
+    test "re-activating the active account preserves it without duplicate audit events", %{
+      scope: scope
+    } do
+      assert {:ok, first} = connect(scope, "first-secret", display_name: "Personal")
+      assert {:ok, second} = connect(scope, "second-secret", display_name: "Work")
+
+      assert {:ok, activated} =
+               Integrations.activate(scope, second.id, second.credential_generation)
+
+      assert {:ok, unchanged} =
+               Integrations.activate(scope, activated.id, activated.credential_generation)
+
+      assert unchanged.active
+      assert Repo.reload!(unchanged).active
+      refute Repo.reload!(first).active
+
+      assert Enum.count(
+               Integrations.list_audit_events(scope),
+               &(&1.event_type == "integration_activated")
+             ) == 1
+    end
+
+    test "adding an account after disconnecting the active one does not choose a fallback", %{
+      scope: scope
+    } do
+      assert {:ok, active} = connect(scope, "first-secret")
+      assert {:ok, inactive} = connect(scope, "second-secret")
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(scope, active.id, active.credential_generation)
+
+      assert {:ok, added} = connect(scope, "third-secret")
+
+      refute Repo.reload!(inactive).active
+      refute added.active
+
+      assert {:error, :integration_not_found} =
+               Integrations.get_active_integration_by_provider(scope, "openai")
+    end
+
+    test "activation is owned, connected, and generation fenced", %{scope: scope} do
+      other_scope = AccountsFixtures.user_scope_fixture()
+      assert {:ok, integration} = connect(scope)
+
+      assert {:error, :integration_not_found} =
+               Integrations.activate(
+                 other_scope,
+                 integration.id,
+                 integration.credential_generation
+               )
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.activate(scope, integration.id, integration.credential_generation + 1)
+
+      assert {:ok, disconnected} =
+               Integrations.disconnect(scope, integration.id, integration.credential_generation)
+
+      assert {:error, :integration_not_connected} =
+               Integrations.activate(scope, disconnected.id, disconnected.credential_generation)
     end
 
     test "returns a bounded error when connection races account deletion", %{scope: scope} do
@@ -140,6 +230,7 @@ defmodule Kodo.IntegrationsTest do
 
       assert reauthorization.connection_status == "reauthorization_required"
       assert reauthorization.validation_status == "unverified"
+      refute reauthorization.active
       assert reauthorization.encrypted_credentials == integration.encrypted_credentials
       assert reauthorization.credential_generation == generation
 
@@ -162,6 +253,31 @@ defmodule Kodo.IntegrationsTest do
       assert {:ok, %{"access_token" => "new-access"}} =
                CredentialEncryption.decrypt(refreshed)
                |> then(fn {:ok, payload} -> {:ok, Map.take(payload, ["access_token"])} end)
+    end
+
+    test "activates only the first OAuth account after authorization", %{scope: scope} do
+      first = oauth_integration(scope)
+
+      assert {:ok, first} =
+               Integrations.oauth_succeeded(scope, first.id, 0, %{
+                 "access_token" => "first-access",
+                 "refresh_token" => "first-refresh",
+                 "account_id" => "first-account"
+               })
+
+      assert first.active
+
+      second = oauth_integration(scope)
+
+      assert {:ok, second} =
+               Integrations.oauth_succeeded(scope, second.id, 0, %{
+                 "access_token" => "second-access",
+                 "refresh_token" => "second-refresh",
+                 "account_id" => "second-account"
+               })
+
+      refute second.active
+      assert Repo.reload!(first).active
     end
 
     test "rejects OAuth-only transitions for API-key integrations", %{scope: scope} do
@@ -233,7 +349,37 @@ defmodule Kodo.IntegrationsTest do
 
       assert connected.connection_status == "connected"
       assert connected.validation_status == "unverified"
+      refute connected.active
       assert connected.credential_generation == disconnected.credential_generation + 1
+    end
+
+    test "reauthorizing after invalid grant does not reactivate the account", %{scope: scope} do
+      integration = oauth_integration(scope)
+
+      assert {:ok, connected} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
+                 "access_token" => "access",
+                 "refresh_token" => "refresh"
+               })
+
+      assert connected.active
+
+      assert {:ok, reauthorization} =
+               Integrations.refresh_invalid_grant(
+                 scope,
+                 connected.id,
+                 connected.credential_generation
+               )
+
+      assert {:ok, reauthorized} =
+               Integrations.oauth_succeeded(
+                 scope,
+                 reauthorization.id,
+                 reauthorization.credential_generation,
+                 %{"access_token" => "new-access", "refresh_token" => "new-refresh"}
+               )
+
+      refute reauthorized.active
     end
 
     test "rejects forged and cross-user generation-fenced transitions", %{scope: scope} do
@@ -446,8 +592,8 @@ defmodule Kodo.IntegrationsTest do
     end
   end
 
-  defp connect(scope) do
-    Integrations.connect(scope, "openai", "api_key", %{"api_key" => "provider-secret"})
+  defp connect(scope, secret \\ "provider-secret", opts \\ []) do
+    Integrations.connect(scope, "openai", "api_key", %{"api_key" => secret}, opts)
   end
 
   defp oauth_integration(scope) do

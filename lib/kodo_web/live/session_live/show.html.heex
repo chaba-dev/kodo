@@ -70,6 +70,57 @@
     <div class="grid items-start lg:h-[calc(100vh-3.5rem)] lg:grid-cols-[minmax(0,1fr)_minmax(30rem,38vw)] lg:items-stretch">
       <main class="flex min-w-0 flex-col lg:h-full lg:min-h-0 lg:border-r lg:border-zinc-200 dark:lg:border-zinc-800">
         <section
+          :if={@projection.provider_action_required}
+          id="provider-action-required"
+          role="alert"
+          class="m-4 overflow-hidden rounded-xl border border-rose-300 bg-rose-50 dark:border-rose-700/70 dark:bg-rose-950/30"
+        >
+          <div class="flex gap-4 p-5 sm:p-6">
+            <div class="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-rose-200/70 text-rose-800 dark:bg-rose-500/20 dark:text-rose-300">
+              <.icon name="hero-exclamation-triangle" class="size-5" />
+            </div>
+            <div class="min-w-0 flex-1">
+              <p class="text-xs font-semibold uppercase tracking-[0.18em] text-rose-700 dark:text-rose-400">
+                Provider action required
+              </p>
+              <h2
+                id="provider-action-identity"
+                class="mt-1 font-semibold text-rose-950 dark:text-rose-100"
+              >
+                {@projection.provider_action_required["provider"]} · {@projection.provider_action_required[
+                  "model"
+                ]} · {@projection.provider_action_required["billing_path"]} billing
+              </h2>
+              <p
+                id="provider-action-guidance"
+                class="mt-2 text-sm leading-6 text-rose-900 dark:text-rose-200"
+              >
+                {@projection.provider_action_required["guidance"]}
+              </p>
+              <div class="mt-4 flex flex-wrap gap-3">
+                <a
+                  :if={safe_provider_help_url(@projection.provider_action_required)}
+                  id="provider-help-link"
+                  href={safe_provider_help_url(@projection.provider_action_required)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="text-sm font-semibold text-rose-800 underline decoration-rose-300 underline-offset-4 dark:text-rose-200"
+                >
+                  Provider help
+                </a>
+                <.link
+                  id="integration-settings-link"
+                  navigate={integration_settings_path(@projection.provider_action_required)}
+                  class="text-sm font-semibold text-rose-800 underline decoration-rose-300 underline-offset-4 dark:text-rose-200"
+                >
+                  Kodo integration settings
+                </.link>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section
           :if={@pending_approval}
           id="pending-approval"
           class="m-4 overflow-hidden rounded-xl border border-amber-300 bg-amber-50 dark:border-amber-700/70 dark:bg-amber-950/30"

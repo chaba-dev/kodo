@@ -6,6 +6,7 @@ defmodule Kodo.Sessions.ActiveSession do
   alias Kodo.Agent.Loop
   alias Kodo.Cluster.Discovery
   alias Kodo.Cluster.InstanceManager
+  alias Kodo.LLM.ProviderError
   alias Kodo.Sessions
   alias Kodo.Sessions.Projection
 
@@ -203,6 +204,10 @@ defmodule Kodo.Sessions.ActiveSession do
 
   defp finalize(session_id, {:ok, _answer}, ownership) do
     Sessions.complete_session(session_id, ownership: ownership)
+  end
+
+  defp finalize(session_id, {:error, %ProviderError{} = error}, ownership) do
+    Sessions.pause_for_provider(session_id, error, ownership: ownership)
   end
 
   defp finalize(session_id, {:error, reason}, ownership) do

@@ -5,6 +5,7 @@ defmodule Kodo.LLM.ReqLLM do
 
   alias Kodo.Agent.ModelCapabilities
   alias Kodo.LLM.Credential
+  alias Kodo.LLM.ProviderError
   alias ReqLLM.Context
   alias ReqLLM.Message
   alias ReqLLM.Message.ContentPart
@@ -46,10 +47,14 @@ defmodule Kodo.LLM.ReqLLM do
       ]
       |> put_reasoning_effort(opts[:reasoning])
       |> put_credential(credential)
+      |> secure_transport(credential.provider)
 
-    with {:ok, response} <-
-           ReqLLM.generate_object(model, build_context(messages), schema, request_opts) do
-      {:ok, %{object: Response.object(response), usage: Response.usage(response)}}
+    case ReqLLM.generate_object(model, build_context(messages), schema, request_opts) do
+      {:ok, response} ->
+        {:ok, %{object: Response.object(response), usage: Response.usage(response)}}
+
+      {:error, error} ->
+        {:error, normalize_error(error, model, credential)}
     end
   end
 
@@ -61,6 +66,7 @@ defmodule Kodo.LLM.ReqLLM do
       total_timeout: Keyword.fetch!(opts, :timeout)
     ]
     |> put_reasoning_effort(opts[:reasoning])
+    |> secure_transport(nil)
   end
 
   @doc false
@@ -68,6 +74,7 @@ defmodule Kodo.LLM.ReqLLM do
     tools
     |> request_options(opts)
     |> put_credential(credential)
+    |> secure_transport(credential.provider)
   end
 
   @doc false
@@ -93,20 +100,134 @@ defmodule Kodo.LLM.ReqLLM do
   defp request(model, context, tools, credential, opts) do
     request_opts = request_options(tools, credential, opts)
 
-    with {:ok, response} <- ReqLLM.generate_text(model, context, request_opts) do
-      classified = Response.classify(response)
-      tool_calls = Response.tool_calls(response)
+    case ReqLLM.generate_text(model, context, request_opts) do
+      {:ok, %Response{message: %Message{}} = response} ->
+        classified = Response.classify(response)
+        tool_calls = Response.tool_calls(response)
 
-      {:ok,
-       %{
-         type: classified.type,
-         text: classified.text,
-         tool_calls: Enum.map(tool_calls, &normalize_tool_call/1),
-         usage: Response.usage(response),
-         assistant: dump_assistant(response.message, classified.text, tool_calls)
-       }}
+        {:ok,
+         %{
+           type: classified.type,
+           text: classified.text,
+           tool_calls: Enum.map(tool_calls, &normalize_tool_call/1),
+           usage: Response.usage(response),
+           assistant: dump_assistant(response.message, classified.text, tool_calls)
+         }}
+
+      {:ok, _invalid_response} ->
+        {:error, provider_error(:request_failed, false, model, credential)}
+
+      {:error, error} ->
+        {:error, normalize_error(error, model, credential)}
     end
   end
+
+  @doc false
+  def normalize_error(error, %LLMDB.Model{} = model, %Credential{} = credential) do
+    {kind, retryable} = error_kind(error, credential.provider)
+
+    provider_error(kind, retryable, model, credential)
+  end
+
+  defp provider_error(kind, retryable, model, credential) do
+    %ProviderError{
+      kind: kind,
+      provider: credential.provider,
+      model: "#{model.provider}:#{model.id}",
+      billing_path: credential.billing_path,
+      retryable: retryable
+    }
+  end
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           status: 401,
+           response_body: %{"error" => %{"code" => code}}
+         },
+         "openai"
+       )
+       when code in ~w(invalid_api_key key_revoked),
+       do: {:authentication_rejected, false}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: 401}, "openai"),
+    do: {:access_restricted, false}
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           status: 401,
+           response_body: %{"error" => %{"type" => "authentication_error"}}
+         },
+         "anthropic"
+       ),
+       do: {:authentication_rejected, false}
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           status: 401,
+           response_body: %{"error" => %{"code" => 401}}
+         },
+         "openrouter"
+       ),
+       do: {:authentication_rejected, false}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: 401}, _provider),
+    do: {:access_restricted, false}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: 402}, _provider),
+    do: {:billing_required, false}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: 403}, _provider),
+    do: {:access_restricted, false}
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           status: status,
+           response_body: %{"error" => %{"code" => code}}
+         },
+         "anthropic"
+       )
+       when {status, code} in [
+              {400, "spend_limit_reached"},
+              {429, "enforced_spend_limit_reached"}
+            ],
+       do: {:billing_required, false}
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           status: 429,
+           response_body: %{"error" => %{"code" => code}}
+         },
+         "openai"
+       )
+       when code in ~w(
+              credit_balance_exhausted
+              organization_spend_limit_exceeded
+              project_spend_limit_exceeded
+            ),
+       do: {:billing_required, false}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: 429}, _provider),
+    do: {:quota_or_rate_limit, true}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: status}, _provider)
+       when is_integer(status) and status >= 500,
+       do: {:provider_unavailable, true}
+
+  defp error_kind(%ReqLLM.Error.API.Request{status: status}, _provider)
+       when status in 300..399,
+       do: {:provider_unavailable, true}
+
+  defp error_kind(
+         %ReqLLM.Error.API.Request{
+           cause: %Kodo.LLM.SafeTransportError{reason: reason}
+         },
+         _provider
+       )
+       when reason in [:network, :tls],
+       do: {:provider_unavailable, true}
+
+  defp error_kind(%ReqLLM.Error.API.Timeout{}, _provider), do: {:provider_unavailable, true}
+  defp error_kind(_error, _provider), do: {:request_failed, false}
 
   defp put_reasoning_effort(opts, reasoning) when reasoning in [nil, "none"], do: opts
 
@@ -128,6 +249,26 @@ defmodule Kodo.LLM.ReqLLM do
     |> Keyword.put(:access_token, token)
     |> Keyword.put(:chatgpt_account_id, account_id)
   end
+
+  # ReqLLM emits terminal errors to telemetry before returning control to Kodo.
+  # The adapter therefore scrubs at the HTTP boundary, while these immutable
+  # options prevent redirects, retries, and caller-selected transports.
+  defp secure_transport(opts, provider) do
+    opts
+    |> Keyword.put(:max_retries, 0)
+    |> Keyword.put(:telemetry, payloads: :none)
+    |> Keyword.put(:req_http_options,
+      adapter: safe_adapter(provider),
+      redirect: false,
+      redirect_log_level: false
+    )
+  end
+
+  defp safe_adapter("openai"), do: Kodo.LLM.SafeReqAdapter.OpenAI
+  defp safe_adapter("openai_codex"), do: Kodo.LLM.SafeReqAdapter.OpenAICodex
+  defp safe_adapter("anthropic"), do: Kodo.LLM.SafeReqAdapter.Anthropic
+  defp safe_adapter("openrouter"), do: Kodo.LLM.SafeReqAdapter.OpenRouter
+  defp safe_adapter(_provider), do: Kodo.LLM.SafeReqAdapter
 
   defp resolve_dispatchable_model(model) do
     with {:ok, resolved} <- ReqLLM.model(model),

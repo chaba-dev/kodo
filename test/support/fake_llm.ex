@@ -53,10 +53,17 @@ defmodule Kodo.Test.FakeLLM do
       send(test_pid, {:llm_request, model, hd(messages), tools, opts})
     end
 
-    if last["role"] == "tool" do
-      continue_from(last, messages)
-    else
-      initial(last)
+    cond do
+      last["content"] == "retry provider transcript" ->
+        test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
+        send(test_pid, {:retry_provider_messages, messages})
+        final("Retry completed.")
+
+      last["role"] == "tool" ->
+        continue_from(last, messages)
+
+      true ->
+        initial(last)
     end
   end
 
@@ -135,8 +142,74 @@ defmodule Kodo.Test.FakeLLM do
   defp initial(%{"content" => "provider failure"}), do: {:error, :provider_failure}
   defp initial(%{"content" => "provider timeout"}), do: {:error, :provider_timeout}
 
+  defp initial(%{"content" => "provider quota"}) do
+    {:error,
+     %Kodo.LLM.ProviderError{
+       kind: :quota_or_rate_limit,
+       provider: "openai",
+       model: "openai:gpt-4o-mini",
+       billing_path: :platform,
+       retryable: true
+     }}
+  end
+
+  defp initial(%{"content" => "invalid provider response"}) do
+    {:error,
+     %Kodo.LLM.ProviderError{
+       kind: :request_failed,
+       provider: "anthropic",
+       model: "anthropic:claude-3-5-haiku-latest",
+       billing_path: :platform,
+       retryable: false
+     }}
+  end
+
   defp initial(%{"content" => "delegate search"}) do
     tool_call("delegate-search", "delegate_search", %{"question" => "find helper"})
+  end
+
+  defp initial(%{"content" => "delegate search after credential change"}) do
+    test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
+    send(test_pid, {:primary_generation_started, self()})
+
+    receive do
+      :release_primary_generation ->
+        tool_call("delegate-search-after-change", "delegate_search", %{
+          "question" => "find helper"
+        })
+    end
+  end
+
+  defp initial(%{"content" => "delegate provider failure with sibling"}) do
+    {:ok,
+     %{
+       type: :tool_calls,
+       text: "",
+       tool_calls: [
+         %{
+           id: "provider-gated-search",
+           name: "delegate_search",
+           arguments: %{"question" => "provider-gated search"}
+         },
+         %{
+           id: "unreached-read",
+           name: "read_file",
+           arguments: %{"path" => "README.md"}
+         }
+       ],
+       usage: %{total_tokens: @standard_usage_tokens}
+     }}
+  end
+
+  defp initial(%{"content" => "provider-gated search"}) do
+    {:error,
+     %Kodo.LLM.ProviderError{
+       kind: :quota_or_rate_limit,
+       provider: "anthropic",
+       model: "anthropic:claude-3-5-haiku-latest",
+       billing_path: :platform,
+       retryable: true
+     }}
   end
 
   defp initial(%{"content" => "delegate unsafe search"}) do

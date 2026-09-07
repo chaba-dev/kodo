@@ -2,6 +2,8 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
   use Kodo.DataCase, async: false
 
   alias Kodo.Sessions
+  alias Kodo.Integrations
+  alias Kodo.Agent.ModelSettings
   alias Kodo.Test.FullStackCase, as: Stack
 
   import Kodo.AccountsFixtures
@@ -9,7 +11,7 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
   @moduletag live_provider: true, timeout: 240_000
 
   @live_session_timeout 180_000
-  @prompt "Change greeting.txt from its current misspelling to exactly hello followed by a newline. Run a focused shell command to verify the exact file content, poll that command until it exits, and only then finish."
+  @prompt "Delegate one focused read-only search to inspect greeting.txt first. Then change greeting.txt from its current misspelling to exactly hello followed by a newline. Run a focused shell command to verify the exact file content, poll that command until it exits, and only then finish."
   @http_created_status 201
   @http_accepted_status 202
 
@@ -17,6 +19,14 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
     model =
       System.get_env("LIVE_LLM_MODEL") ||
         flunk("LIVE_LLM_MODEL is required for the explicitly-run live provider smoke test")
+
+    {:ok, resolved_model} = ReqLLM.model(model)
+    provider = Atom.to_string(resolved_model.provider)
+    provider_key_env = provider_key_env(provider)
+
+    api_key =
+      System.get_env("LIVE_LLM_API_KEY") || System.get_env(provider_key_env) ||
+        flunk("LIVE_LLM_API_KEY or #{provider_key_env} is required for #{model}")
 
     previous_adapter = Application.get_env(:kodo, :llm_adapter)
     Application.put_env(:kodo, :llm_adapter, Kodo.LLM.ReqLLM)
@@ -29,9 +39,46 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
 
     stack = Stack.start_stack!()
     workspace = Stack.fixture!()
-    token = user_fixture() |> Kodo.Accounts.generate_user_agent_token()
+    user = user_fixture()
+    scope = Kodo.Accounts.Scope.for_user(user)
+
+    {:ok, _integration} =
+      Integrations.connect(scope, provider, "api_key", %{"api_key" => api_key})
+
+    # The live smoke must keep every agent role on the selected provider. A
+    # session-level model only overrides primary and would otherwise let search
+    # or review silently exercise the profile's OpenAI default.
+    for role <- [:primary, :search, :review] do
+      {:ok, _override} = ModelSettings.put_user_override(scope, role, %{model: model})
+    end
+
+    # Remove the ambient key after installing the test user's integration so
+    # this smoke test exercises the same request-local credential path as production.
+    ambient_keys =
+      for key_env <- ["LIVE_LLM_API_KEY", provider_key_env], into: %{} do
+        {key_env, System.get_env(key_env)}
+      end
+
+    Enum.each(ambient_keys, fn {key_env, _value} -> System.delete_env(key_env) end)
+
+    on_exit(fn ->
+      Enum.each(ambient_keys, fn
+        {key_env, nil} -> System.delete_env(key_env)
+        {key_env, value} -> System.put_env(key_env, value)
+      end)
+    end)
+
+    token = Kodo.Accounts.generate_user_agent_token(user)
     runner = Stack.start_runner!(stack.base_url, workspace, token)
-    %{model: model, stack: stack, workspace: workspace, runner: runner, token: token}
+
+    %{
+      model: model,
+      provider: provider,
+      stack: stack,
+      workspace: workspace,
+      runner: runner,
+      token: token
+    }
   end
 
   test "a configured provider edits and verifies through the real runner", context do
@@ -52,6 +99,17 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
     on_exit(fn -> Stack.terminate_session!(session_id) end)
     Stack.subscribe_session!(session_id)
 
+    mapping =
+      session_id
+      |> Sessions.events_after()
+      |> hd()
+      |> then(& &1.payload["model_mapping"])
+
+    assert Enum.all?(mapping["roles"], fn {_role, role_mapping} ->
+             role_mapping["model"] == context.model and
+               role_mapping["provider"] == context.provider
+           end)
+
     assert %{"status" => "running"} =
              Stack.post!(
                context.stack.base_url,
@@ -65,9 +123,33 @@ defmodule Kodo.E2E.LiveProviderFullStackTest do
     replay = Stack.replay!(context.stack.base_url, session_id, context.token)
 
     Stack.assert_live_outcome!(replay, context.workspace)
+    assert_role_invocations(replay, context)
 
     Stack.terminate_session!(session_id)
     assert {:ok, projection} = Sessions.active_state(session_id)
     assert projection.status == "completed"
+  end
+
+  defp provider_key_env("openai"), do: "OPENAI_API_KEY"
+  defp provider_key_env("anthropic"), do: "ANTHROPIC_API_KEY"
+  defp provider_key_env("openrouter"), do: "OPENROUTER_API_KEY"
+
+  defp provider_key_env(provider) do
+    flunk("live provider #{provider} is not supported; use openai, anthropic, or openrouter")
+  end
+
+  defp assert_role_invocations(replay, context) do
+    for {role, event_type} <- [
+          {"primary", "model_invocation_started"},
+          {"search", "subagent_invocation_started"},
+          {"review", "review_invocation_started"}
+        ] do
+      assert Enum.any?(replay["events"], fn event ->
+               event["type"] == event_type and event["payload"]["role"] == role and
+                 event["payload"]["provider"] == context.provider and
+                 event["payload"]["model"] == context.model
+             end),
+             "expected #{role} to execute with #{context.model}"
+    end
   end
 end

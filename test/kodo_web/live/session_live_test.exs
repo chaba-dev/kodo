@@ -386,6 +386,87 @@ defmodule KodoWeb.SessionLiveTest do
     assert persisted.sequence == event.sequence + 1
   end
 
+  test "shows durable provider remediation live and after remount until a new turn", %{
+    conn: conn,
+    session: session
+  } do
+    {:ok, view, _html} = live(conn, ~p"/sessions/#{session.id}")
+
+    {:ok, _event} =
+      Sessions.append_event(session.id, "provider_action_required", %{
+        "reason" => "billing_required",
+        "provider" => "anthropic",
+        "model" => "claude-sonnet-4",
+        "billing_path" => "platform",
+        "retryable" => false,
+        "guidance" => "Add billing details with Anthropic, then retry your request.",
+        "provider_help_url" => "https://support.anthropic.com/en/articles/8977456",
+        "settings_path" => "/integrations"
+      })
+
+    assert has_element?(view, "#provider-action-required")
+
+    assert has_element?(
+             view,
+             "#provider-action-identity",
+             "anthropic · claude-sonnet-4 · platform billing"
+           )
+
+    assert has_element?(view, "#provider-action-guidance", "Add billing details with Anthropic")
+    assert has_element?(view, "#provider-help-link[href^='https://support.anthropic.com/']")
+
+    assert has_element?(
+             view,
+             "#integration-settings-link[href='/integrations']"
+           )
+
+    GenServer.stop(view.pid)
+    {:ok, remounted, _html} = live(conn, ~p"/sessions/#{session.id}")
+    assert has_element?(remounted, "#provider-action-required")
+
+    {:ok, _user_event} =
+      Sessions.append_event(session.id, "user_message", %{
+        "role" => "user",
+        "content" => "Try again"
+      })
+
+    refute has_element?(remounted, "#provider-action-required")
+  end
+
+  test "mount watermark cannot skip or prematurely apply provider remediation", %{
+    scope: scope,
+    session: session
+  } do
+    watermark = Sessions.latest_event_sequence(scope, session.id)
+
+    {:ok, action} =
+      Sessions.append_event(session.id, "provider_action_required", %{
+        "reason" => "billing_required",
+        "provider" => "openai"
+      })
+
+    assert is_nil(Sessions.provider_action_required_event(scope, session.id, watermark))
+
+    projection =
+      Kodo.Sessions.Projection.apply_event(
+        action,
+        Kodo.Sessions.Projection.from_session(session, watermark)
+      )
+
+    assert projection.provider_action_required["reason"] == "billing_required"
+
+    stable_watermark = action.sequence
+
+    {:ok, user_message} =
+      Sessions.append_event(session.id, "user_message", %{"role" => "user", "content" => "retry"})
+
+    assert Sessions.provider_action_required_event(scope, session.id, stable_watermark).id ==
+             action.id
+
+    cleared = Kodo.Sessions.Projection.apply_event(user_message, projection)
+    assert is_nil(cleared.provider_action_required)
+  end
+
   test "resolves a pending approval from the browser", %{
     conn: conn,
     scope: scope,

@@ -10,6 +10,7 @@ defmodule Kodo.Integrations.AuditEvent do
     validation_succeeded
     validation_invalid
     validation_unavailable
+    integration_activated
     integration_disconnected
     oauth_succeeded
     refresh_succeeded

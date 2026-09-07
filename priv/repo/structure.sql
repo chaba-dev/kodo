@@ -2,15 +2,14 @@
 -- PostgreSQL database dump
 --
 
-\restrict 6Ph7YPfQpD7sLNGLU4D7shfVZDgPeYcyk3kE9ke3zJ1fzkGbXwawaB2F29ALheV
+\restrict NhSthrb3Q1T8dHHZ3lLmQN0I7LCVjgA4u9SG3S46iJjpajG0SbJ22J9p7g9nUNg
 
--- Dumped from database version 17.10
--- Dumped by pg_dump version 18.4
+-- Dumped from database version 15.19 (Debian 15.19-0+deb12u1)
+-- Dumped by pg_dump version 15.19 (Debian 15.19-0+deb12u1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -148,6 +147,9 @@ CREATE TABLE public.provider_integrations (
     validation_error_code character varying(64),
     inserted_at timestamp without time zone NOT NULL,
     updated_at timestamp without time zone NOT NULL,
+    display_name character varying(80) NOT NULL,
+    active boolean DEFAULT false NOT NULL,
+    CONSTRAINT provider_integrations_active_connected CHECK (((NOT active) OR ((connection_status)::text = 'connected'::text))),
     CONSTRAINT provider_integrations_authentication_type_valid CHECK (((authentication_type)::text = ANY ((ARRAY['api_key'::character varying, 'oauth'::character varying])::text[]))),
     CONSTRAINT provider_integrations_credential_generation_valid CHECK ((credential_generation >= 0)),
     CONSTRAINT provider_integrations_provider_authentication_valid CHECK (((((provider)::text = 'openai_codex'::text) AND ((authentication_type)::text = 'oauth'::text)) OR (((provider)::text = ANY ((ARRAY['openai'::character varying, 'anthropic'::character varying, 'openrouter'::character varying])::text[])) AND ((authentication_type)::text = 'api_key'::text)))),
@@ -468,10 +470,17 @@ CREATE INDEX integration_audit_events_integration_id_inserted_at_index ON public
 
 
 --
+-- Name: provider_integrations_one_active_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX provider_integrations_one_active_index ON public.provider_integrations USING btree (user_id, provider) WHERE active;
+
+
+--
 -- Name: provider_integrations_user_id_provider_index; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX provider_integrations_user_id_provider_index ON public.provider_integrations USING btree (user_id, provider);
+CREATE INDEX provider_integrations_user_id_provider_index ON public.provider_integrations USING btree (user_id, provider);
 
 
 --
@@ -665,7 +674,7 @@ ALTER TABLE ONLY public.users_tokens
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 6Ph7YPfQpD7sLNGLU4D7shfVZDgPeYcyk3kE9ke3zJ1fzkGbXwawaB2F29ALheV
+\unrestrict NhSthrb3Q1T8dHHZ3lLmQN0I7LCVjgA4u9SG3S46iJjpajG0SbJ22J9p7g9nUNg
 
 INSERT INTO public."schema_migrations" (version) VALUES (20260807073017);
 INSERT INTO public."schema_migrations" (version) VALUES (20260808062115);
@@ -682,3 +691,4 @@ INSERT INTO public."schema_migrations" (version) VALUES (20260824012010);
 INSERT INTO public."schema_migrations" (version) VALUES (20260825042101);
 INSERT INTO public."schema_migrations" (version) VALUES (20260903201206);
 INSERT INTO public."schema_migrations" (version) VALUES (20260904051620);
+INSERT INTO public."schema_migrations" (version) VALUES (20260907083117);
