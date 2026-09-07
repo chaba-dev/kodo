@@ -46,7 +46,15 @@ pub struct Workspace {
 }
 
 pub struct RunnerLock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for RunnerLock {
+    fn drop(&mut self) {
+        // Release synchronously so a replacement runner can acquire the lock
+        // immediately; descriptor close alone can expose delayed release on CI.
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
 }
 
 impl Workspace {
@@ -138,7 +146,7 @@ impl Workspace {
             });
         }
 
-        Ok(RunnerLock { _file: file })
+        Ok(RunnerLock { file })
     }
 
     /// Read through the retained root capability so concurrent symlink changes cannot escape it.
