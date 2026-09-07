@@ -5,6 +5,7 @@ defmodule Kodo.IntegrationsConcurrencyTest do
   alias Kodo.Accounts.Scope
   alias Kodo.AccountsFixtures
   alias Kodo.Integrations
+  alias Kodo.Integrations.DeviceAuthorizationAttempt
   alias Kodo.Integrations.Integration
   alias Kodo.Repo
 
@@ -96,6 +97,45 @@ defmodule Kodo.IntegrationsConcurrencyTest do
     integrations = Integrations.list_integrations(scope)
     assert Enum.count(integrations, & &1.active) == 1
     assert Enum.find(integrations, & &1.active).id == selected.id
+  end
+
+  test "simultaneous device authorization starts preserve one generation-fenced attempt", %{
+    scope: scope,
+    supervisor: supervisor
+  } do
+    integration =
+      %Integration{user_id: scope.user.id}
+      |> Integration.create_changeset(%{
+        provider: "openai_codex",
+        authentication_type: "oauth"
+      })
+      |> Repo.insert!()
+
+    results =
+      ["first", "second"]
+      |> Enum.map(fn code ->
+        contended_task(supervisor, fn ->
+          Integrations.begin_device_authorization(
+            scope,
+            integration.id,
+            0,
+            %{"device_auth_id" => "#{code}-device", "user_code" => code},
+            1_000
+          )
+        end)
+      end)
+      |> release_contenders()
+      |> Task.await_many()
+
+    assert Enum.count(results, &match?({:ok, %DeviceAuthorizationAttempt{}}, &1)) == 1
+    assert {:error, :stale_credential_generation} in results
+
+    assert Repo.aggregate(
+             from(attempt in DeviceAuthorizationAttempt,
+               where: attempt.integration_id == ^integration.id and attempt.state == "active"
+             ),
+             :count
+           ) == 1
   end
 
   defp connect(scope, name) do
