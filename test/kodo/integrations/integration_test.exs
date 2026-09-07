@@ -95,6 +95,7 @@ defmodule Kodo.Integrations.IntegrationTest do
       invalid_pair = %Integration{
         user_id: user.id,
         provider: "openai",
+        display_name: "Invalid",
         authentication_type: "oauth"
       }
 
@@ -104,6 +105,7 @@ defmodule Kodo.Integrations.IntegrationTest do
       invalid_generation = %Integration{
         user_id: user.id,
         provider: "openai",
+        display_name: "Invalid",
         authentication_type: "api_key",
         credential_generation: -1
       }
@@ -112,12 +114,30 @@ defmodule Kodo.Integrations.IntegrationTest do
       assert "is invalid" in errors_on(generation_changeset).credential_generation
     end
 
-    test "enforces one integration per user and provider" do
+    test "allows multiple accounts but enforces one active integration per provider" do
       user = AccountsFixtures.user_fixture()
 
       assert {:ok, _integration} = insert_disconnected(user, "openai", "api_key")
-      assert {:error, changeset} = insert_disconnected(user, "openai", "api_key")
-      assert "has already been taken" in errors_on(changeset).user_id
+      assert {:ok, _integration} = insert_disconnected(user, "openai", "api_key")
+
+      assert {:ok, _active} = insert_connected(user, true)
+      assert {:error, changeset} = insert_connected(user, true)
+      assert "has already been taken" in errors_on(changeset).active
+    end
+
+    test "requires active integrations to be connected" do
+      user = AccountsFixtures.user_fixture()
+
+      integration = %Integration{
+        user_id: user.id,
+        provider: "openai",
+        display_name: "Personal",
+        authentication_type: "api_key",
+        active: true
+      }
+
+      assert {:error, changeset} = insert_integration(integration)
+      assert "is invalid" in errors_on(changeset).active
     end
 
     test "cascades integration deletion when its user is deleted" do
@@ -136,6 +156,7 @@ defmodule Kodo.Integrations.IntegrationTest do
     %Integration{
       user_id: user.id,
       provider: "openai",
+      display_name: "Personal",
       authentication_type: "api_key",
       connection_status: connection,
       validation_status: validation
@@ -151,6 +172,19 @@ defmodule Kodo.Integrations.IntegrationTest do
       authentication_type: authentication_type
     })
     |> Repo.insert()
+  end
+
+  defp insert_connected(user, active) do
+    %Integration{
+      user_id: user.id,
+      provider: "openai",
+      display_name: "Account",
+      authentication_type: "api_key",
+      connection_status: "connected",
+      active: active
+    }
+    |> with_payload(true)
+    |> insert_integration()
   end
 
   defp with_payload(integration, false), do: integration

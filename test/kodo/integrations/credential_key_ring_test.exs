@@ -46,6 +46,7 @@ defmodule Kodo.Integrations.CredentialKeyRingTest do
     %Integration{
       user_id: user.id,
       provider: "openai",
+      display_name: "OpenAI API",
       authentication_type: "api_key",
       connection_status: "connected",
       validation_status: "unverified",

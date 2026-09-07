@@ -22,13 +22,18 @@ defmodule Kodo.Integrations do
   def list_integrations(%Scope{user: user}) do
     Integration
     |> where([integration], integration.user_id == ^user.id)
-    |> order_by([integration], asc: integration.provider)
+    |> order_by(
+      [integration],
+      asc: integration.provider,
+      desc: integration.active,
+      asc: integration.inserted_at
+    )
     |> Repo.all()
   end
 
   def list_integration_statuses(%Scope{user: user}) do
     Integration
-    |> where([integration], integration.user_id == ^user.id)
+    |> where([integration], integration.user_id == ^user.id and integration.active)
     |> select([integration], %{
       provider: integration.provider,
       connection_status: integration.connection_status,
@@ -47,7 +52,23 @@ defmodule Kodo.Integrations do
   end
 
   def get_integration_by_provider(%Scope{user: user}, provider) do
-    case Repo.get_by(Integration, user_id: user.id, provider: provider) do
+    query =
+      Integration
+      |> where(
+        [integration],
+        integration.user_id == ^user.id and integration.provider == ^provider
+      )
+      |> order_by([integration], desc: integration.active, desc: integration.inserted_at)
+      |> limit(1)
+
+    case Repo.one(query) do
+      %Integration{} = integration -> {:ok, integration}
+      nil -> {:error, :integration_not_found}
+    end
+  end
+
+  def get_active_integration_by_provider(%Scope{user: user}, provider) do
+    case Repo.get_by(Integration, user_id: user.id, provider: provider, active: true) do
       %Integration{} = integration -> {:ok, integration}
       nil -> {:error, :integration_not_found}
     end
@@ -62,13 +83,14 @@ defmodule Kodo.Integrations do
 
   def connect(scope, provider, authentication_type, credentials, opts \\ [])
 
-  def connect(%Scope{user: user}, provider, "api_key", credentials, opts) do
+  def connect(%Scope{user: user} = scope, provider, "api_key", credentials, opts) do
     integration = %Integration{id: Ecto.UUID.generate(), user_id: user.id}
 
     changeset =
       Integration.create_changeset(integration, %{
         provider: provider,
-        authentication_type: "api_key"
+        authentication_type: "api_key",
+        display_name: opts[:display_name]
       })
 
     with true <- changeset.valid?,
@@ -84,6 +106,7 @@ defmodule Kodo.Integrations do
       )
       |> Integration.constraint_changeset()
       |> insert_with_audit(user.id, "api_key_submitted")
+      |> activate_first(scope)
     else
       false -> {:error, changeset}
       {:error, _reason} = error -> error
@@ -197,6 +220,7 @@ defmodule Kodo.Integrations do
       "integration_disconnected",
       %{
         connection_status: "disconnected",
+        active: false,
         validation_status: "unverified",
         encrypted_credentials: nil,
         encryption_key_version: nil,
@@ -208,6 +232,39 @@ defmodule Kodo.Integrations do
         validation_error_code: nil
       }
     )
+  end
+
+  def activate(%Scope{} = scope, id, generation)
+      when is_integer(generation) and generation >= 0 do
+    do_activate(scope, id, generation, true)
+  end
+
+  def activate(%Scope{}, _id, _generation), do: {:error, :stale_credential_generation}
+
+  defp do_activate(%Scope{user: user}, id, generation, audit?) do
+    with {:ok, id} <- Ecto.UUID.cast(id) do
+      Repo.transaction(fn ->
+        with {:ok, integration} <- lock_provider_integrations(user.id, id),
+             :ok <- require_generation(integration, generation),
+             :ok <- require_connected(integration) do
+          Integration
+          |> where(
+            [candidate],
+            candidate.user_id == ^user.id and candidate.provider == ^integration.provider and
+              candidate.active
+          )
+          |> Repo.update_all(set: [active: false, updated_at: now()])
+
+          integration = integration |> change(active: true, updated_at: now()) |> Repo.update!()
+          if audit?, do: audit!(user.id, integration, "integration_activated")
+          integration
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+    else
+      :error -> {:error, :integration_not_found}
+    end
   end
 
   def safe_validation_errors, do: @safe_validation_errors
@@ -250,6 +307,49 @@ defmodule Kodo.Integrations do
 
   defp require_authentication_type(%Integration{}, _type),
     do: {:error, :authentication_type_mismatch}
+
+  defp require_connected(%Integration{connection_status: "connected"}), do: :ok
+  defp require_connected(%Integration{}), do: {:error, :integration_not_connected}
+
+  defp activate_first({:ok, %Integration{} = integration}, scope) do
+    case get_active_integration_by_provider(scope, integration.provider) do
+      {:ok, _active} ->
+        {:ok, integration}
+
+      {:error, :integration_not_found} ->
+        do_activate(scope, integration.id, integration.credential_generation, false)
+    end
+  end
+
+  defp activate_first(error, _scope), do: error
+
+  defp lock_provider_integrations(user_id, integration_id) do
+    target =
+      Integration
+      |> where(
+        [integration],
+        integration.id == ^integration_id and integration.user_id == ^user_id
+      )
+      |> lock("FOR UPDATE")
+      |> Repo.one()
+
+    case target do
+      %Integration{} = integration ->
+        Integration
+        |> where(
+          [candidate],
+          candidate.user_id == ^user_id and candidate.provider == ^integration.provider
+        )
+        |> order_by([candidate], asc: candidate.id)
+        |> lock("FOR UPDATE")
+        |> Repo.all()
+
+        {:ok, integration}
+
+      nil ->
+        {:error, :integration_not_found}
+    end
+  end
 
   defp update_fenced(
          %Scope{user: user},
@@ -302,7 +402,6 @@ defmodule Kodo.Integrations do
   defp normalize_insert_result({:error, changeset} = error) do
     cond do
       constraint_error?(changeset, :foreign) -> {:error, :integration_owner_not_found}
-      constraint_error?(changeset, :unique) -> {:error, :integration_already_exists}
       true -> error
     end
   end

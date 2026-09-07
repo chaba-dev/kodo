@@ -256,6 +256,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
       id: Ecto.UUID.generate(),
       user_id: scope.user.id,
       provider: "openai_codex",
+      display_name: "ChatGPT",
       authentication_type: "oauth"
     }
 
