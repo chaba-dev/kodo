@@ -46,7 +46,7 @@ defmodule Kodo.LLM.ProviderError do
       "ChatGPT connections are not available yet. Choose models from connected API-key providers for the required roles, then start a new session."
 
   def guidance(%__MODULE__{kind: :integration_required, provider: provider}),
-    do: "Connect the #{provider_name(provider)} integration, then retry the turn."
+    do: "Connect or activate an account for #{provider_name(provider)}, then retry the turn."
 
   def guidance(%__MODULE__{kind: :integration_changed}),
     do:
@@ -73,13 +73,12 @@ defmodule Kodo.LLM.ProviderError do
   def settings_path(%__MODULE__{provider: "openai_codex", kind: :integration_required}),
     do: "/integrations"
 
-  def settings_path(%__MODULE__{provider: provider, kind: :integration_required}),
-    do: "/integrations?provider=#{provider}&action=connect"
+  def settings_path(%__MODULE__{kind: :integration_required}),
+    do: "/integrations"
 
   def settings_path(%__MODULE__{kind: :integration_changed}), do: "/integrations"
 
-  def settings_path(%__MODULE__{provider: provider, kind: :authentication_rejected}),
-    do: "/integrations?provider=#{provider}&action=replace"
+  def settings_path(%__MODULE__{kind: :authentication_rejected}), do: "/integrations"
 
   def settings_path(%__MODULE__{}), do: "/integrations"
 

@@ -167,7 +167,7 @@ defmodule Kodo.Agent.ModelSettings do
       provider_name: provider_name(provider),
       billing_path: billing_path(provider),
       status: "not_connected",
-      settings_path: "/integrations?provider=#{provider}&action=connect"
+      settings_path: "/integrations"
     }
   end
 
@@ -177,7 +177,7 @@ defmodule Kodo.Agent.ModelSettings do
       provider_name: provider_name(provider),
       billing_path: billing_path(provider),
       status: "invalid",
-      settings_path: "/integrations?provider=#{provider}&action=replace"
+      settings_path: "/integrations"
     }
   end
 
@@ -197,7 +197,7 @@ defmodule Kodo.Agent.ModelSettings do
       provider_name: provider_name(provider),
       billing_path: billing_path(provider),
       status: "disconnected",
-      settings_path: "/integrations?provider=#{provider}&action=connect"
+      settings_path: "/integrations"
     }
   end
 

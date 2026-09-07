@@ -401,7 +401,7 @@ defmodule KodoWeb.SessionLiveTest do
         "retryable" => false,
         "guidance" => "Add billing details with Anthropic, then retry your request.",
         "provider_help_url" => "https://support.anthropic.com/en/articles/8977456",
-        "settings_path" => "/integrations?provider=anthropic&action=replace"
+        "settings_path" => "/integrations"
       })
 
     assert has_element?(view, "#provider-action-required")
@@ -417,7 +417,7 @@ defmodule KodoWeb.SessionLiveTest do
 
     assert has_element?(
              view,
-             "#integration-settings-link[href='/integrations?provider=anthropic&action=replace']"
+             "#integration-settings-link[href='/integrations']"
            )
 
     GenServer.stop(view.pid)

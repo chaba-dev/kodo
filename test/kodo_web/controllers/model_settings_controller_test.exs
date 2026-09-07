@@ -95,7 +95,7 @@ defmodule KodoWeb.ModelSettingsControllerTest do
              "provider_name" => "OpenAI API",
              "billing_path" => "platform",
              "status" => "not_connected",
-             "settings_path" => "/integrations?provider=openai&action=connect"
+             "settings_path" => "/integrations"
            }
 
     assert response["integration_feedback"]["search"] == %{
@@ -103,7 +103,7 @@ defmodule KodoWeb.ModelSettingsControllerTest do
              "provider_name" => "Anthropic",
              "billing_path" => "platform",
              "status" => "invalid",
-             "settings_path" => "/integrations?provider=anthropic&action=replace"
+             "settings_path" => "/integrations"
            }
 
     assert response["integration_feedback"]["review"] == %{
@@ -111,7 +111,7 @@ defmodule KodoWeb.ModelSettingsControllerTest do
              "provider_name" => "OpenRouter",
              "billing_path" => "aggregator",
              "status" => "not_connected",
-             "settings_path" => "/integrations?provider=openrouter&action=connect"
+             "settings_path" => "/integrations"
            }
   end
 

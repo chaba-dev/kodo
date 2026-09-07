@@ -89,7 +89,9 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert error.provider == "anthropic"
     assert error.model == "anthropic:claude-3-5-haiku-20241022"
     assert error.billing_path == :platform
-    assert Kodo.LLM.ProviderError.guidance(error) =~ "Connect the Anthropic integration"
+
+    assert Kodo.LLM.ProviderError.guidance(error) =~
+             "Connect or activate an account for Anthropic"
 
     assert {:error, openrouter_error} =
              LLM.resolve_integration(scope, "openrouter:anthropic/claude-sonnet-4")
