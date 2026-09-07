@@ -4,6 +4,7 @@ defmodule Kodo.Integrations.CredentialKeyRing do
   import Ecto.Query
 
   alias Kodo.Integrations.CredentialEncryption
+  alias Kodo.Integrations.DeviceAuthorizationAttempt
   alias Kodo.Integrations.Integration
   alias Kodo.Repo
 
@@ -28,11 +29,9 @@ defmodule Kodo.Integrations.CredentialKeyRing do
   def validate_referenced_versions do
     with {:ok, configured_versions} <- CredentialEncryption.configured_key_versions() do
       referenced_versions =
-        Integration
-        |> where([integration], not is_nil(integration.encryption_key_version))
-        |> select([integration], integration.encryption_key_version)
-        |> distinct(true)
-        |> Repo.all()
+        Enum.uniq(
+          referenced_versions(Integration) ++ referenced_versions(DeviceAuthorizationAttempt)
+        )
 
       missing_versions = referenced_versions -- configured_versions
 
@@ -42,5 +41,13 @@ defmodule Kodo.Integrations.CredentialKeyRing do
         {:error, {:credential_encryption_keys_missing, Enum.sort(missing_versions)}}
       end
     end
+  end
+
+  defp referenced_versions(schema) do
+    schema
+    |> where([record], not is_nil(record.encryption_key_version))
+    |> select([record], record.encryption_key_version)
+    |> distinct(true)
+    |> Repo.all()
   end
 end
