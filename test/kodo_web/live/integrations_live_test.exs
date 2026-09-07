@@ -6,6 +6,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
 
   alias Kodo.Integrations
   alias Kodo.Integrations.CredentialEncryption
+  alias Kodo.Repo
 
   setup %{conn: conn} do
     user = user_fixture()
@@ -224,6 +225,83 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert has_element?(view, second_key)
   end
 
+  test "a form opened for another provider cannot be submitted after its modal changes", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, view, _html} = live(conn, new_path("openai"))
+    old_token = live_assign(view, :modal_token)
+
+    render_patch(view, new_path("anthropic"))
+
+    render_submit(view, "save_api_key", %{
+      "integration" => %{
+        "display_name" => "Wrong target",
+        "api_key" => "openai-secret",
+        "modal_token" => old_token
+      }
+    })
+
+    assert Integrations.list_integrations(scope) == []
+  end
+
+  test "a replacement form cannot write to the account from a newer modal", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, openai} = connect_provider(scope, "openai", "openai-secret", "OpenAI")
+
+    {:ok, anthropic} =
+      connect_provider(scope, "anthropic", "anthropic-secret", "Anthropic")
+
+    {:ok, view, _html} = live(conn, action_path(openai, "replace"))
+    old_token = live_assign(view, :modal_token)
+    render_patch(view, action_path(anthropic, "replace"))
+
+    render_submit(view, "save_api_key", %{
+      "integration" => %{"api_key" => "wrong-secret", "modal_token" => old_token}
+    })
+
+    assert {:ok, %{"api_key" => "openai-secret"}} =
+             openai |> Repo.reload!() |> CredentialEncryption.decrypt()
+
+    assert {:ok, %{"api_key" => "anthropic-secret"}} =
+             anthropic |> Repo.reload!() |> CredentialEncryption.decrypt()
+  end
+
+  test "a disconnect event cannot target the account from a newer modal", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, first} = connect_provider(scope, "openai", "first-secret", "Work")
+    {:ok, second} = connect_provider(scope, "openai", "second-secret", "Personal")
+    {:ok, view, _html} = live(conn, action_path(first, "disconnect"))
+    old_token = live_assign(view, :modal_token)
+
+    render_patch(view, action_path(second, "disconnect"))
+    render_click(view, "disconnect", %{"modal-token" => old_token})
+
+    assert Repo.reload!(first).connection_status == "connected"
+    assert Repo.reload!(second).connection_status == "connected"
+  end
+
+  test "activation is reflected in another open settings tab", %{
+    conn: conn,
+    scope: scope,
+    user: user
+  } do
+    {:ok, first} = connect_provider(scope, "openai", "first-secret", "Work")
+    {:ok, second} = connect_provider(scope, "openai", "second-secret", "Personal")
+    {:ok, first_view, _html} = live(conn, ~p"/integrations")
+    {:ok, second_view, _html} = live(log_in_user(build_conn(), user), ~p"/integrations")
+
+    first_view |> element(activate_button(second)) |> render_click()
+    _ = :sys.get_state(second_view.pid)
+
+    assert has_element?(second_view, active_badge(second))
+    assert has_element?(second_view, activate_button(first))
+  end
+
   test "shows rejected credentials as invalid in red", %{conn: conn, scope: scope} do
     Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
     {:ok, view, _html} = live(conn, new_path("openai"))
@@ -388,6 +466,10 @@ defmodule KodoWeb.IntegrationsLiveTest do
   defp active_badge(integration), do: "#integration-#{integration.id}-active-badge"
   defp activate_button(integration), do: "#integration-#{integration.id}-activate"
   defp check_button(integration), do: "#integration-#{integration.id}-check-access"
+
+  defp live_assign(view, name) do
+    :sys.get_state(view.pid).socket.assigns[name]
+  end
 
   defp expire_sudo(view) do
     :sys.replace_state(view.pid, fn state ->

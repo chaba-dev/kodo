@@ -45,6 +45,7 @@ defmodule KodoWeb.IntegrationsLive do
      |> assign(:action, nil)
      |> assign(:action_provider, nil)
      |> assign(:action_target, nil)
+     |> assign(:modal_token, nil)
      |> assign(:provider_configs, @provider_configs)
      |> assign(:max_api_key_bytes, @max_api_key_bytes)
      |> assign(:api_key_form, empty_form())
@@ -101,13 +102,16 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   defp open_new_action(socket, provider) do
+    modal_token = Ecto.UUID.generate()
+
     {:noreply,
      socket
      |> load_integrations()
      |> assign(:action, "connect")
      |> assign(:action_provider, provider)
      |> assign(:action_target, :new)
-     |> assign(:api_key_form, empty_form(provider_name(provider)))}
+     |> assign(:modal_token, modal_token)
+     |> assign(:api_key_form, empty_form(provider_name(provider), modal_token))}
   end
 
   defp open_existing_action(socket, provider, action, id) do
@@ -120,12 +124,15 @@ defmodule KodoWeb.IntegrationsLive do
       integration ->
         case action_target(action, integration) do
           {:ok, target} ->
+            modal_token = Ecto.UUID.generate()
+
             {:noreply,
              socket
              |> assign(:action, action)
              |> assign(:action_provider, provider)
              |> assign(:action_target, target)
-             |> assign(:api_key_form, empty_form())}
+             |> assign(:modal_token, modal_token)
+             |> assign(:api_key_form, empty_form("", modal_token))}
 
           :error ->
             stale_action(socket)
@@ -138,6 +145,7 @@ defmodule KodoWeb.IntegrationsLive do
     api_key = Map.get(params, "api_key", "")
 
     with true <- socket.assigns.action in ~w(connect replace),
+         true <- modal_token_valid?(socket, params),
          :ok <- validate_api_key(api_key),
          {:ok, integration} <- save_api_key(socket, params) do
       {:noreply,
@@ -205,8 +213,9 @@ defmodule KodoWeb.IntegrationsLive do
 
   def handle_event("activate", _params, socket), do: stale_action(socket)
 
-  def handle_event("disconnect", _params, socket) do
+  def handle_event("disconnect", %{"modal-token" => modal_token}, socket) do
     with true <- socket.assigns.action == "disconnect",
+         true <- modal_token == socket.assigns.modal_token,
          %{id: id, credential_generation: generation, connection_status: "connected"} <-
            socket.assigns.action_target,
          {:ok, integration} <-
@@ -219,6 +228,8 @@ defmodule KodoWeb.IntegrationsLive do
       _reason -> stale_action(socket)
     end
   end
+
+  def handle_event("disconnect", _params, socket), do: stale_action(socket)
 
   @impl true
   def handle_info({reference, _result}, socket) when is_reference(reference) do
@@ -239,6 +250,10 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   def handle_info({:integration_validation_finished, _id, _generation}, socket) do
+    {:noreply, load_integrations(socket)}
+  end
+
+  def handle_info({:integration_changed, _id, _generation}, socket) do
     {:noreply, load_integrations(socket)}
   end
 
@@ -304,6 +319,7 @@ defmodule KodoWeb.IntegrationsLive do
     |> assign(:action, nil)
     |> assign(:action_provider, nil)
     |> assign(:action_target, nil)
+    |> assign(:modal_token, nil)
     |> assign(:api_key_form, empty_form())
     |> load_integrations()
   end
@@ -445,14 +461,29 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp dom_id(integration, suffix), do: "integration-#{integration.id}-#{suffix}"
 
+  defp card_selector(integration), do: "##{dom_id(integration, "card")}"
+
   defp modal_dom_id(provider, action, :new), do: "integration-#{provider}-#{action}-new"
 
   defp modal_dom_id(provider, action, target) do
     "integration-#{provider}-#{action}-#{target.id}-#{target.credential_generation}"
   end
 
-  defp empty_form(display_name \\ "") do
-    to_form(%{"display_name" => display_name, "api_key" => ""}, as: :integration)
+  defp modal_remove(:new), do: JS.pop_focus()
+
+  defp modal_remove(target) do
+    JS.pop_focus() |> JS.focus(to: card_selector(target))
+  end
+
+  defp modal_token_valid?(socket, params) do
+    Map.get(params, "modal_token") == socket.assigns.modal_token
+  end
+
+  defp empty_form(display_name \\ "", modal_token \\ "") do
+    to_form(
+      %{"display_name" => display_name, "api_key" => "", "modal_token" => modal_token},
+      as: :integration
+    )
   end
 
   @impl true
@@ -531,6 +562,7 @@ defmodule KodoWeb.IntegrationsLive do
           <section
             :for={integration <- @integrations}
             id={dom_id(integration, "card")}
+            tabindex="-1"
             class={[
               "overflow-hidden rounded-2xl border bg-white shadow-sm transition dark:bg-zinc-950/40",
               integration.active &&
@@ -617,7 +649,7 @@ defmodule KodoWeb.IntegrationsLive do
                   :if={integration_connected?(integration) and !integration.active}
                   id={dom_id(integration, "activate")}
                   type="button"
-                  phx-click="activate"
+                  phx-click={JS.push("activate") |> JS.focus(to: card_selector(integration))}
                   phx-value-integration={integration.id}
                   phx-value-generation={integration.credential_generation}
                   phx-disable-with="Activating…"
@@ -676,7 +708,7 @@ defmodule KodoWeb.IntegrationsLive do
           :if={@action}
           id="integration-modal"
           class="fixed inset-0 z-50 flex items-end justify-center overflow-y-auto bg-zinc-950/50 p-3 backdrop-blur-sm sm:items-center sm:p-6"
-          phx-remove={JS.pop_focus()}
+          phx-remove={modal_remove(@action_target)}
         >
           <.focus_wrap
             id={modal_dom_id(@action_provider, @action, @action_target)}
@@ -720,6 +752,11 @@ defmodule KodoWeb.IntegrationsLive do
                 phx-submit="save_api_key"
                 class="mt-4 space-y-4"
               >
+                <input
+                  type="hidden"
+                  name={@api_key_form[:modal_token].name}
+                  value={@api_key_form[:modal_token].value}
+                />
                 <.input
                   :if={@action_target == :new}
                   id={modal_dom_id(@action_provider, @action, @action_target) <> "-name"}
@@ -789,6 +826,7 @@ defmodule KodoWeb.IntegrationsLive do
                   id="confirm-disconnect"
                   type="button"
                   phx-click="disconnect"
+                  phx-value-modal-token={@modal_token}
                   phx-disable-with="Disconnecting…"
                   class="rounded-xl bg-red-700 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-800 disabled:cursor-wait disabled:opacity-60"
                 >
