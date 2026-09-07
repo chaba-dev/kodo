@@ -46,6 +46,26 @@ defmodule KodoWeb.IntegrationsLiveTest do
     refute has_element?(view, "#integration-api-key-form[phx-change]")
   end
 
+  test "shows save errors inside the modal alert boundary", %{conn: conn} do
+    {:ok, view, _html} = live(conn, new_path("openai"))
+
+    render_submit(view, "save_api_key", %{
+      "integration" => %{
+        "display_name" => "Account",
+        "api_key" => "",
+        "modal_token" => live_assign(view, :modal_token)
+      }
+    })
+
+    assert has_element?(view, "[role='dialog'] #integration-modal-error[role='alert']")
+    assert has_element?(view, "#integration-modal-error", "API key")
+
+    assert has_element?(
+             view,
+             "#integration-api-key-form input[aria-describedby='integration-modal-error']"
+           )
+  end
+
   test "an unsupported provider cannot fall back to OpenAI", %{conn: conn} do
     assert {:error,
             {:live_redirect,
@@ -380,7 +400,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     {:ok, inactive} = connect_provider(scope, "openai", "second-secret", "Personal")
     {:ok, view, _html} = live(conn, action_path(active, "disconnect"))
 
-    assert has_element?(view, "#disconnect-confirmation", "without an active account")
+    assert has_element?(view, "#disconnect-confirmation", "will have no active account")
     assert has_element?(view, "#disconnect-confirmation", "already admitted or sent")
     assert has_element?(view, "#revoke-key-link[target='_blank'] .sr-only", "opens in a new tab")
 

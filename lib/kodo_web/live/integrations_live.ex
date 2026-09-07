@@ -46,6 +46,7 @@ defmodule KodoWeb.IntegrationsLive do
      |> assign(:action_provider, nil)
      |> assign(:action_target, nil)
      |> assign(:modal_token, nil)
+     |> assign(:modal_error, nil)
      |> assign(:provider_configs, @provider_configs)
      |> assign(:max_api_key_bytes, @max_api_key_bytes)
      |> assign(:api_key_form, empty_form())
@@ -111,6 +112,7 @@ defmodule KodoWeb.IntegrationsLive do
      |> assign(:action_provider, provider)
      |> assign(:action_target, :new)
      |> assign(:modal_token, modal_token)
+     |> assign(:modal_error, nil)
      |> assign(:api_key_form, empty_form(provider_name(provider), modal_token))}
   end
 
@@ -132,6 +134,7 @@ defmodule KodoWeb.IntegrationsLive do
              |> assign(:action_provider, provider)
              |> assign(:action_target, target)
              |> assign(:modal_token, modal_token)
+             |> assign(:modal_error, nil)
              |> assign(:api_key_form, empty_form("", modal_token))}
 
           :error ->
@@ -158,13 +161,17 @@ defmodule KodoWeb.IntegrationsLive do
         stale_action(socket)
 
       {:error, :invalid_api_key_input} ->
-        {:noreply, put_flash(socket, :error, "Enter an API key.")}
+        {:noreply, assign(socket, :modal_error, "Enter an API key.")}
 
       {:error, :stale_credential_generation} ->
         stale_action(socket)
 
+      {:error, %Ecto.Changeset{}} ->
+        {:noreply,
+         assign(socket, :modal_error, "Enter an account name between 1 and 80 characters.")}
+
       {:error, _reason} ->
-        {:noreply, put_flash(socket, :error, "The API key could not be saved.")}
+        {:noreply, assign(socket, :modal_error, "The integration could not be saved. Try again.")}
     end
   end
 
@@ -320,6 +327,7 @@ defmodule KodoWeb.IntegrationsLive do
     |> assign(:action_provider, nil)
     |> assign(:action_target, nil)
     |> assign(:modal_token, nil)
+    |> assign(:modal_error, nil)
     |> assign(:api_key_form, empty_form())
     |> load_integrations()
   end
@@ -746,6 +754,14 @@ defmodule KodoWeb.IntegrationsLive do
               <p class="text-sm leading-6 text-zinc-600 dark:text-zinc-400">
                 The key is encrypted immediately and is never shown again.
               </p>
+              <p
+                :if={@modal_error}
+                id="integration-modal-error"
+                role="alert"
+                class="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm font-medium text-red-800 dark:bg-red-950/30 dark:text-red-300"
+              >
+                {@modal_error}
+              </p>
               <.form
                 for={@api_key_form}
                 id="integration-api-key-form"
@@ -764,6 +780,7 @@ defmodule KodoWeb.IntegrationsLive do
                   type="text"
                   label="Account name"
                   maxlength="80"
+                  aria-describedby={@modal_error && "integration-modal-error"}
                   required
                 />
                 <.input
@@ -772,6 +789,7 @@ defmodule KodoWeb.IntegrationsLive do
                   type="password"
                   label={provider_config(@action_provider).key_label}
                   autocomplete="off"
+                  aria-describedby={@modal_error && "integration-modal-error"}
                   maxlength={@max_api_key_bytes}
                   required
                 />
@@ -809,11 +827,8 @@ defmodule KodoWeb.IntegrationsLive do
                 </.link>
                 if it must stop outside Kodo.
               </p>
-              <p
-                :if={@action_target.active}
-                class="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200"
-              >
-                This is the active account. Disconnecting it leaves {provider.name} without an active account until you activate another one.
+              <p class="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                If this account is active when disconnected, {provider.name} will have no active account until you activate another one.
               </p>
               <div class="mt-5 flex flex-wrap justify-end gap-2">
                 <.link
