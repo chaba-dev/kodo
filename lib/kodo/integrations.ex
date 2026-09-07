@@ -242,29 +242,49 @@ defmodule Kodo.Integrations do
   def activate(%Scope{}, _id, _generation), do: {:error, :stale_credential_generation}
 
   defp do_activate(%Scope{user: user}, id, generation, audit?) do
-    with {:ok, id} <- Ecto.UUID.cast(id) do
-      Repo.transaction(fn ->
-        with {:ok, integration} <- lock_provider_integrations(user.id, id),
-             :ok <- require_generation(integration, generation),
-             :ok <- require_connected(integration) do
-          Integration
-          |> where(
-            [candidate],
-            candidate.user_id == ^user.id and candidate.provider == ^integration.provider and
-              candidate.active
-          )
-          |> Repo.update_all(set: [active: false, updated_at: now()])
-
-          integration = integration |> change(active: true, updated_at: now()) |> Repo.update!()
-          if audit?, do: audit!(user.id, integration, "integration_activated")
-          integration
-        else
-          {:error, reason} -> Repo.rollback(reason)
-        end
-      end)
-    else
+    case Ecto.UUID.cast(id) do
+      {:ok, id} -> activate_transaction(user.id, id, generation, audit?)
       :error -> {:error, :integration_not_found}
     end
+  end
+
+  defp activate_transaction(user_id, id, generation, audit?) do
+    Repo.transaction(fn ->
+      case lock_provider_integrations(user_id, id) do
+        {:ok, integration, provider_integrations} ->
+          activate_locked(user_id, integration, provider_integrations, generation, audit?)
+
+        {:error, reason} ->
+          Repo.rollback(reason)
+      end
+    end)
+  end
+
+  defp activate_locked(user_id, integration, provider_integrations, generation, audit?) do
+    with :ok <- require_generation(integration, generation),
+         :ok <- require_connected(integration) do
+      if !audit? and Enum.any?(provider_integrations, & &1.active) do
+        integration
+      else
+        switch_active_integration(user_id, integration, audit?)
+      end
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp switch_active_integration(user_id, integration, audit?) do
+    Integration
+    |> where(
+      [candidate],
+      candidate.user_id == ^user_id and candidate.provider == ^integration.provider and
+        candidate.active
+    )
+    |> Repo.update_all(set: [active: false, updated_at: now()])
+
+    integration = integration |> change(active: true, updated_at: now()) |> Repo.update!()
+    if audit?, do: audit!(user_id, integration, "integration_activated")
+    integration
   end
 
   def safe_validation_errors, do: @safe_validation_errors
@@ -312,39 +332,47 @@ defmodule Kodo.Integrations do
   defp require_connected(%Integration{}), do: {:error, :integration_not_connected}
 
   defp activate_first({:ok, %Integration{} = integration}, scope) do
-    case get_active_integration_by_provider(scope, integration.provider) do
-      {:ok, _active} ->
-        {:ok, integration}
-
-      {:error, :integration_not_found} ->
-        do_activate(scope, integration.id, integration.credential_generation, false)
-    end
+    do_activate(scope, integration.id, integration.credential_generation, false)
   end
 
   defp activate_first(error, _scope), do: error
 
   defp lock_provider_integrations(user_id, integration_id) do
-    target =
+    provider =
       Integration
       |> where(
         [integration],
         integration.id == ^integration_id and integration.user_id == ^user_id
       )
-      |> lock("FOR UPDATE")
+      |> select([integration], integration.provider)
       |> Repo.one()
 
-    case target do
-      %Integration{} = integration ->
-        Integration
-        |> where(
-          [candidate],
-          candidate.user_id == ^user_id and candidate.provider == ^integration.provider
-        )
-        |> order_by([candidate], asc: candidate.id)
-        |> lock("FOR UPDATE")
-        |> Repo.all()
+    case provider do
+      nil ->
+        {:error, :integration_not_found}
 
-        {:ok, integration}
+      provider ->
+        lock_provider_rows(user_id, provider, integration_id)
+    end
+  end
+
+  defp lock_provider_rows(user_id, provider, integration_id) do
+    # Every switch takes the provider's rows in the same order. Locking the
+    # requested row first would let two concurrent switches deadlock while
+    # each waits for the other's target row.
+    provider_integrations =
+      Integration
+      |> where(
+        [candidate],
+        candidate.user_id == ^user_id and candidate.provider == ^provider
+      )
+      |> order_by([candidate], asc: candidate.id)
+      |> lock("FOR UPDATE")
+      |> Repo.all()
+
+    case Enum.find(provider_integrations, &(&1.id == integration_id)) do
+      %Integration{} = integration ->
+        {:ok, integration, provider_integrations}
 
       nil ->
         {:error, :integration_not_found}
@@ -400,10 +428,9 @@ defmodule Kodo.Integrations do
   end
 
   defp normalize_insert_result({:error, changeset} = error) do
-    cond do
-      constraint_error?(changeset, :foreign) -> {:error, :integration_owner_not_found}
-      true -> error
-    end
+    if constraint_error?(changeset, :foreign),
+      do: {:error, :integration_owner_not_found},
+      else: error
   end
 
   defp normalize_insert_result(result), do: result
