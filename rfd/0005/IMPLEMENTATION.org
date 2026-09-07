@@ -42,11 +42,11 @@ manufactured after that no-go decision.
 
 * Phase 1A: Establish the credential security foundation
 
-- [X] Generate migrations for one durable integration per user/provider pair,
-  separate connection and validation states, non-secret status metadata,
-  credential generation, and encryption-key version. Treat this as a fresh
-  encrypted schema with no plaintext, environment-key, or legacy integration
-  import path.
+- [X] Generate migrations for durable user/provider integrations, separate
+  connection and validation states, non-secret status metadata, credential
+  generation, and encryption-key version. Treat this as a fresh encrypted schema
+  with no plaintext, environment-key, or legacy integration import path. Phase 2
+  extends the schema to several named accounts per provider with one active row.
 - [X] Enforce the connection-validation matrix through context transition
   functions and database constraints where practical: only
   ~disconnected+unverified~ without a payload,
@@ -272,6 +272,14 @@ manufactured after that no-go decision.
 - [X] Extend integration settings and model-selection feedback to distinguish
   OpenAI API, Anthropic, and OpenRouter providers without displaying saved
   credentials.
+- [X] Allow several named accounts for the same API-key provider. Enforce at
+  most one connected active account per user/provider in the database, activate
+  only the first account automatically, require explicit activation to switch,
+  and leave no active fallback when that account is disconnected.
+- [X] Add an Add integration provider menu and account-input modal. Render one
+  card per integration and target activation, access checks, key replacement,
+  reconnection, and disconnection by the owned integration ID and credential
+  generation without retaining credential input in LiveView state.
 - [ ] Extend onboarding for Anthropic and OpenRouter; baseline provider
   onboarding remains pending with the Phase 1B model-settings experience.
 - [X] Extend missing-provider feedback for Anthropic and OpenRouter, and emit
