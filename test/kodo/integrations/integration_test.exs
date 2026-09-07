@@ -38,6 +38,37 @@ defmodule Kodo.Integrations.IntegrationTest do
       refute inspected =~ "ciphertext-secret"
       refute inspected =~ "encrypted_credentials"
     end
+
+    test "validates display names with the database codepoint limit" do
+      valid = String.duplicate("é", 80)
+      invalid = String.duplicate("é", 81)
+
+      assert Integration.create_changeset(%Integration{}, %{
+               provider: "openai",
+               authentication_type: "api_key",
+               display_name: valid
+             }).valid?
+
+      changeset =
+        Integration.create_changeset(%Integration{}, %{
+          provider: "openai",
+          authentication_type: "api_key",
+          display_name: invalid
+        })
+
+      assert "should be at most 80 character(s)" in errors_on(changeset).display_name
+    end
+
+    test "rejects NUL in display names" do
+      changeset =
+        Integration.create_changeset(%Integration{}, %{
+          provider: "openai",
+          authentication_type: "api_key",
+          display_name: "account\0name"
+        })
+
+      assert "contains an invalid character" in errors_on(changeset).display_name
+    end
   end
 
   describe "database constraints" do

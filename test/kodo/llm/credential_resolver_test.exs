@@ -206,6 +206,29 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert invalid.credential_generation == reference.credential_generation
   end
 
+  test "keeps admitted references pinned while new preflight selects the activated account",
+       context do
+    assert {:ok, second} =
+             Integrations.connect(context.scope, "openai", "api_key", %{
+               "api_key" => "second-secret"
+             })
+
+    assert {:ok, _activated} =
+             Integrations.activate(context.scope, second.id, second.credential_generation)
+
+    assert {:ok, admitted} = resolve(context)
+    assert admitted.integration_id == context.integration.id
+    assert admitted.token == "scoped-secret"
+
+    assert {:ok, next_reference} = CredentialResolver.reference(context.scope, model())
+    assert next_reference.integration_id == second.id
+
+    assert {:ok, next_credential} =
+             CredentialResolver.resolve(context.scope, model(), next_reference)
+
+    assert next_credential.token == "second-secret"
+  end
+
   test "requires exact model, reference, and stored providers", context do
     anthropic_model = LLMDB.Model.new!(%{id: "claude", provider: :anthropic})
 

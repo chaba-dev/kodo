@@ -44,9 +44,15 @@ defmodule Kodo.Integrations.Integration do
   def create_changeset(integration, attrs) do
     integration
     |> cast(attrs, [:provider, :authentication_type, :display_name])
+    |> update_change(:display_name, &String.trim/1)
     |> put_default_display_name()
     |> validate_required([:provider, :authentication_type, :display_name])
-    |> validate_length(:display_name, min: 1, max: @display_name_max_length)
+    |> validate_length(:display_name,
+      min: 1,
+      max: @display_name_max_length,
+      count: :codepoints
+    )
+    |> validate_format(:display_name, ~r/^[^\x00]*$/u, message: "contains an invalid character")
     |> validate_inclusion(:provider, @providers)
     |> validate_inclusion(:authentication_type, @authentication_types)
     |> constraint_changeset()

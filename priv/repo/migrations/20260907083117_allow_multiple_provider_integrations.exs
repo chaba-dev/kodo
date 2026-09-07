@@ -36,6 +36,8 @@ defmodule Kodo.Repo.Migrations.AllowMultipleProviderIntegrations do
   end
 
   def down do
+    ensure_unambiguous_downgrade!()
+
     drop constraint(:provider_integrations, :provider_integrations_active_connected)
 
     drop index(:provider_integrations, [:user_id, :provider],
@@ -44,24 +46,29 @@ defmodule Kodo.Repo.Migrations.AllowMultipleProviderIntegrations do
 
     drop index(:provider_integrations, [:user_id, :provider])
 
-    # A rollback can preserve only one account per provider.
-    execute("""
-    DELETE FROM provider_integrations duplicate
-    USING provider_integrations retained
-    WHERE duplicate.user_id = retained.user_id
-      AND duplicate.provider = retained.provider
-      AND (
-        (retained.active AND NOT duplicate.active) OR
-        (retained.active = duplicate.active AND retained.inserted_at < duplicate.inserted_at) OR
-        (retained.active = duplicate.active AND retained.inserted_at = duplicate.inserted_at AND retained.id < duplicate.id)
-      )
-    """)
-
     create unique_index(:provider_integrations, [:user_id, :provider])
 
     alter table(:provider_integrations) do
       remove :active
       remove :display_name
+    end
+  end
+
+  defp ensure_unambiguous_downgrade! do
+    result =
+      Ecto.Adapters.SQL.query!(repo(), """
+      SELECT 1
+      FROM provider_integrations
+      GROUP BY user_id, provider
+      HAVING count(*) > 1
+      LIMIT 1
+      """)
+
+    if result.num_rows > 0 do
+      raise """
+      cannot roll back multiple provider integrations while a user has more than one account for a provider;
+      consolidate those accounts through an explicitly reviewed procedure before retrying
+      """
     end
   end
 end
