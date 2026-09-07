@@ -40,8 +40,8 @@ defmodule Kodo.Integrations.IntegrationTest do
     end
 
     test "validates display names with the database codepoint limit" do
-      valid = String.duplicate("é", 80)
-      invalid = String.duplicate("é", 81)
+      valid = String.duplicate("e\u0301", 40)
+      invalid = String.duplicate("e\u0301", 41)
 
       assert Integration.create_changeset(%Integration{}, %{
                provider: "openai",

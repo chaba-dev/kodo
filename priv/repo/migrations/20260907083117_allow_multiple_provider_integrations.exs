@@ -61,13 +61,14 @@ defmodule Kodo.Repo.Migrations.AllowMultipleProviderIntegrations do
       FROM provider_integrations
       GROUP BY user_id, provider
       HAVING count(*) > 1
+        OR bool_or(connection_status = 'connected' AND NOT active)
       LIMIT 1
       """)
 
     if result.num_rows > 0 do
       raise """
-      cannot roll back multiple provider integrations while a user has more than one account for a provider;
-      consolidate those accounts through an explicitly reviewed procedure before retrying
+      cannot roll back multiple provider integrations while accounts are ambiguous or a connected account is inactive;
+      resolve account selection through an explicitly reviewed procedure before retrying
       """
     end
   end

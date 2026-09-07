@@ -232,11 +232,14 @@ defmodule Kodo.Integrations do
         validation_error_code: nil
       }
     )
+    |> notify_integration_change()
   end
 
   def activate(%Scope{} = scope, id, generation)
       when is_integer(generation) and generation >= 0 do
-    do_activate(scope, id, generation, true)
+    scope
+    |> do_activate(id, generation, true)
+    |> notify_integration_change()
   end
 
   def activate(%Scope{}, _id, _generation), do: {:error, :stale_credential_generation}
@@ -521,6 +524,18 @@ defmodule Kodo.Integrations do
     })
     |> Repo.insert!()
   end
+
+  defp notify_integration_change({:ok, integration} = result) do
+    Phoenix.PubSub.broadcast(
+      Kodo.PubSub,
+      "integration:#{integration.user_id}",
+      {:integration_changed, integration.id, integration.credential_generation}
+    )
+
+    result
+  end
+
+  defp notify_integration_change(error), do: error
 
   defp constraint_error?(changeset, type) do
     Enum.any?(changeset.errors, fn {_field, {_message, metadata}} ->
