@@ -31,12 +31,13 @@ defmodule Kodo.IntegrationsConcurrencyTest do
     results =
       ["first", "second"]
       |> Enum.map(fn name ->
-        Task.Supervisor.async_nolink(supervisor, fn ->
+        contended_task(supervisor, fn ->
           Integrations.connect(scope, "openai", "api_key", %{"api_key" => "#{name}-secret"},
             display_name: name
           )
         end)
       end)
+      |> release_contenders()
       |> Task.await_many()
 
     assert Enum.all?(results, &match?({:ok, _integration}, &1))
@@ -55,10 +56,11 @@ defmodule Kodo.IntegrationsConcurrencyTest do
     results =
       [second, third]
       |> Enum.map(fn integration ->
-        Task.Supervisor.async_nolink(supervisor, fn ->
+        contended_task(supervisor, fn ->
           Integrations.activate(scope, integration.id, integration.credential_generation)
         end)
       end)
+      |> release_contenders()
       |> Task.await_many()
 
     assert Enum.all?(results, &match?({:ok, _integration}, &1))
@@ -77,12 +79,14 @@ defmodule Kodo.IntegrationsConcurrencyTest do
     {:ok, _first} = connect(scope, "first")
     {:ok, selected} = connect(scope, "selected")
 
-    connect_task = Task.Supervisor.async_nolink(supervisor, fn -> connect(scope, "added") end)
+    connect_task = contended_task(supervisor, fn -> connect(scope, "added") end)
 
     activate_task =
-      Task.Supervisor.async_nolink(supervisor, fn ->
+      contended_task(supervisor, fn ->
         Integrations.activate(scope, selected.id, selected.credential_generation)
       end)
+
+    [connect_task, activate_task] = release_contenders([connect_task, activate_task])
 
     assert {:ok, added} = Task.await(connect_task)
     assert {:ok, activated} = Task.await(activate_task)
@@ -98,5 +102,31 @@ defmodule Kodo.IntegrationsConcurrencyTest do
     Integrations.connect(scope, "openai", "api_key", %{"api_key" => "#{name}-secret"},
       display_name: name
     )
+  end
+
+  defp contended_task(supervisor, operation) do
+    owner = self()
+
+    Task.Supervisor.async_nolink(supervisor, fn ->
+      Repo.checkout(fn ->
+        %{rows: [[backend_pid]]} = Ecto.Adapters.SQL.query!(Repo, "SELECT pg_backend_pid()")
+        send(owner, {:contender_ready, self(), backend_pid})
+        receive do: (:run -> operation.())
+      end)
+    end)
+  end
+
+  defp release_contenders(tasks) do
+    contenders =
+      Enum.map(tasks, fn task ->
+        task_pid = task.pid
+        assert_receive {:contender_ready, ^task_pid, backend_pid}
+        pid = task_pid
+        {pid, backend_pid}
+      end)
+
+    assert contenders |> Enum.map(&elem(&1, 1)) |> Enum.uniq() |> length() == length(tasks)
+    Enum.each(contenders, fn {pid, _backend_pid} -> send(pid, :run) end)
+    tasks
   end
 end

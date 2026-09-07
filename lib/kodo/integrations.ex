@@ -25,7 +25,6 @@ defmodule Kodo.Integrations do
     |> order_by(
       [integration],
       asc: integration.provider,
-      desc: integration.active,
       asc: integration.inserted_at
     )
     |> Repo.all()
@@ -467,7 +466,11 @@ defmodule Kodo.Integrations do
 
   defp maybe_lock_transition(_user_id, _integration_id, _event_type), do: :ok
 
-  defp maybe_activate_initial_oauth(user_id, integration, "oauth_succeeded") do
+  defp maybe_activate_initial_oauth(
+         user_id,
+         %{credential_generation: 1} = integration,
+         "oauth_succeeded"
+       ) do
     if !integration.active and !active_provider_account_exists?(user_id, integration.provider) and
          provider_account_count(user_id, integration.provider) == 1 do
       integration |> change(active: true, updated_at: now()) |> Repo.update!()

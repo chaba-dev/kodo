@@ -55,6 +55,10 @@ defmodule Kodo.Repo.Migrations.AllowMultipleProviderIntegrations do
   end
 
   defp ensure_unambiguous_downgrade! do
+    # The guard and destructive schema change must observe one stable table
+    # state; migration advisory locks do not exclude application writes.
+    Ecto.Adapters.SQL.query!(repo(), "LOCK TABLE provider_integrations IN ACCESS EXCLUSIVE MODE")
+
     result =
       Ecto.Adapters.SQL.query!(repo(), """
       SELECT 1

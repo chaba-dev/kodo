@@ -349,7 +349,37 @@ defmodule Kodo.IntegrationsTest do
 
       assert connected.connection_status == "connected"
       assert connected.validation_status == "unverified"
+      refute connected.active
       assert connected.credential_generation == disconnected.credential_generation + 1
+    end
+
+    test "reauthorizing after invalid grant does not reactivate the account", %{scope: scope} do
+      integration = oauth_integration(scope)
+
+      assert {:ok, connected} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
+                 "access_token" => "access",
+                 "refresh_token" => "refresh"
+               })
+
+      assert connected.active
+
+      assert {:ok, reauthorization} =
+               Integrations.refresh_invalid_grant(
+                 scope,
+                 connected.id,
+                 connected.credential_generation
+               )
+
+      assert {:ok, reauthorized} =
+               Integrations.oauth_succeeded(
+                 scope,
+                 reauthorization.id,
+                 reauthorization.credential_generation,
+                 %{"access_token" => "new-access", "refresh_token" => "new-refresh"}
+               )
+
+      refute reauthorized.active
     end
 
     test "rejects forged and cross-user generation-fenced transitions", %{scope: scope} do

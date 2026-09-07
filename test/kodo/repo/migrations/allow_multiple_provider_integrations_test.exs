@@ -6,6 +6,7 @@ defmodule Kodo.Repo.Migrations.AllowMultipleProviderIntegrationsTest do
   test "downgrade refuses ambiguous accounts instead of deleting data" do
     migration = File.read!(@migration_path)
 
+    assert migration =~ "LOCK TABLE provider_integrations IN ACCESS EXCLUSIVE MODE"
     assert migration =~ "HAVING count(*) > 1"
     assert migration =~ "bool_or(connection_status = 'connected' AND NOT active)"
     assert migration =~ "cannot roll back multiple provider integrations"
