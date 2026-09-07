@@ -40,7 +40,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
       )
 
     assert {:ok, view, _html} = live(conn, new_path("openai"))
-    assert has_element?(view, "#integration-modal[role='dialog'][aria-modal='true']")
+    assert has_element?(view, "#integration-modal [role='dialog'][aria-modal='true']")
     assert has_element?(view, "#integration-api-key-form input[name='integration[display_name]']")
     refute has_element?(view, "#integration-api-key-form[phx-change]")
   end
@@ -52,6 +52,34 @@ defmodule KodoWeb.IntegrationsLiveTest do
                to: "/integrations",
                flash: %{"error" => "This provider integration is not available."}
              }}} = live(conn, ~p"/integrations?#{[provider: "anthopic", action: "connect"]}")
+  end
+
+  test "an account-specific URL without a provider cannot target active OpenAI", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, integration} = connect_provider(scope, "openai", "secret", "Personal")
+
+    assert {:error, {:live_redirect, %{to: "/integrations", flash: %{"error" => error}}}} =
+             live(conn, ~p"/integrations?#{[action: "replace", integration: integration.id]}")
+
+    assert error =~ "changed in another session"
+  end
+
+  test "stored providers without settings support do not crash the page", %{
+    conn: conn,
+    scope: scope
+  } do
+    %Kodo.Integrations.Integration{user_id: scope.user.id}
+    |> Kodo.Integrations.Integration.create_changeset(%{
+      provider: "openai_codex",
+      authentication_type: "oauth"
+    })
+    |> Kodo.Repo.insert!()
+
+    assert {:ok, view, _html} = live(conn, ~p"/integrations")
+    assert has_element?(view, "#settings-shell")
+    assert has_element?(view, "#integrations-empty")
   end
 
   test "adds multiple accounts for one provider without exposing secrets", %{
@@ -163,6 +191,37 @@ defmodule KodoWeb.IntegrationsLiveTest do
 
     assert has_element?(view, "#{status(second)} dd.text-green-700", "Valid")
     assert has_element?(view, status(first), "Not checked")
+  end
+
+  test "rejects stale check-access generations before starting a probe", %{
+    conn: conn,
+    scope: scope
+  } do
+    Application.put_env(:kodo, :fake_api_key_validation_test_pid, self())
+    on_exit(fn -> Application.delete_env(:kodo, :fake_api_key_validation_test_pid) end)
+    {:ok, integration} = connect_provider(scope, "openai", "secret", "Personal")
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+
+    render_click(view, "check_access", %{
+      "integration" => integration.id,
+      "generation" => Integer.to_string(integration.credential_generation + 1)
+    })
+
+    refute_receive {:validation_probe_started, _probe, _task}
+  end
+
+  test "credential inputs have generation-specific DOM identities", %{conn: conn, scope: scope} do
+    {:ok, first} = connect_provider(scope, "openai", "first-secret", "Work")
+    {:ok, second} = connect_provider(scope, "openai", "second-secret", "Personal")
+    {:ok, view, _html} = live(conn, action_path(first, "replace"))
+
+    first_key = "#integration-openai-replace-#{first.id}-#{first.credential_generation}-key"
+    second_key = "#integration-openai-replace-#{second.id}-#{second.credential_generation}-key"
+    assert has_element?(view, first_key)
+
+    render_patch(view, action_path(second, "replace"))
+    refute has_element?(view, first_key)
+    assert has_element?(view, second_key)
   end
 
   test "shows rejected credentials as invalid in red", %{conn: conn, scope: scope} do

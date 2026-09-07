@@ -72,6 +72,13 @@ defmodule KodoWeb.IntegrationsLive do
     unsupported_provider(socket)
   end
 
+  # Account-specific links must include their provider so they cannot fall
+  # through to the legacy OpenAI route and target a different account.
+  def handle_params(%{"integration" => _id, "action" => action}, _uri, socket)
+      when action in @actions do
+    stale_action(socket)
+  end
+
   # Keep the original OpenAI links valid for bookmarks made before integrations
   # became account-specific. New links always carry the integration ID.
   def handle_params(%{"action" => "connect"} = params, _uri, socket)
@@ -153,15 +160,19 @@ defmodule KodoWeb.IntegrationsLive do
     end
   end
 
-  def handle_event("check_access", %{"integration" => id}, socket) do
+  def handle_event(
+        "check_access",
+        %{"integration" => id, "generation" => generation},
+        socket
+      ) do
     socket = load_integrations(socket)
 
     case Enum.find(socket.assigns.integrations, &(&1.id == id)) do
-      %{connection_status: "connected"} = integration ->
-        if validation_running?(socket.assigns.validation_tasks, integration) do
-          {:noreply, socket}
-        else
-          {:noreply, start_validation(socket, integration)}
+      %{connection_status: "connected", credential_generation: current_generation} = integration ->
+        cond do
+          Integer.to_string(current_generation) != generation -> stale_action(socket)
+          validation_running?(socket.assigns.validation_tasks, integration) -> {:noreply, socket}
+          true -> {:noreply, start_validation(socket, integration)}
         end
 
       _integration ->
@@ -301,6 +312,7 @@ defmodule KodoWeb.IntegrationsLive do
     integrations =
       socket.assigns.current_scope
       |> Integrations.list_integrations()
+      |> Enum.filter(&(&1.provider in @providers))
       |> Enum.map(&integration_metadata/1)
 
     assign(socket, :integrations, integrations)
@@ -433,6 +445,12 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp dom_id(integration, suffix), do: "integration-#{integration.id}-#{suffix}"
 
+  defp modal_dom_id(provider, action, :new), do: "integration-#{provider}-#{action}-new"
+
+  defp modal_dom_id(provider, action, target) do
+    "integration-#{provider}-#{action}-#{target.id}-#{target.credential_generation}"
+  end
+
   defp empty_form(display_name \\ "") do
     to_form(%{"display_name" => display_name, "api_key" => ""}, as: :integration)
   end
@@ -484,6 +502,7 @@ defmodule KodoWeb.IntegrationsLive do
                   :for={provider <- @provider_configs}
                   id={"add-#{provider.id}"}
                   patch={new_action_path(provider.id)}
+                  phx-click={JS.push_focus()}
                   class="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold text-zinc-800 transition hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
                 >
                   <span class="flex size-8 items-center justify-center rounded-lg bg-zinc-100 dark:bg-zinc-800">
@@ -548,6 +567,9 @@ defmodule KodoWeb.IntegrationsLive do
                     <span class="rounded-full bg-zinc-100 px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                       {provider.name}
                     </span>
+                    <span class="rounded-full bg-zinc-100 px-2 py-0.5 text-[0.65rem] font-semibold text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                      {provider.badge}
+                    </span>
                   </div>
                   <p class="mt-1 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
                     {provider.description}
@@ -586,6 +608,7 @@ defmodule KodoWeb.IntegrationsLive do
                   :if={!integration_connected?(integration)}
                   id={dom_id(integration, "reconnect")}
                   patch={action_path(integration, "connect")}
+                  phx-click={JS.push_focus()}
                   class="rounded-xl bg-zinc-950 px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
                 >
                   Reconnect
@@ -608,6 +631,7 @@ defmodule KodoWeb.IntegrationsLive do
                   type="button"
                   phx-click="check_access"
                   phx-value-integration={integration.id}
+                  phx-value-generation={integration.credential_generation}
                   disabled={validation_running?(@validation_tasks, integration)}
                   aria-describedby={dom_id(integration, "status")}
                   class="inline-flex items-center gap-1.5 rounded-xl border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:text-zinc-950 disabled:cursor-wait disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-white"
@@ -629,6 +653,7 @@ defmodule KodoWeb.IntegrationsLive do
                   :if={integration_connected?(integration)}
                   id={dom_id(integration, "replace")}
                   patch={action_path(integration, "replace")}
+                  phx-click={JS.push_focus()}
                   class="rounded-xl border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:text-zinc-950 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-white"
                 >
                   Replace key
@@ -637,6 +662,7 @@ defmodule KodoWeb.IntegrationsLive do
                   :if={integration_connected?(integration)}
                   id={dom_id(integration, "disconnect")}
                   patch={action_path(integration, "disconnect")}
+                  phx-click={JS.push_focus()}
                   class="rounded-xl border border-red-200 bg-white px-3.5 py-2 text-sm font-semibold text-red-700 transition hover:border-red-300 hover:bg-red-50 dark:border-red-950 dark:bg-zinc-900 dark:text-red-400 dark:hover:bg-red-950/30"
                 >
                   Disconnect
@@ -649,12 +675,19 @@ defmodule KodoWeb.IntegrationsLive do
         <div
           :if={@action}
           id="integration-modal"
-          class="fixed inset-0 z-50 flex items-end justify-center bg-zinc-950/50 p-3 backdrop-blur-sm sm:items-center sm:p-6"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="integration-modal-title"
+          class="fixed inset-0 z-50 flex items-end justify-center overflow-y-auto bg-zinc-950/50 p-3 backdrop-blur-sm sm:items-center sm:p-6"
+          phx-remove={JS.pop_focus()}
         >
-          <div class="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-zinc-950/10 dark:bg-zinc-900 dark:ring-white/10">
+          <.focus_wrap
+            id={modal_dom_id(@action_provider, @action, @action_target)}
+            class="max-h-[calc(100dvh-1.5rem)] w-full max-w-lg overflow-y-auto rounded-2xl bg-white shadow-2xl ring-1 ring-zinc-950/10 dark:bg-zinc-900 dark:ring-white/10 sm:max-h-[calc(100dvh-3rem)]"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="integration-modal-title"
+            phx-mounted={JS.focus_first()}
+            phx-window-keydown={JS.patch(~p"/integrations")}
+            phx-key="escape"
+          >
             <div class="flex items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4 dark:border-zinc-800 sm:px-6">
               <div>
                 <p class="text-xs font-semibold uppercase tracking-wider text-zinc-500">
@@ -689,6 +722,7 @@ defmodule KodoWeb.IntegrationsLive do
               >
                 <.input
                   :if={@action_target == :new}
+                  id={modal_dom_id(@action_provider, @action, @action_target) <> "-name"}
                   field={@api_key_form[:display_name]}
                   type="text"
                   label="Account name"
@@ -696,6 +730,7 @@ defmodule KodoWeb.IntegrationsLive do
                   required
                 />
                 <.input
+                  id={modal_dom_id(@action_provider, @action, @action_target) <> "-key"}
                   field={@api_key_form[:api_key]}
                   type="password"
                   label={provider_config(@action_provider).key_label}
@@ -761,7 +796,7 @@ defmodule KodoWeb.IntegrationsLive do
                 </button>
               </div>
             </div>
-          </div>
+          </.focus_wrap>
         </div>
       </Layouts.settings_shell>
     </Layouts.app>
