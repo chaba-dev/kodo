@@ -70,7 +70,7 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClientTest do
       plug = fn conn ->
         assert_request(conn, "/api/accounts/deviceauth/token")
         assert json_body(conn) == payload
-        Plug.Conn.send_resp(conn, status, "pending")
+        Plug.Conn.send_resp(conn, status, "{malformed private pending response")
       end
 
       assert :pending = ReqDeviceAuthorizationClient.poll(payload, plug: plug)
@@ -175,23 +175,136 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClientTest do
 
     plug = fn conn ->
       Agent.update(counter, &(&1 + 1))
-
-      conn
-      |> Plug.Conn.put_resp_header("location", "https://attacker.example/collect")
-      |> Plug.Conn.send_resp(302, "redirect")
+      Plug.Conn.send_resp(conn, 302, "redirect without a location")
     end
 
-    assert {:error, :redirect} = ReqDeviceAuthorizationClient.create(plug: plug)
-    assert Agent.get(counter, & &1) == 1
+    payloads = [
+      {&ReqDeviceAuthorizationClient.create/1, []},
+      {&ReqDeviceAuthorizationClient.poll/2,
+       [%{"device_auth_id" => "device", "user_code" => "code"}]},
+      {&ReqDeviceAuthorizationClient.exchange/2,
+       [%{"authorization_code" => "auth", "code_verifier" => "verifier"}]}
+    ]
+
+    for {operation, arguments} <- payloads do
+      assert {:error, :redirect} = apply(operation, arguments ++ [[plug: plug]])
+    end
+
+    assert Agent.get(counter, & &1) == 3
   end
 
   test "maps transport failures to one bounded availability error" do
-    finch_request = fn request, _finch_request, _finch_name, _options ->
+    transport = fn request, _started_at, _timeout ->
       {request, %Req.TransportError{reason: :econnrefused}}
     end
 
     assert {:error, :provider_unavailable} =
-             ReqDeviceAuthorizationClient.create(finch_request: finch_request)
+             ReqDeviceAuthorizationClient.create(device_authorization_transport: transport)
+  end
+
+  test "accepts device fields at 1024 bytes and rejects 1025 bytes" do
+    for field <- ["device_auth_id", "user_code"] do
+      for {size, expected} <- [{1_024, :ok}, {1_025, :error}] do
+        body = %{
+          "device_auth_id" => "device",
+          "user_code" => "code",
+          "interval" => "5",
+          field => String.duplicate("x", size)
+        }
+
+        plug = fn conn -> Req.Test.json(conn, body) end
+        result = ReqDeviceAuthorizationClient.create(plug: plug)
+        assert elem(result, 0) == expected
+      end
+    end
+  end
+
+  test "accepts authorization fields at 8192 bytes and rejects 8193 bytes" do
+    for size <- [8_192, 8_193] do
+      plug = fn conn ->
+        Req.Test.json(conn, %{
+          "authorization_code" => String.duplicate("a", size),
+          "code_challenge" => "challenge",
+          "code_verifier" => "verifier"
+        })
+      end
+
+      result =
+        ReqDeviceAuthorizationClient.poll(
+          %{"device_auth_id" => "device", "user_code" => "code"},
+          plug: plug
+        )
+
+      assert elem(result, 0) == if(size == 8_192, do: :ok, else: :error)
+    end
+  end
+
+  test "production adapter emits no Finch telemetry containing protocol secrets" do
+    sentinel = "SENTINEL-device-code-token-response"
+    test_pid = self()
+    handler_id = "device-auth-finch-canary-#{System.unique_integer()}"
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        [[:finch, :request, :start], [:finch, :request, :stop], [:finch, :request, :exception]],
+        fn event, measurements, metadata, pid ->
+          send(pid, {:finch_telemetry, event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    transport = fn request, _started_at, _timeout ->
+      assert IO.iodata_to_binary(request.body) =~ sentinel
+
+      {request,
+       Req.Response.new(
+         status: 200,
+         body:
+           Jason.encode!(%{
+             "authorization_code" => sentinel,
+             "code_challenge" => "challenge",
+             "code_verifier" => "verifier"
+           })
+       )}
+    end
+
+    assert {:ok, %{"authorization_code" => ^sentinel}} =
+             ReqDeviceAuthorizationClient.poll(
+               %{"device_auth_id" => sentinel, "user_code" => sentinel},
+               device_authorization_transport: transport
+             )
+
+    refute_receive {:finch_telemetry, _event, _measurements, _metadata}
+  end
+
+  test "hard deadline terminates transport work" do
+    test_pid = self()
+
+    transport = fn request, _started_at, _timeout ->
+      try do
+        send(test_pid, :transport_started)
+
+        receive do
+          :finish_transport -> :ok
+        end
+
+        {request, Req.Response.new(status: 500, body: "private")}
+      after
+        send(test_pid, :transport_completed)
+      end
+    end
+
+    assert {:error, :provider_unavailable} =
+             ReqDeviceAuthorizationClient.create(
+               device_authorization_transport: transport,
+               device_authorization_timeout: 10
+             )
+
+    assert_received :transport_started
+    refute_receive :transport_completed
   end
 
   defp assert_request(conn, path) do

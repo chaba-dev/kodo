@@ -10,13 +10,15 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClient do
   @verification_url "https://auth.openai.com/codex/device"
   @redirect_uri "https://auth.openai.com/deviceauth/callback"
   @timeout 10_000
-  @max_field_bytes 8_192
+  @max_device_field_bytes 1_024
+  @max_token_field_bytes 8_192
 
   @impl true
   def create(req_options \\ []) do
     with {:ok, body} <- post(@create_url, [json: %{client_id: @client_id}], req_options),
-         {:ok, device_auth_id} <- fetch_string(body, ["device_auth_id"]),
-         {:ok, user_code} <- fetch_string(body, ["user_code", "usercode"]),
+         {:ok, device_auth_id} <- fetch_string(body, ["device_auth_id"], @max_device_field_bytes),
+         {:ok, user_code} <-
+           fetch_string(body, ["user_code", "usercode"], @max_device_field_bytes),
          {:ok, polling_interval_ms} <- parse_interval(body),
          :ok <- validate_verification_url(body) do
       {:ok,
@@ -40,7 +42,8 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClient do
            req_options
          ) do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-        with {:ok, authorization_code} <- fetch_string(body, ["authorization_code"]),
+        with {:ok, body} <- decode_json(body),
+             {:ok, authorization_code} <- fetch_string(body, ["authorization_code"]),
              {:ok, code_challenge} <- fetch_string(body, ["code_challenge"]),
              {:ok, code_verifier} <- fetch_string(body, ["code_verifier"]) do
           {:ok,
@@ -53,6 +56,9 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClient do
 
       {:ok, %Req.Response{status: status}} when status in [403, 404] ->
         :pending
+
+      {:ok, %Req.Response{status: status}} when status in 300..399 ->
+        {:error, :redirect}
 
       {:ok, %Req.Response{}} ->
         {:error, :device_authorization_rejected}
@@ -105,11 +111,14 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClient do
 
   defp post(url, request_options, req_options) do
     case request(url, request_options, req_options) do
-      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 and is_map(body) ->
-        {:ok, body}
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        decode_json(body)
 
       {:ok, %Req.Response{status: 404}} when url == @create_url ->
         {:error, :device_authorization_unsupported}
+
+      {:ok, %Req.Response{status: status}} when status in 300..399 ->
+        {:error, :redirect}
 
       {:ok, %Req.Response{}} ->
         {:error, :device_authorization_rejected}
@@ -122,47 +131,57 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClient do
   defp request(url, request_options, req_options) when is_list(req_options) do
     # Only the transport can be replaced in tests. The credential-bearing
     # origin, redirect policy, client identity, and timeout stay immutable.
-    req_options = Keyword.take(req_options, [:plug, :finch_request])
+    req_options =
+      Keyword.take(req_options, [
+        :plug,
+        :device_authorization_transport,
+        :device_authorization_timeout
+      ])
 
     options =
       [
         url: url,
-        max_redirects: 0,
+        adapter: Kodo.Integrations.DeviceAuthorizationReqAdapter,
+        redirect: false,
         retry: false,
-        receive_timeout: @timeout,
-        request_timeout: @timeout,
-        finch: [
-          pool_timeout: @timeout,
-          conn_opts: [transport_opts: [timeout: @timeout]]
-        ]
+        decode_body: false,
+        device_authorization_timeout: @timeout
       ] ++ request_options ++ req_options
 
-    case Req.post(options) do
+    request =
+      Req.new()
+      |> Req.Request.register_options([
+        :device_authorization_timeout,
+        :device_authorization_transport
+      ])
+
+    case Req.post(request, options) do
       {:ok, response} -> {:ok, response}
-      {:error, %Req.TooManyRedirectsError{}} -> {:error, :redirect}
       {:error, _error} -> {:error, :provider_unavailable}
     end
-  rescue
-    exception in RuntimeError ->
-      if String.starts_with?(
-           Exception.message(exception),
-           "Finch was unable to provide a connection within the timeout"
-         ) do
-        {:error, :provider_unavailable}
-      else
-        reraise exception, __STACKTRACE__
-      end
   end
 
-  defp fetch_string(body, names) when is_map(body) do
+  defp fetch_string(body, names, max_bytes \\ @max_token_field_bytes)
+
+  defp fetch_string(body, names, max_bytes) when is_map(body) do
     value = Enum.find_value(names, &Map.get(body, &1))
 
-    if is_binary(value) and byte_size(value) > 0 and byte_size(value) <= @max_field_bytes,
+    if is_binary(value) and byte_size(value) > 0 and byte_size(value) <= max_bytes,
       do: {:ok, value},
       else: {:error, :device_authorization_response_invalid}
   end
 
-  defp fetch_string(_body, _names), do: {:error, :device_authorization_response_invalid}
+  defp fetch_string(_body, _names, _max_bytes),
+    do: {:error, :device_authorization_response_invalid}
+
+  defp decode_json(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} when is_map(decoded) -> {:ok, decoded}
+      _invalid -> {:error, :device_authorization_response_invalid}
+    end
+  end
+
+  defp decode_json(_body), do: {:error, :device_authorization_response_invalid}
 
   defp parse_interval(%{"interval" => interval}) when is_binary(interval) do
     case Integer.parse(String.trim(interval)) do
