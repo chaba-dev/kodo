@@ -50,7 +50,7 @@ defmodule Kodo.Integrations.DeviceAuthorizationReqAdapter do
            Mint.HTTP.request(
              conn,
              request.method |> to_string() |> String.upcase(),
-             request_path(url),
+             request_target(url),
              Req.Fields.get_list(request.headers),
              request.body
            ) do
@@ -107,8 +107,12 @@ defmodule Kodo.Integrations.DeviceAuthorizationReqAdapter do
   defp remaining(started_at, timeout),
     do: max(timeout - (System.monotonic_time(:millisecond) - started_at), 0)
 
-  defp request_path(url),
-    do: URI.to_string(%{url | scheme: nil, host: nil, port: nil, userinfo: nil})
+  @doc false
+  def request_target(url) do
+    # Build a fresh URI because URI.parse/1 retains a legacy authority field.
+    # Mutating the absolute URI could therefore send `//host/path` to Mint.
+    URI.to_string(%URI{path: url.path || "/", query: url.query})
+  end
 
   defp safe_reason(:timeout), do: :timeout
   defp safe_reason(_reason), do: :closed
