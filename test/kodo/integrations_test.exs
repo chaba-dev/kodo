@@ -1,6 +1,8 @@
 defmodule Kodo.IntegrationsTest do
   use Kodo.DataCase, async: true
 
+  import ExUnit.CaptureLog
+
   alias Kodo.AccountsFixtures
   alias Kodo.Integrations
   alias Kodo.Integrations.CredentialEncryption
@@ -658,6 +660,123 @@ defmodule Kodo.IntegrationsTest do
       assert second.expected_integration_generation == 2
     end
 
+    test "reauthorization cancellation and expiry preserve a working integration", %{
+      scope: scope
+    } do
+      integration = oauth_integration(scope)
+
+      assert {:ok, connected} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
+                 "access_token" => "access",
+                 "refresh_token" => "refresh"
+               })
+
+      assert {:ok, valid} =
+               Integrations.validation_succeeded(
+                 scope,
+                 connected.id,
+                 connected.credential_generation
+               )
+
+      assert valid.active
+
+      assert {:ok, first} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 valid.id,
+                 valid.credential_generation,
+                 %{"device_auth_id" => "first", "user_code" => "FIRST"},
+                 1_000
+               )
+
+      after_start = Repo.reload!(valid)
+      assert after_start.connection_status == "connected"
+      assert after_start.validation_status == "valid"
+      assert after_start.active
+
+      assert {:ok, _cancelled} =
+               Integrations.cancel_device_authorization(
+                 scope,
+                 first.id,
+                 first.attempt_generation
+               )
+
+      assert %{connection_status: "connected", validation_status: "valid", active: true} =
+               Repo.reload!(valid)
+
+      after_cancel = Repo.reload!(valid)
+
+      assert {:ok, second} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 after_cancel.id,
+                 after_cancel.credential_generation,
+                 %{"device_auth_id" => "second", "user_code" => "SECOND"},
+                 1_000
+               )
+
+      Repo.update!(
+        change(second, provider_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
+      )
+
+      assert {:error, :device_authorization_not_found} =
+               Integrations.get_active_device_authorization(scope, valid.id)
+
+      assert %{connection_status: "connected", validation_status: "valid", active: true} =
+               Repo.reload!(valid)
+    end
+
+    test "attempt operations suppress identifiers and ciphertext from query observability", %{
+      scope: scope
+    } do
+      integration = oauth_integration(scope)
+      handler_id = "device-attempt-observability-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:kodo, :repo, :query],
+          fn _event, _measurements, metadata, pid -> send(pid, {:repo_query, metadata}) end,
+          test_pid
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      log =
+        capture_log([level: :debug], fn ->
+          assert {:ok, attempt} =
+                   Integrations.begin_device_authorization(
+                     scope,
+                     integration.id,
+                     0,
+                     %{"device_auth_id" => "telemetry-device", "user_code" => "TELEMETRY"},
+                     1_000
+                   )
+
+          assert {:ok, {_attempt, _payload}} =
+                   Integrations.get_active_device_authorization(scope, integration.id)
+
+          assert {:ok, _cancelled} =
+                   Integrations.cancel_device_authorization(
+                     scope,
+                     attempt.id,
+                     attempt.attempt_generation
+                   )
+
+          metadata = collect_query_metadata([])
+          assert metadata != []
+          observed = inspect(metadata, limit: :infinity, printable_limit: :infinity)
+
+          refute observed =~ attempt.id
+          refute observed =~ inspect(attempt.encrypted_payload)
+          refute observed =~ Base.encode64(attempt.encrypted_payload)
+        end)
+
+      refute log =~ "telemetry-device"
+      refute log =~ "TELEMETRY"
+    end
+
     test "rejects stale, cross-user, malformed, and unsupported starts", %{scope: scope} do
       integration = oauth_integration(scope)
       other_scope = AccountsFixtures.user_scope_fixture()
@@ -851,5 +970,13 @@ defmodule Kodo.IntegrationsTest do
   defp assert_encoding_blocked(task, ref) do
     task_pid = task.pid
     assert_receive {:json_encoding_blocked, ^ref, ^task_pid}
+  end
+
+  defp collect_query_metadata(acc) do
+    receive do
+      {:repo_query, metadata} -> collect_query_metadata([metadata | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 end

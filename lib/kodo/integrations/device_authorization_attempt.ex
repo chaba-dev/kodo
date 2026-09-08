@@ -6,6 +6,7 @@ defmodule Kodo.Integrations.DeviceAuthorizationAttempt do
 
   @states ~w(active completed cancelled expired failed)
 
+  @derive {Inspect, except: [:id, :encrypted_payload]}
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
 

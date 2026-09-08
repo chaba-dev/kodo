@@ -138,6 +138,61 @@ defmodule Kodo.IntegrationsConcurrencyTest do
            ) == 1
   end
 
+  test "device authorization start and cancellation use one lock order without deadlocks", %{
+    scope: scope,
+    supervisor: supervisor
+  } do
+    for iteration <- 1..10 do
+      integration =
+        %Integration{user_id: scope.user.id}
+        |> Integration.create_changeset(%{
+          provider: "openai_codex",
+          authentication_type: "oauth",
+          display_name: "Account #{iteration}"
+        })
+        |> Repo.insert!()
+
+      assert {:ok, attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 0,
+                 %{"device_auth_id" => "first", "user_code" => "FIRST"},
+                 0
+               )
+
+      cancel =
+        contended_task(supervisor, fn ->
+          Integrations.cancel_device_authorization(
+            scope,
+            attempt.id,
+            attempt.attempt_generation
+          )
+        end)
+
+      start =
+        contended_task(supervisor, fn ->
+          Integrations.begin_device_authorization(
+            scope,
+            integration.id,
+            1,
+            %{"device_auth_id" => "second", "user_code" => "SECOND"},
+            0
+          )
+        end)
+
+      [cancel_result, start_result] =
+        [cancel, start]
+        |> release_contenders()
+        |> Task.await_many()
+
+      assert match?({:ok, %DeviceAuthorizationAttempt{}}, start_result)
+
+      assert match?({:ok, %DeviceAuthorizationAttempt{}}, cancel_result) or
+               cancel_result == {:error, :stale_device_authorization}
+    end
+  end
+
   defp connect(scope, name) do
     Integrations.connect(scope, "openai", "api_key", %{"api_key" => "#{name}-secret"},
       display_name: name

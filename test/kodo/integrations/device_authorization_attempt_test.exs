@@ -32,10 +32,14 @@ defmodule Kodo.Integrations.DeviceAuthorizationAttemptTest do
     end
 
     test "redacts encrypted authorization payloads from inspection" do
-      inspected = inspect(%DeviceAuthorizationAttempt{encrypted_payload: "ciphertext-secret"})
+      id = Ecto.UUID.generate()
+
+      inspected =
+        inspect(%DeviceAuthorizationAttempt{id: id, encrypted_payload: "ciphertext-secret"})
 
       refute inspected =~ "ciphertext-secret"
       refute inspected =~ "encrypted_payload"
+      refute inspected =~ id
     end
   end
 
