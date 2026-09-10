@@ -817,7 +817,7 @@ defmodule KodoWeb.IntegrationsLive do
                     <p class="text-xs font-bold uppercase tracking-wider text-sky-800 dark:text-sky-300">
                       Waiting for OpenAI authorization
                     </p>
-                    <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
+                    <div class="mt-3 space-y-3">
                       <div>
                         <p class="text-xs font-medium text-zinc-500">Open this verification page</p>
                         <.link
