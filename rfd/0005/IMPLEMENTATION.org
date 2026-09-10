@@ -324,10 +324,10 @@ manufactured after that no-go decision.
 - [X] Implement device-code creation, interval-aware asynchronous polling,
   cancellation, expiry, terminal errors, and authorization-code exchange using
   Req rather than embedded browser scripts.
-- [ ] Render the fixed allowlisted HTTPS verification destination and one-time
+- [X] Render the fixed allowlisted HTTPS verification destination and one-time
   code separately, reject a provider-returned verification URL that does not
   match the exact allowlist, and never automatically navigate to that URL.
-- [ ] Trigger claims only from attempt creation or LiveView mount/remount, use
+- [X] Trigger claims only from attempt creation or LiveView mount/remount, use
   one conditional update against the exact attempt row that increments and
   returns its claim epoch, and run a successful claim as a finite task under
   ~Kodo.ControlPlaneTaskSupervisor~ that survives the originating LiveView
@@ -341,7 +341,7 @@ manufactured after that no-go decision.
 - [X] Do not run a device-polling sweeper on every replica; expire attempts
   lazily and delete terminal rows in bounded batches, using one database-elected
   cleanup owner only if periodic cleanup becomes necessary.
-- [ ] Make a new attempt atomically supersede the prior attempt and fence
+- [X] Make a new attempt atomically supersede the prior attempt and fence
   cancellation, expiry, completion, replacement, and disconnection by attempt
   generation. Starting reauthorization advances the integration generation and
   the new attempt captures that post-advance value; install OAuth credentials
@@ -376,7 +376,7 @@ manufactured after that no-go decision.
   explanation, progress state, cancellation, disconnect, and reauthorization to
   the authenticated integrations page; show subscription quota errors only on
   the affected session or turn with retry and billing guidance.
-- [ ] Use the normal authenticated-user boundary to start authorization or
+- [X] Use the normal authenticated-user boundary to start authorization or
   reauthorization and to cancel an owned attempt; do not require renewed sudo
   mode. Permit the same active generation-fenced attempt to complete while its
   ownership and generation checks continue to succeed.
