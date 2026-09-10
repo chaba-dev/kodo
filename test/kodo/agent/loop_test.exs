@@ -92,6 +92,52 @@ defmodule Kodo.Agent.LoopTest do
     refute Enum.any?(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
   end
 
+  test "never falls back to Platform billing for a ChatGPT turn snapshot", %{
+    session: session,
+    ownership: ownership
+  } do
+    [created] = Sessions.events_after(session.id)
+
+    mapping =
+      update_in(created.payload["model_mapping"], ["roles"], fn roles ->
+        Map.new(roles, fn {role, role_mapping} ->
+          {role,
+           role_mapping
+           |> Map.put("execution_route", "openai_codex")
+           |> Map.put("model_selector", "gpt-5.4")}
+        end)
+      end)
+
+    {:ok, _snapshot} =
+      Sessions.append_event(
+        session.id,
+        "turn_route_snapshot",
+        %{"route_revision" => 2, "model_mapping" => mapping},
+        source: "system",
+        ownership: ownership
+      )
+
+    {:ok, _message} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "final answer"},
+        ownership: ownership
+      )
+
+    assert {:error, %Kodo.LLM.ProviderError{} = error} =
+             Loop.run(session.id,
+               adapter: Kodo.Test.FakeLLM,
+               budgets: budgets([]),
+               ownership: ownership
+             )
+
+    assert error.kind == :integration_required
+    assert error.provider == "openai_codex"
+
+    refute Enum.any?(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
+  end
+
   test "records the resolved role and model mapping for an invocation", %{
     session: session,
     ownership: ownership

@@ -78,6 +78,14 @@ defmodule Kodo.Agent.ModelMapping do
     %{mapping | "roles" => roles}
   end
 
+  @doc "Builds the provider-specific request model from an immutable route snapshot."
+  def request_model(%{"execution_route" => route, "model_selector" => selector})
+      when is_binary(route) and route != "" and is_binary(selector) and selector != "" do
+    "#{route}:#{selector}"
+  end
+
+  def request_model(%{"model" => model}), do: model
+
   defp capability_contract(contract) do
     %{
       "id" => contract.id,

@@ -164,10 +164,11 @@ defmodule Kodo.Agent.Loop do
 
   defp run_final_review(text, primary_invocation_id, context) do
     review = ModelMapping.role!(context.mapping, :review)
+    review_model = ModelMapping.request_model(review)
     contract = Roles.fetch!(:review, review["role_contract"])
 
     with {:ok, capability_validation} <-
-           context.adapter.validate_model(review["model"], review, contract),
+           context.adapter.validate_model(review_model, review, contract),
          {:ok, request} <- resolve_request(context.session_id, review),
          :ok <-
            Phoenix.PubSub.subscribe(
@@ -464,6 +465,7 @@ defmodule Kodo.Agent.Loop do
   defp infer(session_id, projection, events, adapter, budgets, invocation, ownership) do
     mapping = turn_mapping(projection)
     primary = ModelMapping.role!(mapping, :primary)
+    primary_model = ModelMapping.request_model(primary)
     contract = Roles.fetch!(:primary, primary["role_contract"])
 
     tools =
@@ -475,7 +477,7 @@ defmodule Kodo.Agent.Loop do
 
     with :ok <- within_budget(invocation, usage(current_turn(events)), budgets),
          {:ok, capability_validation} <-
-           adapter.validate_model(primary["model"], primary, contract),
+           adapter.validate_model(primary_model, primary, contract),
          {:ok, request} <- resolve_request(session_id, primary),
          {:ok, invocation_id} <-
            start_invocation(
@@ -812,10 +814,11 @@ defmodule Kodo.Agent.Loop do
 
   defp run_search(question, parent_call, context) do
     search = ModelMapping.role!(context.mapping, :search)
+    search_model = ModelMapping.request_model(search)
     contract = Roles.fetch!(:search, search["role_contract"])
 
     with {:ok, capability_validation} <-
-           context.adapter.validate_model(search["model"], search, contract) do
+           context.adapter.validate_model(search_model, search, contract) do
       state = %{
         parent_call: parent_call,
         search: search,
@@ -1637,7 +1640,8 @@ defmodule Kodo.Agent.Loop do
 
   defp resolve_request(session_id, role) do
     with {:ok, scope} <- Sessions.owner_scope(session_id),
-         {:ok, model, reference} <- LLM.resolve_integration(scope, role["model"]) do
+         {:ok, model, reference} <-
+           LLM.resolve_integration(scope, ModelMapping.request_model(role)) do
       {:ok, %{scope: scope, model: model, reference: reference}}
     end
   end
