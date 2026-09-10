@@ -233,8 +233,9 @@ defmodule Kodo.Integrations do
       )
       when error_code in @device_authorization_terminal_errors do
     Repo.transaction(fn ->
+      lock_user!(user.id)
+      integration = lock_owned_integration!(user.id, claim.integration_id)
       attempt = terminalize_claimed_device_authorization(user.id, claim, "failed", error_code)
-      integration = Repo.get!(Integration, attempt.integration_id)
       audit!(user.id, integration, "device_authorization_failed")
       attempt
     end)
