@@ -28,7 +28,8 @@ defmodule Kodo.LLM.ProviderError do
              :integration_disconnected,
              :integration_reauthorization_required,
              :integration_invalid,
-             :stale_credential_generation
+             :stale_credential_generation,
+             :provider_unavailable
            ] do
     provider = Atom.to_string(model.provider)
 
@@ -96,6 +97,7 @@ defmodule Kodo.LLM.ProviderError do
   defp integration_kind(:integration_invalid), do: :authentication_rejected
   defp integration_kind(:integration_reauthorization_required), do: :authentication_rejected
   defp integration_kind(:stale_credential_generation), do: :integration_changed
+  defp integration_kind(:provider_unavailable), do: :provider_unavailable
   defp integration_kind(_reason), do: :integration_required
 
   defp billing_path("openai_codex"), do: :subscription

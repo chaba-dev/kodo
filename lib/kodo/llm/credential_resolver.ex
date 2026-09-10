@@ -12,6 +12,7 @@ defmodule Kodo.LLM.CredentialResolver do
   alias Kodo.Integrations
   alias Kodo.Integrations.CredentialEncryption
   alias Kodo.Integrations.Integration
+  alias Kodo.Integrations.OAuthRefresh
   alias Kodo.LLM.Credential
   alias Kodo.LLM.IntegrationRef
 
@@ -47,6 +48,7 @@ defmodule Kodo.LLM.CredentialResolver do
          :ok <- require_authentication_type(integration, reference),
          :ok <- require_billing_path(integration, reference),
          :ok <- require_usable(integration),
+         {:ok, integration} <- OAuthRefresh.ensure_fresh(scope, integration),
          {:ok, payload} <- CredentialEncryption.decrypt(integration) do
       build_credential(integration, reference, payload)
     end

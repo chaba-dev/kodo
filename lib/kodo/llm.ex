@@ -124,7 +124,8 @@ defmodule Kodo.LLM do
              :integration_disconnected,
              :integration_reauthorization_required,
              :integration_invalid,
-             :stale_credential_generation
+             :stale_credential_generation,
+             :provider_unavailable
            ] ->
         {:error, ProviderError.from_integration(reason, model)}
 

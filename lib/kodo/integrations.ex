@@ -408,7 +408,7 @@ defmodule Kodo.Integrations do
             integration.id == ^id and integration.user_id == ^user.id and
               integration.provider == "openai_codex" and
               integration.authentication_type == "oauth" and
-              integration.connection_status in ["connected", "reauthorization_required"] and
+              integration.connection_status == "connected" and
               integration.credential_generation == ^generation and
               (is_nil(integration.refresh_claim_owner_id) or
                  integration.refresh_lease_expires_at <= fragment("clock_timestamp()"))
@@ -449,6 +449,37 @@ defmodule Kodo.Integrations do
       {0, nil} -> {:error, :stale_refresh_claim}
     end
   end
+
+  def require_refresh_reauthorization(%Scope{user: user}, %Integration{} = claim, error_code)
+      when error_code in ~w(refresh_invalid_grant refresh_account_identity_mismatch) do
+    Repo.transaction(fn ->
+      changes = [
+        connection_status: "reauthorization_required",
+        active: false,
+        validation_status: "unverified",
+        validated_at: nil,
+        validation_error_code: error_code,
+        refresh_claim_owner_id: nil,
+        refresh_claim_generation: nil,
+        refresh_lease_expires_at: nil,
+        updated_at: now()
+      ]
+
+      case Repo.update_all(exact_refresh_claim_query(user.id, claim), set: changes) do
+        {1, nil} ->
+          integration = Repo.get_by!(Integration, id: claim.id, user_id: user.id)
+          audit!(user.id, integration, "refresh_reauthorization_required")
+          integration
+
+        {0, nil} ->
+          Repo.rollback(:stale_refresh_claim)
+      end
+    end)
+    |> notify_integration_change()
+  end
+
+  def require_refresh_reauthorization(%Scope{}, %Integration{}, _error_code),
+    do: {:error, :unsafe_refresh_error}
 
   def validation_succeeded(%Scope{} = scope, id, generation) do
     update_fenced(scope, id, generation, ["connected"], "validation_succeeded", %{

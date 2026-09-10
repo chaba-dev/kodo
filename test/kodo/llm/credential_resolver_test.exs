@@ -288,11 +288,17 @@ defmodule Kodo.LLM.CredentialResolverTest do
     integration = Kodo.Repo.insert!(integration)
 
     assert {:ok, connected} =
-             Integrations.oauth_succeeded(scope, integration.id, 0, %{
-               "access_token" => "access-secret",
-               "refresh_token" => "refresh-secret",
-               "account_id" => "account-secret"
-             })
+             Integrations.oauth_succeeded(
+               scope,
+               integration.id,
+               0,
+               %{
+                 "access_token" => "access-secret",
+                 "refresh_token" => "refresh-secret",
+                 "account_id" => "account-secret"
+               },
+               expires_at: DateTime.add(DateTime.utc_now(), 3_600, :second)
+             )
 
     codex_model = LLMDB.Model.new!(%{id: "codex", provider: :openai_codex})
 
