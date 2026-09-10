@@ -41,7 +41,13 @@ defmodule Kodo.Integrations.ReqRefreshClient do
         :credential_request_transport
       ])
 
-    case Req.post(request, options) do
+    request |> Req.post(options) |> classify_response()
+  end
+
+  def refresh(_refresh_token, _req_options), do: {:error, :oauth_refresh_response_invalid}
+
+  defp classify_response(result) do
+    case result do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         decode_success(body)
 
@@ -60,8 +66,6 @@ defmodule Kodo.Integrations.ReqRefreshClient do
         {:error, :provider_unavailable}
     end
   end
-
-  def refresh(_refresh_token, _req_options), do: {:error, :oauth_refresh_response_invalid}
 
   defp decode_success(body) do
     with {:ok, decoded} when is_map(decoded) <- decode_json(body),

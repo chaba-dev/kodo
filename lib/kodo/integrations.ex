@@ -292,14 +292,7 @@ defmodule Kodo.Integrations do
       })
 
     if changeset.valid? do
-      Repo.transaction(fn ->
-        lock_provider_identity(user.id, "openai_codex")
-
-        case Repo.insert(changeset) do
-          {:ok, integration} -> integration
-          {:error, reason} -> Repo.rollback(reason)
-        end
-      end)
+      Repo.transaction(fn -> insert_oauth_integration(user.id, changeset) end)
     else
       {:error, changeset}
     end
@@ -307,6 +300,15 @@ defmodule Kodo.Integrations do
 
   def create_oauth_integration(%Scope{}, _provider, _opts),
     do: {:error, :authentication_type_mismatch}
+
+  defp insert_oauth_integration(user_id, changeset) do
+    lock_provider_identity(user_id, "openai_codex")
+
+    case Repo.insert(changeset) do
+      {:ok, integration} -> integration
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
 
   def connect(scope, provider, authentication_type, credentials, opts \\ [])
 
@@ -395,6 +397,8 @@ defmodule Kodo.Integrations do
   end
 
   @doc "Claims one generation of an OAuth integration for a bounded refresh operation."
+  # The boolean terms below are one atomic database fence, not control-flow branches.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   def claim_refresh(%Scope{user: user}, id, generation, claim_owner_id)
       when is_integer(generation) and generation >= 0 do
     with {:ok, id} <- cast_uuid(id),
@@ -708,6 +712,8 @@ defmodule Kodo.Integrations do
              attempt.claim_owner_id == ^claim_owner_id)
   end
 
+  # The boolean terms below are one atomic database fence, not control-flow branches.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp renew_device_authorization_claim_locked(
          user_id,
          attempt_id,
@@ -811,12 +817,11 @@ defmodule Kodo.Integrations do
            @secret_repo_options
          ) do
       {1, [attempt]} ->
-        case decrypt_device_authorization(attempt) do
-          {attempt, payload} ->
-            case validate_device_authorization_exchange_payload(payload) do
-              :ok -> {attempt, payload}
-              {:error, reason} -> Repo.rollback(reason)
-            end
+        {attempt, payload} = decrypt_device_authorization(attempt)
+
+        case validate_device_authorization_exchange_payload(payload) do
+          :ok -> {attempt, payload}
+          {:error, reason} -> Repo.rollback(reason)
         end
 
       {0, []} ->
@@ -880,6 +885,8 @@ defmodule Kodo.Integrations do
     end
   end
 
+  # The boolean terms below are one atomic database fence, not control-flow branches.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp lock_claimed_device_authorization!(user_id, integration, claim, timestamp) do
     query =
       DeviceAuthorizationAttempt
@@ -925,6 +932,8 @@ defmodule Kodo.Integrations do
     end
   end
 
+  # The boolean terms below are one atomic database fence, not control-flow branches.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
   defp claimed_device_authorization_query(user_id, claim, timestamp) do
     from attempt in DeviceAuthorizationAttempt,
       join: integration in Integration,

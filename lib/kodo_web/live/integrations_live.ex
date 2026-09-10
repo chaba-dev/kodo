@@ -256,9 +256,7 @@ defmodule KodoWeb.IntegrationsLive do
       ) do
     with {attempt_generation, ""} <- Integer.parse(generation),
          %{attempt_id: ^attempt_id, attempt_generation: ^attempt_generation} <-
-           Enum.find_value(socket.assigns.device_authorizations, fn {_integration_id, attempt} ->
-             if attempt.attempt_id == attempt_id, do: attempt
-           end),
+           find_device_authorization(socket.assigns.device_authorizations, attempt_id),
          {:ok, _attempt} <-
            Integrations.cancel_device_authorization(
              socket.assigns.current_scope,
@@ -506,6 +504,12 @@ defmodule KodoWeb.IntegrationsLive do
         _missing_or_exchanging ->
           attempts
       end
+    end)
+  end
+
+  defp find_device_authorization(authorizations, attempt_id) do
+    Enum.find_value(authorizations, fn {_integration_id, attempt} ->
+      if attempt.attempt_id == attempt_id, do: attempt
     end)
   end
 
