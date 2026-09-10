@@ -105,9 +105,10 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert codex_error.billing_path == :subscription
 
     assert Kodo.LLM.ProviderError.guidance(codex_error) =~
-             "Choose models from connected API-key providers for the required roles, then start a new session"
+             "Connect or activate a ChatGPT Subscription account"
 
     assert Kodo.LLM.ProviderError.settings_path(codex_error) == "/integrations"
+    assert Kodo.LLM.ProviderError.provider_help_url(codex_error) =~ "chatgpt.com"
   end
 
   test "rejects forged and cross-user references", context do

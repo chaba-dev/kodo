@@ -43,8 +43,7 @@ defmodule Kodo.LLM.ProviderError do
   end
 
   def guidance(%__MODULE__{kind: :integration_required, provider: "openai_codex"}),
-    do:
-      "ChatGPT connections are not available yet. Choose models from connected API-key providers for the required roles, then start a new session."
+    do: "Connect or activate a ChatGPT Subscription account, then retry the turn."
 
   def guidance(%__MODULE__{kind: :integration_required, provider: provider}),
     do: "Connect or activate an account for #{provider_name(provider)}, then retry the turn."
@@ -91,6 +90,9 @@ defmodule Kodo.LLM.ProviderError do
 
   def provider_help_url(%__MODULE__{provider: "openrouter"}),
     do: "https://openrouter.ai/credits"
+
+  def provider_help_url(%__MODULE__{provider: "openai_codex"}),
+    do: "https://chatgpt.com/#settings/Subscription"
 
   def provider_help_url(%__MODULE__{}), do: nil
 
