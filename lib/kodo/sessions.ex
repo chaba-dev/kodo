@@ -4,20 +4,23 @@ defmodule Kodo.Sessions do
   import Ecto.Query
 
   alias Kodo.Accounts.Scope
+  alias Kodo.Accounts.User
+  alias Kodo.Agent.ExecutionRouteChange
+  alias Kodo.Agent.ModelMapping
+  alias Kodo.Agent.ModelSettings
   alias Kodo.Cluster.Discovery
   alias Kodo.Cluster.InstanceManager
   alias Kodo.Cluster.Instances
   alias Kodo.Cluster.Placement
   alias Kodo.ControlPlaneTelemetry
-  alias Kodo.Agent.ModelSettings
-  alias Kodo.Accounts.User
+  alias Kodo.Integrations
   alias Kodo.LLM.ProviderError
   alias Kodo.Repo
+  alias Kodo.Runners.Runner
   alias Kodo.Sessions.Event
   alias Kodo.Sessions.Ownership
   alias Kodo.Sessions.Projection
   alias Kodo.Sessions.Session
-  alias Kodo.Runners.Runner
 
   @before_first_event_sequence 0
   @initial_event_version 1
@@ -795,6 +798,20 @@ defmodule Kodo.Sessions do
     do_create_session(scope.user, attrs)
   end
 
+  @doc "Queues an approved billing-route revision for turns accepted after this event."
+  def change_execution_route(%Scope{} = scope, session_id, destination, opts \\ []) do
+    case Repo.transaction(fn ->
+           change_execution_route_locked(scope, session_id, destination, opts)
+         end) do
+      {:ok, event} = result ->
+        broadcast(event)
+        result
+
+      error ->
+        error
+    end
+  end
+
   defp do_create_session(user, attrs) do
     request_id = attrs[:client_request_id] || attrs["client_request_id"]
 
@@ -1009,6 +1026,38 @@ defmodule Kodo.Sessions do
     end
   end
 
+  defp change_execution_route_locked(scope, session_id, destination, opts) do
+    session = lock_user_session!(scope, session_id)
+    projection = session.id |> events_after() |> Projection.from_events()
+
+    mapping =
+      projection.model_mapping ||
+        ModelMapping.balanced([
+          {"session", %{primary: %{model: session.model}}}
+        ])
+
+    records = Keyword.get(opts, :compatibility_records, ExecutionRouteChange.approved_records())
+
+    with {:ok, changed_mapping} <- ExecutionRouteChange.change(mapping, destination, records),
+         {:ok, integration} <- Integrations.admit_execution_route_change(scope, destination),
+         {:ok, event} <-
+           append_locked(
+             session,
+             "execution_route_changed",
+             %{
+               "route_revision" => projection.route_revision + 1,
+               "destination" => destination,
+               "model_mapping" => changed_mapping
+             },
+             source: "user"
+           ),
+         :ok <- Integrations.audit_execution_route_change(scope, integration) do
+      event
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
   defp turn_request_recorded?(_session_id, request_id) when not is_binary(request_id), do: false
 
   defp turn_request_recorded?(session_id, request_id) do
@@ -1027,17 +1076,17 @@ defmodule Kodo.Sessions do
   defp maybe_put_request_id(payload, _request_id), do: payload
 
   defp turn_route_snapshot(session) do
-    projection = session.id |> events_after() |> Kodo.Sessions.Projection.from_events()
+    projection = session.id |> events_after() |> Projection.from_events()
 
     mapping =
       projection.model_mapping ||
-        Kodo.Agent.ModelMapping.balanced([
+        ModelMapping.balanced([
           {"session", %{primary: %{model: session.model}}}
         ])
 
     %{
       "route_revision" => projection.route_revision,
-      "model_mapping" => Kodo.Agent.ModelMapping.snapshot(mapping)
+      "model_mapping" => ModelMapping.snapshot(mapping)
     }
   end
 
@@ -1271,16 +1320,16 @@ defmodule Kodo.Sessions do
   defp resolve_session_model(attrs, override_layers) do
     case fetch_attr(attrs, :model) do
       :error ->
-        mapping = Kodo.Agent.ModelMapping.balanced(override_layers)
-        primary = Kodo.Agent.ModelMapping.role!(mapping, :primary)
+        mapping = ModelMapping.balanced(override_layers)
+        primary = ModelMapping.role!(mapping, :primary)
         {mapping, put_session_model(attrs, primary["model"])}
 
       {:ok, model} when is_binary(model) and model != "" ->
         layers = override_layers ++ [{"session", %{primary: %{model: model}}}]
-        {Kodo.Agent.ModelMapping.balanced(layers), attrs}
+        {ModelMapping.balanced(layers), attrs}
 
       {:ok, _invalid} ->
-        {Kodo.Agent.ModelMapping.balanced(override_layers), attrs}
+        {ModelMapping.balanced(override_layers), attrs}
     end
   end
 
@@ -1337,6 +1386,23 @@ defmodule Kodo.Sessions do
       Keyword.get(opts, :allow_unowned, false) -> session
       ownership_matches?(session, ownership) and owner_alive?(ownership) -> session
       true -> Repo.rollback(:stale_ownership)
+    end
+  end
+
+  defp lock_user_session!(%Scope{user: user}, session_id) do
+    case Ecto.UUID.cast(session_id) do
+      {:ok, session_id} ->
+        Session
+        |> where([session], session.id == ^session_id and session.user_id == ^user.id)
+        |> lock("FOR UPDATE")
+        |> Repo.one()
+        |> case do
+          %Session{} = session -> session
+          nil -> Repo.rollback(:session_not_found)
+        end
+
+      :error ->
+        Repo.rollback(:session_not_found)
     end
   end
 
