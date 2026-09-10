@@ -600,6 +600,28 @@ defmodule Kodo.IntegrationsTest do
       %{scope: AccountsFixtures.user_scope_fixture()}
     end
 
+    test "creates several named disconnected ChatGPT subscription accounts", %{scope: scope} do
+      assert {:ok, first} =
+               Integrations.create_oauth_integration(scope, "openai_codex",
+                 display_name: "Personal subscription"
+               )
+
+      assert {:ok, second} =
+               Integrations.create_oauth_integration(scope, "openai_codex",
+                 display_name: "Work subscription"
+               )
+
+      assert first.authentication_type == "oauth"
+      assert first.connection_status == "disconnected"
+      refute first.active
+      refute second.active
+
+      assert Enum.map(Integrations.list_integrations(scope), & &1.display_name) == [
+               "Personal subscription",
+               "Work subscription"
+             ]
+    end
+
     test "starts and reads an encrypted, generation-fenced attempt", %{scope: scope} do
       integration = oauth_integration(scope)
       payload = %{"device_auth_id" => "device-secret", "user_code" => "ABCD-EFGH"}

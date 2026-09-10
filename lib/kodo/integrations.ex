@@ -279,6 +279,34 @@ defmodule Kodo.Integrations do
 
   def cleanup_device_authorizations(_limit), do: {:error, :cleanup_limit_invalid}
 
+  def create_oauth_integration(scope, provider, opts \\ [])
+
+  def create_oauth_integration(%Scope{user: user}, "openai_codex", opts) do
+    changeset =
+      %Integration{user_id: user.id}
+      |> Integration.create_changeset(%{
+        provider: "openai_codex",
+        authentication_type: "oauth",
+        display_name: opts[:display_name]
+      })
+
+    if changeset.valid? do
+      Repo.transaction(fn ->
+        lock_provider_identity(user.id, "openai_codex")
+
+        case Repo.insert(changeset) do
+          {:ok, integration} -> integration
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+    else
+      {:error, changeset}
+    end
+  end
+
+  def create_oauth_integration(%Scope{}, _provider, _opts),
+    do: {:error, :authentication_type_mismatch}
+
   def connect(scope, provider, authentication_type, credentials, opts \\ [])
 
   def connect(%Scope{user: user}, provider, "api_key", credentials, opts) do
