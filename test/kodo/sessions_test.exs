@@ -317,8 +317,25 @@ defmodule Kodo.SessionsTest do
       })
 
     request_id = Ecto.UUID.generate()
-    assert {:ok, [message, status]} = Sessions.begin_turn(session.id, "Fix it", request_id)
+
+    assert {:ok, [snapshot, message, status]} =
+             Sessions.begin_turn(session.id, "Fix it", request_id)
+
+    assert snapshot.type == "turn_route_snapshot"
+    assert snapshot.source == "system"
+    assert snapshot.payload["route_revision"] == 1
+
+    assert snapshot.payload["model_mapping"]["roles"]["primary"]["model"] ==
+             "openai:gpt-4o-mini"
+
+    assert snapshot.payload["model_mapping"]["roles"]["primary"]["execution_route"] ==
+             "openai"
+
+    assert snapshot.payload["model_mapping"]["roles"]["primary"]["model_selector"] ==
+             "gpt-4o-mini"
+
     assert message.type == "user_message"
+    assert message.sequence == snapshot.sequence + 1
     assert status.type == "session_status_changed"
     assert status.sequence == message.sequence + 1
     assert Sessions.get_session!(session.id).status == "running"

@@ -89,7 +89,7 @@ defmodule Kodo.Agent.Loop do
            response,
            calls,
            adapter,
-           projection.model_mapping || legacy_mapping(projection.model),
+           turn_mapping(projection),
            budgets,
            ownership
          ) do
@@ -125,8 +125,7 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp review_final_answer(text, response, context) do
-    mapping =
-      context.projection.model_mapping || legacy_mapping(context.projection.model)
+    mapping = turn_mapping(context.projection)
 
     primary_invocation_id = response.payload["invocation_id"]
 
@@ -458,8 +457,12 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
+  defp turn_mapping(projection) do
+    projection.turn_model_mapping || projection.model_mapping || legacy_mapping(projection.model)
+  end
+
   defp infer(session_id, projection, events, adapter, budgets, invocation, ownership) do
-    mapping = projection.model_mapping || legacy_mapping(projection.model)
+    mapping = turn_mapping(projection)
     primary = ModelMapping.role!(mapping, :primary)
     contract = Roles.fetch!(:primary, primary["role_contract"])
 

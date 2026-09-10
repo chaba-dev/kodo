@@ -60,6 +60,21 @@ defmodule Kodo.Agent.ModelMapping do
 
   def normalize(_mapping), do: balanced()
 
+  @doc "Freezes explicit route and selector identity into every role for durable turn replay."
+  def snapshot(mapping) do
+    mapping = normalize(mapping)
+
+    roles =
+      Map.new(mapping["roles"], fn {role, role_mapping} ->
+        {role,
+         role_mapping
+         |> Map.put("execution_route", role_mapping["provider"])
+         |> Map.put("model_selector", model_selector(role_mapping["model"]))}
+      end)
+
+    %{mapping | "roles" => roles}
+  end
+
   defp normalize_role(current, persisted) do
     normalized =
       Enum.reduce(["model", "reasoning"], current, fn field, mapping ->
@@ -122,6 +137,13 @@ defmodule Kodo.Agent.ModelMapping do
     case ReqLLM.model(model) do
       {:ok, %LLMDB.Model{provider: provider}} -> Atom.to_string(provider)
       {:error, _reason} -> nil
+    end
+  end
+
+  defp model_selector(model) do
+    case String.split(model, ":", parts: 2) do
+      [_provider, selector] -> selector
+      [selector] -> selector
     end
   end
 end

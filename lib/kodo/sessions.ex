@@ -981,7 +981,17 @@ defmodule Kodo.Sessions do
         %{"role" => "user", "content" => content}
         |> maybe_put_request_id(client_request_id)
 
-      with {:ok, message} <-
+      route_snapshot = turn_route_snapshot(session)
+
+      with {:ok, snapshot} <-
+             append_locked(
+               session,
+               "turn_route_snapshot",
+               route_snapshot,
+               source: "system"
+             ),
+           session = %{session | next_event_sequence: session.next_event_sequence + 1},
+           {:ok, message} <-
              append_locked(
                session,
                "user_message",
@@ -992,7 +1002,7 @@ defmodule Kodo.Sessions do
            {:ok, session} <- session |> Session.status_changeset("running") |> Repo.update(),
            {:ok, status_event} <-
              append_locked(session, "session_status_changed", %{"status" => "running"}, []) do
-        [message, status_event]
+        [snapshot, message, status_event]
       else
         {:error, changeset} -> Repo.rollback(changeset)
       end
@@ -1015,6 +1025,21 @@ defmodule Kodo.Sessions do
     do: Map.put(payload, "client_request_id", request_id)
 
   defp maybe_put_request_id(payload, _request_id), do: payload
+
+  defp turn_route_snapshot(session) do
+    projection = session.id |> events_after() |> Kodo.Sessions.Projection.from_events()
+
+    mapping =
+      projection.model_mapping ||
+        Kodo.Agent.ModelMapping.balanced([
+          {"session", %{primary: %{model: session.model}}}
+        ])
+
+    %{
+      "route_revision" => projection.route_revision,
+      "model_mapping" => Kodo.Agent.ModelMapping.snapshot(mapping)
+    }
+  end
 
   defp append_events_locked(session_id, event_specs) do
     ownership =
@@ -1231,6 +1256,7 @@ defmodule Kodo.Sessions do
                "runner_id" => session.runner_id,
                "model" => session.model,
                "model_mapping" => model_mapping,
+               "route_revision" => 1,
                "approval_policy" => session.approval_policy,
                "status" => session.status
              },
