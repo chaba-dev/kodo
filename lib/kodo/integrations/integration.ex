@@ -34,6 +34,10 @@ defmodule Kodo.Integrations.Integration do
     field :validated_at, :utc_datetime_usec
     field :refreshed_at, :utc_datetime_usec
     field :validation_error_code, :string
+    field :refresh_claim_owner_id, Ecto.UUID
+    field :refresh_claim_epoch, :integer, default: 0
+    field :refresh_claim_generation, :integer
+    field :refresh_lease_expires_at, :utc_datetime_usec
 
     belongs_to :user, Kodo.Accounts.User, type: :id
 
@@ -71,6 +75,12 @@ defmodule Kodo.Integrations.Integration do
     )
     |> check_constraint(:credential_generation,
       name: :provider_integrations_credential_generation_valid
+    )
+    |> check_constraint(:refresh_claim_epoch,
+      name: :provider_integrations_refresh_claim_epoch_valid
+    )
+    |> check_constraint(:refresh_claim_owner_id,
+      name: :provider_integrations_refresh_claim_valid
     )
     |> check_constraint(:connection_status, name: :provider_integrations_state_valid)
     |> check_constraint(:active, name: :provider_integrations_active_connected)

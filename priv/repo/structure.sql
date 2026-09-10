@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict XOpxqSYwtvGfTiqRIBStCvyZpzZaCE6LIgMjOIQHCBPW9ZYUkI1mr4M5q3RWTPU
+\restrict VoWETYGZi4vEwyliUNWQG3BVneag5OunvKzcS2NOBFzVtuTzyBWpDfhYIneu2ek
 
 -- Dumped from database version 15.19 (Debian 15.19-0+deb12u1)
 -- Dumped by pg_dump version 15.19 (Debian 15.19-0+deb12u1)
@@ -183,11 +183,17 @@ CREATE TABLE public.provider_integrations (
     updated_at timestamp without time zone NOT NULL,
     display_name character varying(80) NOT NULL,
     active boolean DEFAULT false NOT NULL,
+    refresh_claim_owner_id uuid,
+    refresh_claim_epoch bigint DEFAULT 0 NOT NULL,
+    refresh_claim_generation bigint,
+    refresh_lease_expires_at timestamp without time zone,
     CONSTRAINT provider_integrations_active_connected CHECK (((NOT active) OR ((connection_status)::text = 'connected'::text))),
     CONSTRAINT provider_integrations_authentication_type_valid CHECK (((authentication_type)::text = ANY ((ARRAY['api_key'::character varying, 'oauth'::character varying])::text[]))),
     CONSTRAINT provider_integrations_credential_generation_valid CHECK ((credential_generation >= 0)),
     CONSTRAINT provider_integrations_provider_authentication_valid CHECK (((((provider)::text = 'openai_codex'::text) AND ((authentication_type)::text = 'oauth'::text)) OR (((provider)::text = ANY ((ARRAY['openai'::character varying, 'anthropic'::character varying, 'openrouter'::character varying])::text[])) AND ((authentication_type)::text = 'api_key'::text)))),
     CONSTRAINT provider_integrations_provider_valid CHECK (((provider)::text = ANY ((ARRAY['openai'::character varying, 'openai_codex'::character varying, 'anthropic'::character varying, 'openrouter'::character varying])::text[]))),
+    CONSTRAINT provider_integrations_refresh_claim_epoch_valid CHECK ((refresh_claim_epoch >= 0)),
+    CONSTRAINT provider_integrations_refresh_claim_valid CHECK ((((refresh_claim_owner_id IS NULL) AND (refresh_claim_generation IS NULL) AND (refresh_lease_expires_at IS NULL)) OR ((refresh_claim_owner_id IS NOT NULL) AND (refresh_claim_generation IS NOT NULL) AND (refresh_claim_generation >= 0) AND (refresh_lease_expires_at IS NOT NULL)))),
     CONSTRAINT provider_integrations_state_valid CHECK (((((connection_status)::text = 'disconnected'::text) AND ((validation_status)::text = 'unverified'::text) AND (encrypted_credentials IS NULL) AND (encryption_key_version IS NULL) AND (credential_format_version IS NULL) AND (expires_at IS NULL) AND (validated_at IS NULL) AND (refreshed_at IS NULL) AND (validation_error_code IS NULL)) OR (((connection_status)::text = 'connected'::text) AND ((validation_status)::text = ANY ((ARRAY['unverified'::character varying, 'valid'::character varying, 'invalid'::character varying, 'unavailable'::character varying])::text[])) AND (encrypted_credentials IS NOT NULL) AND (encryption_key_version IS NOT NULL) AND (credential_format_version IS NOT NULL)) OR (((connection_status)::text = 'reauthorization_required'::text) AND ((validation_status)::text = 'unverified'::text) AND (encrypted_credentials IS NOT NULL) AND (encryption_key_version IS NOT NULL) AND (credential_format_version IS NOT NULL))))
 );
 
@@ -554,6 +560,13 @@ CREATE UNIQUE INDEX provider_integrations_one_active_index ON public.provider_in
 
 
 --
+-- Name: provider_integrations_refresh_lease_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX provider_integrations_refresh_lease_index ON public.provider_integrations USING btree (refresh_lease_expires_at) WHERE (refresh_claim_owner_id IS NOT NULL);
+
+
+--
 -- Name: provider_integrations_user_id_provider_index; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -767,7 +780,7 @@ ALTER TABLE ONLY public.users_tokens
 -- PostgreSQL database dump complete
 --
 
-\unrestrict XOpxqSYwtvGfTiqRIBStCvyZpzZaCE6LIgMjOIQHCBPW9ZYUkI1mr4M5q3RWTPU
+\unrestrict VoWETYGZi4vEwyliUNWQG3BVneag5OunvKzcS2NOBFzVtuTzyBWpDfhYIneu2ek
 
 INSERT INTO public."schema_migrations" (version) VALUES (20260807073017);
 INSERT INTO public."schema_migrations" (version) VALUES (20260808062115);
@@ -786,3 +799,4 @@ INSERT INTO public."schema_migrations" (version) VALUES (20260903201206);
 INSERT INTO public."schema_migrations" (version) VALUES (20260904051620);
 INSERT INTO public."schema_migrations" (version) VALUES (20260907083117);
 INSERT INTO public."schema_migrations" (version) VALUES (20260907161929);
+INSERT INTO public."schema_migrations" (version) VALUES (20260910044734);
