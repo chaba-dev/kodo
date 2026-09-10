@@ -321,7 +321,7 @@ manufactured after that no-go decision.
   binding attempt ID, integration ID, user ID, provider, immutable attempt
   generation, and payload-format version; fail closed on swaps, tampering,
   unknown formats, and unavailable keys.
-- [ ] Implement device-code creation, interval-aware asynchronous polling,
+- [X] Implement device-code creation, interval-aware asynchronous polling,
   cancellation, expiry, terminal errors, and authorization-code exchange using
   Req rather than embedded browser scripts.
 - [ ] Render the fixed allowlisted HTTPS verification destination and one-time
@@ -332,13 +332,13 @@ manufactured after that no-go decision.
   returns its claim epoch, and run a successful claim as a finite task under
   ~Kodo.ControlPlaneTaskSupervisor~ that survives the originating LiveView
   closing.
-- [ ] Conditionally renew the claim lease before expiry and verify active state,
+- [X] Conditionally renew the claim lease before expiry and verify active state,
   current claim epoch, and lease ownership before admitting every poll or token
   exchange. Make its duration exceed the hard HTTP timeout plus a safety margin.
   Stop future work immediately on ownership loss; fence completion by claim
   epoch plus attempt and expected integration generations, while allowing an
   already admitted network operation to finish without persisting stale results.
-- [ ] Do not run a device-polling sweeper on every replica; expire attempts
+- [X] Do not run a device-polling sweeper on every replica; expire attempts
   lazily and delete terminal rows in bounded batches, using one database-elected
   cleanup owner only if periodic cleanup becomes necessary.
 - [ ] Make a new attempt atomically supersede the prior attempt and fence
@@ -346,7 +346,7 @@ manufactured after that no-go decision.
   generation. Starting reauthorization advances the integration generation and
   the new attempt captures that post-advance value; install OAuth credentials
   only when both attempt and expected integration generations still match.
-- [ ] Store access tokens, refresh tokens, account identifiers, expiries, and
+- [X] Store access tokens, refresh tokens, account identifiers, expiries, and
   credential generations in the encrypted integration payload without logging
   device or token material.
 - [ ] Test user deletion with OAuth credentials, an active authorization
