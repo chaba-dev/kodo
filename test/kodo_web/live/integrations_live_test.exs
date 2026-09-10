@@ -186,11 +186,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     scope: scope,
     user: user
   } do
-    blocking_poll = fn :poll, _payload ->
-      receive do
-        :finish_poll -> :pending
-      end
-    end
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
 
     _client =
       configure_device_client(
@@ -202,7 +198,15 @@ defmodule KodoWeb.IntegrationsLiveTest do
              verification_url: "https://auth.openai.com/codex/device"
            }}
         ],
-        poll: [blocking_poll]
+        poll: [
+          {:ok,
+           %{
+             "authorization_code" => "authorization",
+             "code_challenge" => "challenge",
+             "code_verifier" => "verifier"
+           }}
+        ],
+        exchange: [{:ok, device_tokens()}]
       )
 
     conn =
@@ -219,7 +223,9 @@ defmodule KodoWeb.IntegrationsLiveTest do
     })
     |> render_submit()
 
-    assert [%{provider: "openai_codex"}] = Integrations.list_integrations(scope)
+    assert_receive {:integration_changed, integration_id, _generation}
+    assert {:ok, integration} = Integrations.get_integration(scope, integration_id)
+    assert integration.connection_status == "connected"
   end
 
   test "removes an expired one-time code when the page loads", %{conn: conn, scope: scope} do
