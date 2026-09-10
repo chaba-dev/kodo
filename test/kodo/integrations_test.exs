@@ -826,6 +826,130 @@ defmodule Kodo.IntegrationsTest do
                )
     end
 
+    test "claims one active attempt and fences renewal by owner and epoch", %{scope: scope} do
+      integration = oauth_integration(scope)
+      first_owner = Ecto.UUID.generate()
+      second_owner = Ecto.UUID.generate()
+      payload = %{"device_auth_id" => "device", "user_code" => "CODE"}
+
+      assert {:ok, attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 payload,
+                 1_000
+               )
+
+      assert {:ok, {first_claim, ^payload}} =
+               Integrations.claim_device_authorization(scope, integration.id, first_owner)
+
+      assert first_claim.claim_owner_id == first_owner
+      assert first_claim.claim_epoch == 1
+      assert DateTime.after?(first_claim.claim_lease_expires_at, DateTime.utc_now())
+
+      assert {:error, :device_authorization_not_claimable} =
+               Integrations.claim_device_authorization(scope, integration.id, second_owner)
+
+      assert {:ok, {replacement_claim, ^payload}} =
+               Integrations.claim_device_authorization(scope, integration.id, first_owner)
+
+      assert replacement_claim.claim_epoch == 2
+
+      assert {:error, :stale_device_authorization_claim} =
+               Integrations.renew_device_authorization_claim(
+                 scope,
+                 attempt.id,
+                 attempt.attempt_generation,
+                 first_owner,
+                 first_claim.claim_epoch
+               )
+
+      assert {:ok, {renewed, ^payload}} =
+               Integrations.renew_device_authorization_claim(
+                 scope,
+                 attempt.id,
+                 attempt.attempt_generation,
+                 first_owner,
+                 replacement_claim.claim_epoch
+               )
+
+      assert renewed.claim_epoch == replacement_claim.claim_epoch
+
+      assert DateTime.compare(
+               renewed.claim_lease_expires_at,
+               replacement_claim.claim_lease_expires_at
+             ) in [
+               :eq,
+               :gt
+             ]
+    end
+
+    test "permits takeover only after lease expiry and fences the prior claimant", %{scope: scope} do
+      integration = oauth_integration(scope)
+      first_owner = Ecto.UUID.generate()
+      second_owner = Ecto.UUID.generate()
+
+      assert {:ok, attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 1_000
+               )
+
+      assert {:ok, {first_claim, _payload}} =
+               Integrations.claim_device_authorization(scope, integration.id, first_owner)
+
+      Repo.update!(
+        change(first_claim,
+          claim_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)
+        )
+      )
+
+      assert {:ok, {takeover, _payload}} =
+               Integrations.claim_device_authorization(scope, integration.id, second_owner)
+
+      assert takeover.claim_owner_id == second_owner
+      assert takeover.claim_epoch == first_claim.claim_epoch + 1
+
+      assert {:error, :stale_device_authorization_claim} =
+               Integrations.renew_device_authorization_claim(
+                 scope,
+                 attempt.id,
+                 attempt.attempt_generation,
+                 first_owner,
+                 first_claim.claim_epoch
+               )
+    end
+
+    test "claiming lazily expires an overdue attempt", %{scope: scope} do
+      integration = oauth_integration(scope)
+
+      assert {:ok, attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 1_000
+               )
+
+      Repo.update!(
+        change(attempt, provider_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
+      )
+
+      assert {:error, :device_authorization_not_claimable} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 integration.id,
+                 Ecto.UUID.generate()
+               )
+
+      assert %{state: "expired", encrypted_payload: nil} = Repo.reload!(attempt)
+    end
+
     test "cancellation is owned and generation fenced and removes the one-time code", %{
       scope: scope
     } do

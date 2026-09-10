@@ -25,6 +25,7 @@ defmodule Kodo.Integrations do
   @device_authorization_lifetime_seconds 15 * 60
   @device_authorization_secret_max_bytes 1_024
   @device_authorization_cleanup_age_seconds 24 * 60 * 60
+  @device_authorization_claim_lease_ms 30_000
   @secret_repo_options [log: false, telemetry_event: nil]
 
   def list_integrations(%Scope{user: user}) do
@@ -129,6 +130,48 @@ defmodule Kodo.Integrations do
       end
     end
   end
+
+  def claim_device_authorization(%Scope{user: user}, integration_id, claim_owner_id) do
+    with {:ok, integration_id} <- cast_uuid(integration_id),
+         {:ok, claim_owner_id} <- cast_uuid(claim_owner_id) do
+      result =
+        Repo.transaction(fn ->
+          expire_device_authorization(user.id, integration_id)
+          claim_device_authorization_locked(user.id, integration_id, claim_owner_id)
+        end)
+
+      case result do
+        {:ok, {:error, reason}} -> {:error, reason}
+        other -> other
+      end
+    end
+  end
+
+  def renew_device_authorization_claim(
+        %Scope{user: user},
+        attempt_id,
+        attempt_generation,
+        claim_owner_id,
+        claim_epoch
+      )
+      when is_integer(attempt_generation) and attempt_generation > 0 and
+             is_integer(claim_epoch) and claim_epoch > 0 do
+    with {:ok, attempt_id} <- cast_uuid(attempt_id),
+         {:ok, claim_owner_id} <- cast_uuid(claim_owner_id) do
+      Repo.transaction(fn ->
+        renew_device_authorization_claim_locked(
+          user.id,
+          attempt_id,
+          attempt_generation,
+          claim_owner_id,
+          claim_epoch
+        )
+      end)
+    end
+  end
+
+  def renew_device_authorization_claim(%Scope{}, _attempt_id, _generation, _owner, _epoch),
+    do: {:error, :stale_device_authorization_claim}
 
   def cancel_device_authorization(%Scope{user: user}, attempt_id, attempt_generation)
       when is_integer(attempt_generation) and attempt_generation > 0 do
@@ -414,6 +457,75 @@ defmodule Kodo.Integrations do
     case DeviceAuthorizationEncryption.decrypt(attempt) do
       {:ok, payload} -> {attempt, payload}
       {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp claim_device_authorization_locked(user_id, integration_id, claim_owner_id) do
+    timestamp = database_now()
+    lease_expires_at = DateTime.add(timestamp, @device_authorization_claim_lease_ms, :millisecond)
+
+    query =
+      claimable_device_authorization_query(user_id, integration_id, claim_owner_id, timestamp)
+      |> select([attempt, _integration], attempt)
+
+    case Repo.update_all(
+           query,
+           [
+             set: [
+               claim_owner_id: claim_owner_id,
+               claim_lease_expires_at: lease_expires_at,
+               updated_at: timestamp
+             ],
+             inc: [claim_epoch: 1]
+           ],
+           @secret_repo_options
+         ) do
+      {1, [attempt]} -> decrypt_device_authorization(attempt)
+      {0, []} -> {:error, :device_authorization_not_claimable}
+    end
+  end
+
+  defp claimable_device_authorization_query(user_id, integration_id, claim_owner_id, timestamp) do
+    from attempt in DeviceAuthorizationAttempt,
+      join: integration in Integration,
+      on: integration.id == attempt.integration_id and integration.user_id == attempt.user_id,
+      where:
+        attempt.user_id == ^user_id and attempt.integration_id == ^integration_id and
+          attempt.state == "active" and attempt.provider_deadline > ^timestamp and
+          integration.credential_generation == attempt.expected_integration_generation and
+          (is_nil(attempt.claim_owner_id) or attempt.claim_lease_expires_at <= ^timestamp or
+             attempt.claim_owner_id == ^claim_owner_id)
+  end
+
+  defp renew_device_authorization_claim_locked(
+         user_id,
+         attempt_id,
+         attempt_generation,
+         claim_owner_id,
+         claim_epoch
+       ) do
+    timestamp = database_now()
+    lease_expires_at = DateTime.add(timestamp, @device_authorization_claim_lease_ms, :millisecond)
+
+    query =
+      from attempt in DeviceAuthorizationAttempt,
+        join: integration in Integration,
+        on: integration.id == attempt.integration_id and integration.user_id == attempt.user_id,
+        where:
+          attempt.id == ^attempt_id and attempt.user_id == ^user_id and
+            attempt.attempt_generation == ^attempt_generation and attempt.state == "active" and
+            attempt.claim_owner_id == ^claim_owner_id and attempt.claim_epoch == ^claim_epoch and
+            attempt.claim_lease_expires_at > ^timestamp and attempt.provider_deadline > ^timestamp and
+            integration.credential_generation == attempt.expected_integration_generation,
+        select: attempt
+
+    case Repo.update_all(
+           query,
+           [set: [claim_lease_expires_at: lease_expires_at, updated_at: timestamp]],
+           @secret_repo_options
+         ) do
+      {1, [attempt]} -> decrypt_device_authorization(attempt)
+      {0, []} -> Repo.rollback(:stale_device_authorization_claim)
     end
   end
 
