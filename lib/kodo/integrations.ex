@@ -27,6 +27,7 @@ defmodule Kodo.Integrations do
   @device_authorization_token_max_bytes 8_192
   @device_authorization_cleanup_age_seconds 24 * 60 * 60
   @device_authorization_claim_lease_ms 30_000
+  @refresh_claim_lease_ms 30_000
   @device_authorization_terminal_errors ~w(
     provider_unavailable
     provider_rejected
@@ -393,6 +394,62 @@ defmodule Kodo.Integrations do
     )
   end
 
+  @doc "Claims one generation of an OAuth integration for a bounded refresh operation."
+  def claim_refresh(%Scope{user: user}, id, generation, claim_owner_id)
+      when is_integer(generation) and generation >= 0 do
+    with {:ok, id} <- cast_uuid(id),
+         {:ok, claim_owner_id} <- cast_uuid(claim_owner_id) do
+      lease_expires_at =
+        DateTime.add(database_now(), @refresh_claim_lease_ms, :millisecond)
+
+      query =
+        from integration in Integration,
+          where:
+            integration.id == ^id and integration.user_id == ^user.id and
+              integration.provider == "openai_codex" and
+              integration.authentication_type == "oauth" and
+              integration.connection_status in ["connected", "reauthorization_required"] and
+              integration.credential_generation == ^generation and
+              (is_nil(integration.refresh_claim_owner_id) or
+                 integration.refresh_lease_expires_at <= fragment("clock_timestamp()"))
+
+      updates = [
+        set: [
+          refresh_claim_owner_id: claim_owner_id,
+          refresh_claim_generation: generation,
+          refresh_lease_expires_at: lease_expires_at,
+          updated_at: now()
+        ],
+        inc: [refresh_claim_epoch: 1]
+      ]
+
+      case Repo.update_all(query, updates) do
+        {1, nil} -> {:ok, Repo.get_by!(Integration, id: id, user_id: user.id)}
+        {0, nil} -> refresh_claim_conflict(user.id, id, generation)
+      end
+    end
+  end
+
+  def claim_refresh(%Scope{}, _id, _generation, _claim_owner_id),
+    do: {:error, :stale_credential_generation}
+
+  @doc "Releases only the exact refresh claim represented by the supplied snapshot."
+  def release_refresh_claim(%Scope{user: user}, %Integration{} = claim) do
+    query = exact_refresh_claim_query(user.id, claim)
+
+    case Repo.update_all(query,
+           set: [
+             refresh_claim_owner_id: nil,
+             refresh_claim_generation: nil,
+             refresh_lease_expires_at: nil,
+             updated_at: now()
+           ]
+         ) do
+      {1, nil} -> :ok
+      {0, nil} -> {:error, :stale_refresh_claim}
+    end
+  end
+
   def validation_succeeded(%Scope{} = scope, id, generation) do
     update_fenced(scope, id, generation, ["connected"], "validation_succeeded", %{
       validation_status: "valid",
@@ -455,7 +512,10 @@ defmodule Kodo.Integrations do
         expires_at: nil,
         validated_at: nil,
         refreshed_at: nil,
-        validation_error_code: nil
+        validation_error_code: nil,
+        refresh_claim_owner_id: nil,
+        refresh_claim_generation: nil,
+        refresh_lease_expires_at: nil
       }
     )
     |> notify_integration_change()
@@ -914,7 +974,13 @@ defmodule Kodo.Integrations do
   end
 
   defp device_authorization_integration_changes(%Integration{}, generation, timestamp) do
-    [credential_generation: generation, updated_at: timestamp]
+    [
+      credential_generation: generation,
+      refresh_claim_owner_id: nil,
+      refresh_claim_generation: nil,
+      refresh_lease_expires_at: nil,
+      updated_at: timestamp
+    ]
   end
 
   defp supersede_active_device_authorization(integration_id, timestamp) do
@@ -1086,7 +1152,10 @@ defmodule Kodo.Integrations do
           expires_at: opts[:expires_at],
           validated_at: nil,
           refreshed_at: opts[:refreshed_at],
-          validation_error_code: nil
+          validation_error_code: nil,
+          refresh_claim_owner_id: nil,
+          refresh_claim_generation: nil,
+          refresh_lease_expires_at: nil
         })
 
       update_fenced(scope, id, generation, allowed_connections, audit_event_type, changes)
@@ -1105,6 +1174,29 @@ defmodule Kodo.Integrations do
 
   defp require_connected(%Integration{connection_status: "connected"}), do: :ok
   defp require_connected(%Integration{}), do: {:error, :integration_not_connected}
+
+  defp refresh_claim_conflict(user_id, id, generation) do
+    case Repo.get_by(Integration, id: id, user_id: user_id) do
+      %Integration{credential_generation: ^generation, refresh_claim_owner_id: owner}
+      when not is_nil(owner) ->
+        {:error, :refresh_in_progress}
+
+      %Integration{} ->
+        {:error, :stale_credential_generation}
+
+      nil ->
+        {:error, :integration_not_found}
+    end
+  end
+
+  defp exact_refresh_claim_query(user_id, %Integration{} = claim) do
+    from integration in Integration,
+      where:
+        integration.id == ^claim.id and integration.user_id == ^user_id and
+          integration.credential_generation == ^claim.refresh_claim_generation and
+          integration.refresh_claim_owner_id == ^claim.refresh_claim_owner_id and
+          integration.refresh_claim_epoch == ^claim.refresh_claim_epoch
+  end
 
   defp lock_provider_integrations(user_id, integration_id) do
     provider =

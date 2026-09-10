@@ -258,6 +258,114 @@ defmodule Kodo.IntegrationsTest do
                |> then(fn {:ok, payload} -> {:ok, Map.take(payload, ["access_token"])} end)
     end
 
+    test "claims one OAuth refresh generation and fences release across takeover", %{scope: scope} do
+      integration = oauth_integration(scope)
+
+      assert {:ok, connected} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
+                 "access_token" => "old-access",
+                 "refresh_token" => "old-refresh",
+                 "account_id" => "account"
+               })
+
+      first_owner = Ecto.UUID.generate()
+      second_owner = Ecto.UUID.generate()
+
+      assert {:ok, first_claim} =
+               Integrations.claim_refresh(
+                 scope,
+                 connected.id,
+                 connected.credential_generation,
+                 first_owner
+               )
+
+      assert first_claim.refresh_claim_owner_id == first_owner
+      assert first_claim.refresh_claim_generation == connected.credential_generation
+      assert first_claim.refresh_claim_epoch == 1
+
+      assert {:error, :refresh_in_progress} =
+               Integrations.claim_refresh(
+                 scope,
+                 connected.id,
+                 connected.credential_generation,
+                 second_owner
+               )
+
+      Repo.update!(
+        change(first_claim,
+          refresh_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)
+        )
+      )
+
+      assert {:ok, second_claim} =
+               Integrations.claim_refresh(
+                 scope,
+                 connected.id,
+                 connected.credential_generation,
+                 second_owner
+               )
+
+      assert second_claim.refresh_claim_epoch == 2
+
+      assert {:error, :stale_refresh_claim} =
+               Integrations.release_refresh_claim(scope, first_claim)
+
+      assert :ok = Integrations.release_refresh_claim(scope, second_claim)
+
+      released = Repo.reload!(connected)
+      assert is_nil(released.refresh_claim_owner_id)
+      assert is_nil(released.refresh_claim_generation)
+      assert is_nil(released.refresh_lease_expires_at)
+      assert released.refresh_claim_epoch == 2
+    end
+
+    test "a credential-generation transition clears and permanently fences a refresh claim", %{
+      scope: scope
+    } do
+      integration = oauth_integration(scope)
+
+      assert {:ok, connected} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
+                 "access_token" => "old-access",
+                 "refresh_token" => "old-refresh",
+                 "account_id" => "account"
+               })
+
+      assert {:ok, claim} =
+               Integrations.claim_refresh(
+                 scope,
+                 connected.id,
+                 connected.credential_generation,
+                 Ecto.UUID.generate()
+               )
+
+      assert {:ok, _attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 connected.id,
+                 connected.credential_generation,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 0
+               )
+
+      fenced = Repo.reload!(connected)
+      assert fenced.credential_generation == connected.credential_generation + 1
+      assert is_nil(fenced.refresh_claim_owner_id)
+      assert {:error, :stale_refresh_claim} = Integrations.release_refresh_claim(scope, claim)
+
+      assert {:error, :stale_credential_generation} =
+               Integrations.refresh_succeeded(
+                 scope,
+                 connected.id,
+                 claim.refresh_claim_generation,
+                 %{
+                   "access_token" => "late-access",
+                   "refresh_token" => "late-refresh",
+                   "account_id" => "account"
+                 }
+               )
+    end
+
     test "activates only the first OAuth account after authorization", %{scope: scope} do
       first = oauth_integration(scope)
 
