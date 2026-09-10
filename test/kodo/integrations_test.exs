@@ -950,6 +950,234 @@ defmodule Kodo.IntegrationsTest do
       assert %{state: "expired", encrypted_payload: nil} = Repo.reload!(attempt)
     end
 
+    test "admits each claimed network phase and persists exchange state encrypted", %{
+      scope: scope
+    } do
+      integration = oauth_integration(scope)
+      owner = Ecto.UUID.generate()
+      polling_payload = %{"device_auth_id" => "device", "user_code" => "CODE"}
+
+      exchange_payload = %{
+        "authorization_code" => "authorization-secret",
+        "code_challenge" => "challenge-secret",
+        "code_verifier" => "verifier-secret"
+      }
+
+      assert {:ok, _attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 polling_payload,
+                 0
+               )
+
+      assert {:ok, {claim, ^polling_payload}} =
+               Integrations.claim_device_authorization(scope, integration.id, owner)
+
+      assert {:ok, {poll_admission, ^polling_payload}} =
+               Integrations.admit_device_authorization_poll(scope, claim)
+
+      assert {:ok, persisted} =
+               Integrations.store_device_authorization_exchange(scope, claim, exchange_payload)
+
+      refute persisted.encrypted_payload =~ "authorization-secret"
+
+      assert {:ok, {exchange_admission, ^exchange_payload}} =
+               Integrations.admit_device_authorization_exchange(scope, claim)
+
+      assert exchange_admission.claim_epoch == claim.claim_epoch
+      assert poll_admission.claim_epoch == claim.claim_epoch
+
+      assert {:ok, failed} =
+               Integrations.fail_device_authorization(scope, claim, "provider_rejected")
+
+      assert failed.state == "failed"
+      assert failed.terminal_error_code == "provider_rejected"
+      assert is_nil(failed.encrypted_payload)
+      assert is_nil(failed.claim_owner_id)
+    end
+
+    test "rejects early polling and stale phase results without changing payload", %{scope: scope} do
+      integration = oauth_integration(scope)
+      first_owner = Ecto.UUID.generate()
+      second_owner = Ecto.UUID.generate()
+      polling_payload = %{"device_auth_id" => "device", "user_code" => "CODE"}
+
+      assert {:ok, attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 polling_payload,
+                 60_000
+               )
+
+      assert {:ok, {first_claim, ^polling_payload}} =
+               Integrations.claim_device_authorization(scope, integration.id, first_owner)
+
+      assert {:error, :device_authorization_poll_not_due} =
+               Integrations.admit_device_authorization_poll(scope, first_claim)
+
+      Repo.update!(
+        change(first_claim,
+          claim_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)
+        )
+      )
+
+      assert {:ok, {_takeover, ^polling_payload}} =
+               Integrations.claim_device_authorization(scope, integration.id, second_owner)
+
+      exchange_payload = %{
+        "authorization_code" => "stale-secret",
+        "code_challenge" => "challenge",
+        "code_verifier" => "verifier"
+      }
+
+      assert {:error, :stale_device_authorization_claim} =
+               Integrations.store_device_authorization_exchange(
+                 scope,
+                 first_claim,
+                 exchange_payload
+               )
+
+      assert {:ok, {_active, ^polling_payload}} =
+               Integrations.get_active_device_authorization(scope, integration.id)
+
+      assert Repo.reload!(attempt).state == "active"
+    end
+
+    test "rejects unsafe terminal errors and malformed exchange state", %{scope: scope} do
+      integration = oauth_integration(scope)
+
+      assert {:ok, _attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 0
+               )
+
+      assert {:ok, {claim, _payload}} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 integration.id,
+                 Ecto.UUID.generate()
+               )
+
+      assert {:error, :device_authorization_response_invalid} =
+               Integrations.store_device_authorization_exchange(scope, claim, %{
+                 "authorization_code" => "code",
+                 "code_verifier" => "verifier"
+               })
+
+      assert {:error, :unsafe_device_authorization_error} =
+               Integrations.fail_device_authorization(scope, claim, "private provider detail")
+    end
+
+    test "atomically completes a claimed attempt and installs OAuth credentials", %{scope: scope} do
+      integration = oauth_integration(scope)
+
+      credentials = %{
+        "access_token" => "access-secret",
+        "refresh_token" => "refresh-secret",
+        "id_token" => "identity-secret",
+        "account_id" => "account-secret"
+      }
+
+      assert {:ok, attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 0
+               )
+
+      assert {:ok, {claim, _payload}} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 integration.id,
+                 Ecto.UUID.generate()
+               )
+
+      expires_at = DateTime.add(DateTime.utc_now(), 3_600, :second)
+
+      assert {:ok, completed} =
+               Integrations.complete_device_authorization(scope, claim, credentials, expires_at)
+
+      assert completed.connection_status == "connected"
+      assert completed.validation_status == "unverified"
+      assert completed.credential_generation == claim.expected_integration_generation + 1
+      assert completed.active
+      assert completed.expires_at == expires_at
+      assert {:ok, ^credentials} = CredentialEncryption.decrypt(completed)
+
+      assert %{state: "completed", encrypted_payload: nil, claim_owner_id: nil} =
+               Repo.reload!(attempt)
+
+      assert Enum.map(Integrations.list_audit_events(scope), & &1.event_type) == [
+               "device_authorization_started",
+               "device_authorization_completed"
+             ]
+    end
+
+    test "completion is fenced after claim takeover and rejects expired credentials", %{
+      scope: scope
+    } do
+      integration = oauth_integration(scope)
+      first_owner = Ecto.UUID.generate()
+
+      assert {:ok, _attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 0
+               )
+
+      assert {:ok, {claim, _payload}} =
+               Integrations.claim_device_authorization(scope, integration.id, first_owner)
+
+      credentials = %{
+        "access_token" => "access",
+        "refresh_token" => "refresh",
+        "id_token" => "identity",
+        "account_id" => "account"
+      }
+
+      assert {:error, :device_authorization_response_invalid} =
+               Integrations.complete_device_authorization(
+                 scope,
+                 claim,
+                 credentials,
+                 DateTime.add(DateTime.utc_now(), -1, :second)
+               )
+
+      Repo.update!(
+        change(claim, claim_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second))
+      )
+
+      assert {:ok, {_takeover, _payload}} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 integration.id,
+                 Ecto.UUID.generate()
+               )
+
+      assert {:error, :stale_device_authorization_claim} =
+               Integrations.complete_device_authorization(
+                 scope,
+                 claim,
+                 credentials,
+                 DateTime.add(DateTime.utc_now(), 3_600, :second)
+               )
+
+      assert Repo.reload!(integration).connection_status == "disconnected"
+    end
+
     test "cancellation is owned and generation fenced and removes the one-time code", %{
       scope: scope
     } do
