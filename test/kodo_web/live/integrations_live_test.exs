@@ -308,8 +308,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     render_patch(view, ~p"/integrations")
     _refresh_client = configure_refresh_client([{:ok, device_tokens()}])
     view |> element(check_button(integration)) |> render_click()
-    assert_receive {:integration_validation_finished, _id, _generation}
-    _ = :sys.get_state(view.pid)
+    finish_validation(view)
     assert has_element?(view, "#{status(integration)} dd.text-green-700", "Valid")
   end
 
