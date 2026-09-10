@@ -134,25 +134,25 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClient do
     req_options =
       Keyword.take(req_options, [
         :plug,
-        :device_authorization_transport,
-        :device_authorization_timeout
+        :credential_request_transport,
+        :credential_request_timeout
       ])
 
     options =
       [
         url: url,
-        adapter: Kodo.Integrations.DeviceAuthorizationReqAdapter,
+        adapter: Kodo.Integrations.CredentialReqAdapter,
         redirect: false,
         retry: false,
         decode_body: false,
-        device_authorization_timeout: @timeout
+        credential_request_timeout: @timeout
       ] ++ request_options ++ req_options
 
     request =
       Req.new()
       |> Req.Request.register_options([
-        :device_authorization_timeout,
-        :device_authorization_transport
+        :credential_request_timeout,
+        :credential_request_transport
       ])
 
     case Req.post(request, options) do

@@ -199,7 +199,7 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClientTest do
     end
 
     assert {:error, :provider_unavailable} =
-             ReqDeviceAuthorizationClient.create(device_authorization_transport: transport)
+             ReqDeviceAuthorizationClient.create(credential_request_transport: transport)
   end
 
   test "accepts device fields at 1024 bytes and rejects 1025 bytes" do
@@ -274,7 +274,7 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClientTest do
     assert {:ok, %{"authorization_code" => ^sentinel}} =
              ReqDeviceAuthorizationClient.poll(
                %{"device_auth_id" => sentinel, "user_code" => sentinel},
-               device_authorization_transport: transport
+               credential_request_transport: transport
              )
 
     refute_receive {:finch_telemetry, _event, _measurements, _metadata}
@@ -299,8 +299,8 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClientTest do
 
     assert {:error, :provider_unavailable} =
              ReqDeviceAuthorizationClient.create(
-               device_authorization_transport: transport,
-               device_authorization_timeout: 10
+               credential_request_transport: transport,
+               credential_request_timeout: 10
              )
 
     assert_received :transport_started
