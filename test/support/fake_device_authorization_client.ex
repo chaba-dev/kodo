@@ -6,7 +6,9 @@ defmodule Kodo.Test.FakeDeviceAuthorizationClient do
   def exchange(payload, opts), do: respond(opts, :exchange, payload)
 
   defp respond(opts, operation, payload) do
-    agent = Keyword.fetch!(opts, :agent)
+    agent =
+      Keyword.get(opts, :agent) ||
+        Application.fetch_env!(:kodo, :fake_device_authorization_client_agent)
 
     response =
       Agent.get_and_update(agent, fn state ->
