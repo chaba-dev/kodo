@@ -481,6 +481,27 @@ defmodule Kodo.Integrations do
   def require_refresh_reauthorization(%Scope{}, %Integration{}, _error_code),
     do: {:error, :unsafe_refresh_error}
 
+  def fail_refresh(%Scope{user: user}, %Integration{} = claim) do
+    Repo.transaction(fn ->
+      case Repo.update_all(exact_refresh_claim_query(user.id, claim),
+             set: [
+               refresh_claim_owner_id: nil,
+               refresh_claim_generation: nil,
+               refresh_lease_expires_at: nil,
+               updated_at: now()
+             ]
+           ) do
+        {1, nil} ->
+          integration = Repo.get_by!(Integration, id: claim.id, user_id: user.id)
+          audit!(user.id, integration, "refresh_failed")
+          integration
+
+        {0, nil} ->
+          Repo.rollback(:stale_refresh_claim)
+      end
+    end)
+  end
+
   def validation_succeeded(%Scope{} = scope, id, generation) do
     update_fenced(scope, id, generation, ["connected"], "validation_succeeded", %{
       validation_status: "valid",

@@ -16,7 +16,7 @@ defmodule Kodo.Integrations.OAuthRefresh do
     now = Keyword.get(opts, :now, DateTime.utc_now())
     buffer = Keyword.get(opts, :refresh_buffer_seconds, @refresh_buffer_seconds)
 
-    if refresh_due?(integration, now, buffer) do
+    if Keyword.get(opts, :force, false) or refresh_due?(integration, now, buffer) do
       refresh(scope, integration, opts)
     else
       {:ok, integration}
@@ -118,7 +118,7 @@ defmodule Kodo.Integrations.OAuthRefresh do
         current_result(scope, claim)
 
       {:error, _reason} ->
-        _result = Integrations.release_refresh_claim(scope, claim)
+        _result = Integrations.fail_refresh(scope, claim)
         {:error, :provider_unavailable}
     end
   end

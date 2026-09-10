@@ -6,6 +6,7 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
   alias Kodo.Integrations.CredentialEncryption
   alias Kodo.Integrations.DeviceAuthorizationAttempt
   alias Kodo.Integrations.Integration
+  alias Kodo.Integrations.OAuthAccessValidation
   alias Kodo.Integrations.OAuthRefresh
   alias Kodo.Test.FakeRefreshClient
 
@@ -69,6 +70,24 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
     assert Agent.get(client, & &1.refresh_tokens) == []
   end
 
+  test "access validation forces a refresh and records a valid outcome", context do
+    client = fake_client([{:ok, rotated_tokens("account")}])
+
+    assert {:ok, validated} =
+             OAuthAccessValidation.validate(
+               context.scope,
+               context.integration.id,
+               context.integration.credential_generation,
+               client: FakeRefreshClient,
+               client_options: [agent: client],
+               supervisor: context.supervisor,
+               claim_owner_id: Ecto.UUID.generate()
+             )
+
+    assert validated.validation_status == "valid"
+    assert validated.credential_generation == context.integration.credential_generation + 1
+  end
+
   test "invalid grant and account changes require reauthorization without erasing credentials",
        context do
     for {response, error_code} <- [
@@ -107,6 +126,7 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
     assert unchanged.encrypted_credentials == context.integration.encrypted_credentials
     assert is_nil(unchanged.refresh_claim_owner_id)
     assert unchanged.refresh_claim_epoch == 1
+    assert List.last(Integrations.list_audit_events(context.scope)).event_type == "refresh_failed"
   end
 
   test "the first generation-matching success wins after lease takeover", context do

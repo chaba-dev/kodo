@@ -20,6 +20,7 @@ defmodule Kodo.Integrations.AuditEvent do
     refresh_succeeded
     refresh_invalid_grant
     refresh_reauthorization_required
+    refresh_failed
   )
 
   @primary_key {:id, :binary_id, autogenerate: true}

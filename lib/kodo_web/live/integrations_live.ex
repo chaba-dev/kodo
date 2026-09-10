@@ -4,6 +4,7 @@ defmodule KodoWeb.IntegrationsLive do
   alias Kodo.Integrations
   alias Kodo.Integrations.APIKeyValidation
   alias Kodo.Integrations.DeviceAuthorization
+  alias Kodo.Integrations.OAuthAccessValidation
 
   @provider_configs [
     %{
@@ -454,7 +455,11 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   defp start_validation(socket, integration) do
-    task = APIKeyValidation.start(socket.assigns.current_scope, integration)
+    task =
+      case integration.authentication_type do
+        "oauth" -> OAuthAccessValidation.start(socket.assigns.current_scope, integration)
+        "api_key" -> APIKeyValidation.start(socket.assigns.current_scope, integration)
+      end
 
     update(socket, :validation_tasks, fn tasks ->
       Map.put(tasks, task.ref, {integration.id, integration.credential_generation})
@@ -897,10 +902,7 @@ defmodule KodoWeb.IntegrationsLive do
                   Activate
                 </button>
                 <button
-                  :if={
-                    integration_connected?(integration) and
-                      integration.authentication_type == "api_key"
-                  }
+                  :if={integration_connected?(integration)}
                   id={dom_id(integration, "check-access")}
                   type="button"
                   phx-click="check_access"

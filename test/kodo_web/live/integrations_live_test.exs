@@ -10,6 +10,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
   alias Kodo.Integrations.DeviceAuthorizationAttempt
   alias Kodo.Repo
   alias Kodo.Test.FakeDeviceAuthorizationClient
+  alias Kodo.Test.FakeRefreshClient
 
   setup %{conn: conn} do
     user = user_fixture()
@@ -261,6 +262,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert {:ok, integration} = Integrations.get_integration(scope, integration_id)
     assert integration.connection_status == "connected"
     assert has_element?(view, card(integration), "Completed subscription")
+    assert has_element?(view, check_button(integration), "Check access")
     assert has_element?(view, "#integration-#{integration.id}-reauthorize", "Reauthorize")
     refute has_element?(view, "#integration-#{integration.id}-device-authorization")
 
@@ -270,6 +272,13 @@ defmodule KodoWeb.IntegrationsLiveTest do
 
     assert has_element?(view, "#device-authorization-form")
     assert has_element?(view, "#integration-modal-title", "Reauthorize Completed subscription")
+
+    render_patch(view, ~p"/integrations")
+    _refresh_client = configure_refresh_client([{:ok, device_tokens()}])
+    view |> element(check_button(integration)) |> render_click()
+    assert_receive {:integration_validation_finished, _id, _generation}
+    _ = :sys.get_state(view.pid)
+    assert has_element?(view, "#{status(integration)} dd.text-green-700", "Valid")
   end
 
   test "adds multiple accounts for one provider without exposing secrets", %{
@@ -696,6 +705,24 @@ defmodule KodoWeb.IntegrationsLiveTest do
           "https://api.openai.com/auth" => %{"chatgpt_account_id" => "account-secret"}
         })
     }
+  end
+
+  defp configure_refresh_client(responses) do
+    agent =
+      start_supervised!(
+        {Agent, fn -> %{responses: responses, refresh_tokens: []} end},
+        id: {:live_refresh_client, System.unique_integer([:positive])}
+      )
+
+    Application.put_env(:kodo, :oauth_refresh_client, FakeRefreshClient)
+    Application.put_env(:kodo, :fake_refresh_client_agent, agent)
+
+    on_exit(fn ->
+      Application.delete_env(:kodo, :oauth_refresh_client)
+      Application.delete_env(:kodo, :fake_refresh_client_agent)
+    end)
+
+    agent
   end
 
   defp jwt(claims) do
