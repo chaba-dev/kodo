@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict NhSthrb3Q1T8dHHZ3lLmQN0I7LCVjgA4u9SG3S46iJjpajG0SbJ22J9p7g9nUNg
+\restrict XOpxqSYwtvGfTiqRIBStCvyZpzZaCE6LIgMjOIQHCBPW9ZYUkI1mr4M5q3RWTPU
 
 -- Dumped from database version 15.19 (Debian 15.19-0+deb12u1)
 -- Dumped by pg_dump version 15.19 (Debian 15.19-0+deb12u1)
@@ -108,6 +108,40 @@ CREATE TABLE public.control_plane_instances (
     CONSTRAINT control_plane_instances_generation_nonnegative CHECK ((deployment_generation >= 0)),
     CONSTRAINT control_plane_instances_identity_not_empty CHECK (((char_length((node_name)::text) > 0) AND (char_length((artifact_revision)::text) > 0))),
     CONSTRAINT control_plane_instances_lifecycle_valid CHECK ((NOT (ready AND draining)))
+);
+
+
+--
+-- Name: device_authorization_attempts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.device_authorization_attempts (
+    id uuid NOT NULL,
+    user_id bigint NOT NULL,
+    integration_id uuid NOT NULL,
+    provider character varying(32) NOT NULL,
+    state character varying(32) DEFAULT 'active'::character varying NOT NULL,
+    attempt_generation bigint NOT NULL,
+    expected_integration_generation bigint NOT NULL,
+    encrypted_payload bytea,
+    encryption_key_version character varying(64),
+    payload_format_version integer,
+    provider_deadline timestamp without time zone NOT NULL,
+    polling_interval_ms integer NOT NULL,
+    next_poll_at timestamp without time zone NOT NULL,
+    claim_owner_id uuid,
+    claim_lease_expires_at timestamp without time zone,
+    claim_epoch bigint DEFAULT 0 NOT NULL,
+    terminal_error_code character varying(64),
+    inserted_at timestamp without time zone NOT NULL,
+    updated_at timestamp without time zone NOT NULL,
+    CONSTRAINT device_attempts_claim_epoch_valid CHECK ((claim_epoch >= 0)),
+    CONSTRAINT device_attempts_claim_valid CHECK (((((state)::text = 'active'::text) AND (terminal_error_code IS NULL) AND (((claim_owner_id IS NULL) AND (claim_lease_expires_at IS NULL)) OR ((claim_owner_id IS NOT NULL) AND (claim_lease_expires_at IS NOT NULL)))) OR (((state)::text <> 'active'::text) AND (claim_owner_id IS NULL) AND (claim_lease_expires_at IS NULL)))),
+    CONSTRAINT device_attempts_generations_valid CHECK (((attempt_generation > 0) AND (expected_integration_generation >= 0))),
+    CONSTRAINT device_attempts_payload_state_valid CHECK (((((state)::text = 'active'::text) AND (encrypted_payload IS NOT NULL) AND (encryption_key_version IS NOT NULL) AND (payload_format_version IS NOT NULL)) OR (((state)::text <> 'active'::text) AND (encrypted_payload IS NULL) AND (encryption_key_version IS NULL) AND (payload_format_version IS NULL)))),
+    CONSTRAINT device_attempts_poll_interval_valid CHECK (((polling_interval_ms >= 0) AND (polling_interval_ms <= 900000))),
+    CONSTRAINT device_attempts_provider_valid CHECK (((provider)::text = 'openai_codex'::text)),
+    CONSTRAINT device_attempts_state_valid CHECK (((state)::text = ANY ((ARRAY['active'::character varying, 'completed'::character varying, 'cancelled'::character varying, 'expired'::character varying, 'failed'::character varying])::text[])))
 );
 
 
@@ -343,6 +377,14 @@ ALTER TABLE ONLY public.control_plane_instances
 
 
 --
+-- Name: device_authorization_attempts device_authorization_attempts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_authorization_attempts
+    ADD CONSTRAINT device_authorization_attempts_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: integration_audit_events integration_audit_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -456,6 +498,34 @@ CREATE INDEX control_plane_instances_last_seen_at_index ON public.control_plane_
 
 
 --
+-- Name: device_attempts_integration_generation_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX device_attempts_integration_generation_index ON public.device_authorization_attempts USING btree (integration_id, attempt_generation);
+
+
+--
+-- Name: device_authorization_attempts_one_active_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX device_authorization_attempts_one_active_index ON public.device_authorization_attempts USING btree (integration_id) WHERE ((state)::text = 'active'::text);
+
+
+--
+-- Name: device_authorization_attempts_state_updated_at_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX device_authorization_attempts_state_updated_at_index ON public.device_authorization_attempts USING btree (state, updated_at);
+
+
+--
+-- Name: device_authorization_attempts_user_id_integration_id_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX device_authorization_attempts_user_id_integration_id_index ON public.device_authorization_attempts USING btree (user_id, integration_id);
+
+
+--
 -- Name: integration_audit_events_actor_user_id_inserted_at_index; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -467,6 +537,13 @@ CREATE INDEX integration_audit_events_actor_user_id_inserted_at_index ON public.
 --
 
 CREATE INDEX integration_audit_events_integration_id_inserted_at_index ON public.integration_audit_events USING btree (integration_id, inserted_at);
+
+
+--
+-- Name: provider_integrations_attempt_owner_identity_index; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX provider_integrations_attempt_owner_identity_index ON public.provider_integrations USING btree (id, user_id, provider);
 
 
 --
@@ -599,6 +676,22 @@ ALTER TABLE ONLY public.cluster_placement_overrides
 
 
 --
+-- Name: device_authorization_attempts device_attempts_integration_owner_provider_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_authorization_attempts
+    ADD CONSTRAINT device_attempts_integration_owner_provider_fkey FOREIGN KEY (integration_id, user_id, provider) REFERENCES public.provider_integrations(id, user_id, provider) ON DELETE CASCADE;
+
+
+--
+-- Name: device_authorization_attempts device_authorization_attempts_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.device_authorization_attempts
+    ADD CONSTRAINT device_authorization_attempts_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: integration_audit_events integration_audit_events_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -674,7 +767,7 @@ ALTER TABLE ONLY public.users_tokens
 -- PostgreSQL database dump complete
 --
 
-\unrestrict NhSthrb3Q1T8dHHZ3lLmQN0I7LCVjgA4u9SG3S46iJjpajG0SbJ22J9p7g9nUNg
+\unrestrict XOpxqSYwtvGfTiqRIBStCvyZpzZaCE6LIgMjOIQHCBPW9ZYUkI1mr4M5q3RWTPU
 
 INSERT INTO public."schema_migrations" (version) VALUES (20260807073017);
 INSERT INTO public."schema_migrations" (version) VALUES (20260808062115);
@@ -692,3 +785,4 @@ INSERT INTO public."schema_migrations" (version) VALUES (20260825042101);
 INSERT INTO public."schema_migrations" (version) VALUES (20260903201206);
 INSERT INTO public."schema_migrations" (version) VALUES (20260904051620);
 INSERT INTO public."schema_migrations" (version) VALUES (20260907083117);
+INSERT INTO public."schema_migrations" (version) VALUES (20260907161929);

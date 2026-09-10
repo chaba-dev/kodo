@@ -5,6 +5,7 @@ defmodule Kodo.IntegrationsConcurrencyTest do
   alias Kodo.Accounts.Scope
   alias Kodo.AccountsFixtures
   alias Kodo.Integrations
+  alias Kodo.Integrations.DeviceAuthorizationAttempt
   alias Kodo.Integrations.Integration
   alias Kodo.Repo
 
@@ -96,6 +97,100 @@ defmodule Kodo.IntegrationsConcurrencyTest do
     integrations = Integrations.list_integrations(scope)
     assert Enum.count(integrations, & &1.active) == 1
     assert Enum.find(integrations, & &1.active).id == selected.id
+  end
+
+  test "simultaneous device authorization starts preserve one generation-fenced attempt", %{
+    scope: scope,
+    supervisor: supervisor
+  } do
+    integration =
+      %Integration{user_id: scope.user.id}
+      |> Integration.create_changeset(%{
+        provider: "openai_codex",
+        authentication_type: "oauth"
+      })
+      |> Repo.insert!()
+
+    results =
+      ["first", "second"]
+      |> Enum.map(fn code ->
+        contended_task(supervisor, fn ->
+          Integrations.begin_device_authorization(
+            scope,
+            integration.id,
+            0,
+            %{"device_auth_id" => "#{code}-device", "user_code" => code},
+            1_000
+          )
+        end)
+      end)
+      |> release_contenders()
+      |> Task.await_many()
+
+    assert Enum.count(results, &match?({:ok, %DeviceAuthorizationAttempt{}}, &1)) == 1
+    assert {:error, :stale_credential_generation} in results
+
+    assert Repo.aggregate(
+             from(attempt in DeviceAuthorizationAttempt,
+               where: attempt.integration_id == ^integration.id and attempt.state == "active"
+             ),
+             :count
+           ) == 1
+  end
+
+  test "device authorization start and cancellation use one lock order without deadlocks", %{
+    scope: scope,
+    supervisor: supervisor
+  } do
+    for iteration <- 1..10 do
+      integration =
+        %Integration{user_id: scope.user.id}
+        |> Integration.create_changeset(%{
+          provider: "openai_codex",
+          authentication_type: "oauth",
+          display_name: "Account #{iteration}"
+        })
+        |> Repo.insert!()
+
+      assert {:ok, attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 0,
+                 %{"device_auth_id" => "first", "user_code" => "FIRST"},
+                 0
+               )
+
+      cancel =
+        contended_task(supervisor, fn ->
+          Integrations.cancel_device_authorization(
+            scope,
+            attempt.id,
+            attempt.attempt_generation
+          )
+        end)
+
+      start =
+        contended_task(supervisor, fn ->
+          Integrations.begin_device_authorization(
+            scope,
+            integration.id,
+            1,
+            %{"device_auth_id" => "second", "user_code" => "SECOND"},
+            0
+          )
+        end)
+
+      [cancel_result, start_result] =
+        [cancel, start]
+        |> release_contenders()
+        |> Task.await_many()
+
+      assert match?({:ok, %DeviceAuthorizationAttempt{}}, start_result)
+
+      assert match?({:ok, %DeviceAuthorizationAttempt{}}, cancel_result) or
+               cancel_result == {:error, :stale_device_authorization}
+    end
   end
 
   defp connect(scope, name) do

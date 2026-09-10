@@ -4,9 +4,13 @@ defmodule Kodo.Integrations do
   import Ecto.Changeset
   import Ecto.Query
 
+  alias Ecto.Adapters.SQL
   alias Kodo.Accounts.Scope
+  alias Kodo.Accounts.User
   alias Kodo.Integrations.AuditEvent
   alias Kodo.Integrations.CredentialEncryption
+  alias Kodo.Integrations.DeviceAuthorizationAttempt
+  alias Kodo.Integrations.DeviceAuthorizationEncryption
   alias Kodo.Integrations.Integration
   alias Kodo.Repo
 
@@ -18,6 +22,10 @@ defmodule Kodo.Integrations do
     rate_limited
     workspace_selection_required
   )
+  @device_authorization_lifetime_seconds 15 * 60
+  @device_authorization_secret_max_bytes 1_024
+  @device_authorization_cleanup_age_seconds 24 * 60 * 60
+  @secret_repo_options [log: false, telemetry_event: nil]
 
   def list_integrations(%Scope{user: user}) do
     Integration
@@ -79,6 +87,83 @@ defmodule Kodo.Integrations do
     |> order_by([event], asc: event.inserted_at, asc: event.id)
     |> Repo.all()
   end
+
+  def begin_device_authorization(
+        %Scope{user: user},
+        integration_id,
+        expected_generation,
+        payload,
+        polling_interval_ms
+      )
+      when is_integer(expected_generation) and expected_generation >= 0 and
+             is_integer(polling_interval_ms) and polling_interval_ms >= 0 and
+             polling_interval_ms <= 900_000 do
+    with {:ok, integration_id} <- cast_uuid(integration_id),
+         :ok <- validate_device_authorization_payload(payload) do
+      Repo.transaction(fn ->
+        begin_device_authorization_locked(
+          user.id,
+          integration_id,
+          expected_generation,
+          payload,
+          polling_interval_ms
+        )
+      end)
+    end
+  end
+
+  def begin_device_authorization(%Scope{}, _id, _generation, _payload, _interval),
+    do: {:error, :device_authorization_invalid}
+
+  def get_active_device_authorization(%Scope{user: user}, integration_id) do
+    with {:ok, integration_id} <- cast_uuid(integration_id) do
+      result =
+        Repo.transaction(fn ->
+          expire_device_authorization(user.id, integration_id)
+          read_active_device_authorization(user.id, integration_id)
+        end)
+
+      case result do
+        {:ok, :not_found} -> {:error, :device_authorization_not_found}
+        other -> other
+      end
+    end
+  end
+
+  def cancel_device_authorization(%Scope{user: user}, attempt_id, attempt_generation)
+      when is_integer(attempt_generation) and attempt_generation > 0 do
+    with {:ok, attempt_id} <- cast_uuid(attempt_id) do
+      Repo.transaction(fn ->
+        cancel_device_authorization_locked(user.id, attempt_id, attempt_generation)
+      end)
+    end
+  end
+
+  def cancel_device_authorization(%Scope{}, _attempt_id, _attempt_generation),
+    do: {:error, :stale_device_authorization}
+
+  def cleanup_device_authorizations(limit \\ 100)
+
+  def cleanup_device_authorizations(limit)
+      when is_integer(limit) and limit > 0 and limit <= 1_000 do
+    cutoff = DateTime.add(now(), -@device_authorization_cleanup_age_seconds, :second)
+
+    ids =
+      DeviceAuthorizationAttempt
+      |> where([attempt], attempt.state != "active" and attempt.updated_at < ^cutoff)
+      |> order_by([attempt], asc: attempt.updated_at, asc: attempt.id)
+      |> select([attempt], attempt.id)
+      |> limit(^limit)
+
+    {count, nil} =
+      DeviceAuthorizationAttempt
+      |> where([attempt], attempt.id in subquery(ids))
+      |> Repo.delete_all(@secret_repo_options)
+
+    {:ok, count}
+  end
+
+  def cleanup_device_authorizations(_limit), do: {:error, :cleanup_limit_invalid}
 
   def connect(scope, provider, authentication_type, credentials, opts \\ [])
 
@@ -291,6 +376,242 @@ defmodule Kodo.Integrations do
 
   def safe_validation_errors, do: @safe_validation_errors
 
+  defp begin_device_authorization_locked(
+         user_id,
+         integration_id,
+         expected_generation,
+         payload,
+         polling_interval_ms
+       ) do
+    lock_user!(user_id)
+    integration = lock_owned_integration!(user_id, integration_id)
+
+    with :ok <- require_generation(integration, expected_generation),
+         :ok <- require_device_authorization_integration(integration) do
+      start_device_authorization_locked(user_id, integration, payload, polling_interval_ms)
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp read_active_device_authorization(user_id, integration_id) do
+    query =
+      DeviceAuthorizationAttempt
+      |> where(
+        [attempt],
+        attempt.user_id == ^user_id and attempt.integration_id == ^integration_id and
+          attempt.state == "active" and
+          attempt.provider_deadline > fragment("timezone('UTC', clock_timestamp())")
+      )
+
+    case Repo.one(query, @secret_repo_options) do
+      %DeviceAuthorizationAttempt{} = attempt -> decrypt_device_authorization(attempt)
+      nil -> :not_found
+    end
+  end
+
+  defp decrypt_device_authorization(attempt) do
+    case DeviceAuthorizationEncryption.decrypt(attempt) do
+      {:ok, payload} -> {attempt, payload}
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp cancel_device_authorization_locked(user_id, attempt_id, attempt_generation) do
+    integration_id =
+      DeviceAuthorizationAttempt
+      |> where([attempt], attempt.id == ^attempt_id and attempt.user_id == ^user_id)
+      |> select([attempt], attempt.integration_id)
+      |> Repo.one(@secret_repo_options)
+
+    if is_nil(integration_id), do: Repo.rollback(:stale_device_authorization)
+
+    lock_user!(user_id)
+    integration = lock_owned_integration!(user_id, integration_id)
+
+    query =
+      from attempt in DeviceAuthorizationAttempt,
+        where:
+          attempt.id == ^attempt_id and attempt.user_id == ^user_id and
+            attempt.state == "active" and attempt.attempt_generation == ^attempt_generation
+
+    case Repo.update_all(
+           query,
+           [set: terminal_attempt_changes("cancelled", nil)],
+           @secret_repo_options
+         ) do
+      {1, nil} -> record_device_authorization_cancellation(user_id, attempt_id, integration)
+      {0, nil} -> Repo.rollback(:stale_device_authorization)
+    end
+  end
+
+  defp record_device_authorization_cancellation(user_id, attempt_id, integration) do
+    attempt = Repo.get!(DeviceAuthorizationAttempt, attempt_id, @secret_repo_options)
+    audit!(user_id, integration, "device_authorization_cancelled")
+    attempt
+  end
+
+  defp start_device_authorization_locked(user_id, integration, payload, polling_interval_ms) do
+    timestamp = database_now()
+    expected_integration_generation = integration.credential_generation + 1
+
+    supersede_active_device_authorization(integration.id, timestamp)
+
+    integration =
+      integration
+      |> change(
+        device_authorization_integration_changes(
+          integration,
+          expected_integration_generation,
+          timestamp
+        )
+      )
+      |> Repo.update!()
+
+    attempt = %DeviceAuthorizationAttempt{
+      id: Ecto.UUID.generate(),
+      user_id: user_id,
+      integration_id: integration.id,
+      provider: "openai_codex",
+      attempt_generation: next_device_authorization_generation(integration.id),
+      expected_integration_generation: expected_integration_generation
+    }
+
+    case DeviceAuthorizationEncryption.encrypt(attempt, payload) do
+      {:ok, encrypted} ->
+        deadline = DateTime.add(timestamp, @device_authorization_lifetime_seconds, :second)
+        next_poll_at = DateTime.add(timestamp, polling_interval_ms, :millisecond)
+
+        attempt =
+          attempt
+          |> Map.merge(encrypted)
+          |> DeviceAuthorizationAttempt.create_changeset(%{
+            provider: "openai_codex",
+            attempt_generation: attempt.attempt_generation,
+            expected_integration_generation: expected_integration_generation,
+            provider_deadline: deadline,
+            polling_interval_ms: polling_interval_ms,
+            next_poll_at: next_poll_at
+          })
+          |> Repo.insert!(@secret_repo_options)
+
+        audit!(user_id, integration, "device_authorization_started")
+        attempt
+
+      {:error, reason} ->
+        Repo.rollback(reason)
+    end
+  end
+
+  defp device_authorization_integration_changes(%Integration{}, generation, timestamp) do
+    [credential_generation: generation, updated_at: timestamp]
+  end
+
+  defp supersede_active_device_authorization(integration_id, timestamp) do
+    DeviceAuthorizationAttempt
+    |> where([attempt], attempt.integration_id == ^integration_id and attempt.state == "active")
+    |> Repo.update_all(
+      [set: terminal_attempt_changes("cancelled", "superseded", timestamp)],
+      @secret_repo_options
+    )
+  end
+
+  defp next_device_authorization_generation(integration_id) do
+    DeviceAuthorizationAttempt
+    |> where([attempt], attempt.integration_id == ^integration_id)
+    |> select([attempt], coalesce(max(attempt.attempt_generation), 0))
+    |> Repo.one()
+    |> Kernel.+(1)
+  end
+
+  defp expire_device_authorization(user_id, integration_id) do
+    DeviceAuthorizationAttempt
+    |> where(
+      [attempt],
+      attempt.user_id == ^user_id and attempt.integration_id == ^integration_id and
+        attempt.state == "active" and
+        attempt.provider_deadline <= fragment("timezone('UTC', clock_timestamp())")
+    )
+    |> Repo.update_all(set: terminal_attempt_changes("expired", "deadline_exceeded"))
+  end
+
+  defp terminal_attempt_changes(state, error_code, timestamp \\ now()) do
+    [
+      state: state,
+      encrypted_payload: nil,
+      encryption_key_version: nil,
+      payload_format_version: nil,
+      claim_owner_id: nil,
+      claim_lease_expires_at: nil,
+      terminal_error_code: error_code,
+      updated_at: timestamp
+    ]
+  end
+
+  defp validate_device_authorization_payload(
+         %{"device_auth_id" => device_auth_id, "user_code" => user_code} = payload
+       )
+       when map_size(payload) == 2 do
+    if bounded_secret?(device_auth_id) and bounded_secret?(user_code),
+      do: :ok,
+      else: {:error, :device_authorization_invalid}
+  end
+
+  defp validate_device_authorization_payload(_payload),
+    do: {:error, :device_authorization_invalid}
+
+  defp bounded_secret?(value) do
+    is_binary(value) and byte_size(value) > 0 and
+      byte_size(value) <= @device_authorization_secret_max_bytes
+  end
+
+  defp require_device_authorization_integration(%Integration{
+         provider: "openai_codex",
+         authentication_type: "oauth"
+       }),
+       do: :ok
+
+  defp require_device_authorization_integration(%Integration{}),
+    do: {:error, :authentication_type_mismatch}
+
+  defp lock_owned_integration!(user_id, integration_id) do
+    case Integration
+         |> where(
+           [integration],
+           integration.id == ^integration_id and integration.user_id == ^user_id
+         )
+         |> lock("FOR UPDATE")
+         |> Repo.one() do
+      %Integration{} = integration -> integration
+      nil -> Repo.rollback(:integration_not_found)
+    end
+  end
+
+  defp lock_user!(user_id) do
+    case User
+         |> where([user], user.id == ^user_id)
+         |> select([user], user.id)
+         |> lock("FOR KEY SHARE")
+         |> Repo.one() do
+      ^user_id -> :ok
+      nil -> Repo.rollback(:integration_not_found)
+    end
+  end
+
+  defp cast_uuid(value) do
+    case Ecto.UUID.cast(value) do
+      {:ok, uuid} -> {:ok, uuid}
+      :error -> {:error, :integration_not_found}
+    end
+  end
+
+  defp database_now do
+    %{rows: [[naive_datetime]]} =
+      SQL.query!(Repo, "SELECT timezone('UTC', clock_timestamp())", [])
+
+    DateTime.from_naive!(naive_datetime, "Etc/UTC")
+  end
+
   defp install_credentials(
          scope,
          id,
@@ -393,6 +714,7 @@ defmodule Kodo.Integrations do
           integration =
             execute_fenced_update(user.id, id, generation, allowed_connections, changes)
 
+          maybe_terminalize_device_authorization(user.id, id, audit_event_type)
           integration = maybe_activate_initial_oauth(user.id, integration, audit_event_type)
           audit!(user.id, integration, audit_event_type)
           integration
@@ -466,6 +788,18 @@ defmodule Kodo.Integrations do
 
   defp maybe_lock_transition(_user_id, _integration_id, _event_type), do: :ok
 
+  defp maybe_terminalize_device_authorization(user_id, integration_id, "integration_disconnected") do
+    DeviceAuthorizationAttempt
+    |> where(
+      [attempt],
+      attempt.user_id == ^user_id and attempt.integration_id == ^integration_id and
+        attempt.state == "active"
+    )
+    |> Repo.update_all(set: terminal_attempt_changes("cancelled", "integration_disconnected"))
+  end
+
+  defp maybe_terminalize_device_authorization(_user_id, _integration_id, _event_type), do: :ok
+
   defp maybe_activate_initial_oauth(
          user_id,
          %{credential_generation: 1} = integration,
@@ -509,7 +843,7 @@ defmodule Kodo.Integrations do
   defp lock_provider_identity(user_id, provider) do
     key = "provider-integration:#{user_id}:#{provider}"
 
-    Ecto.Adapters.SQL.query!(
+    SQL.query!(
       Repo,
       "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
       [key]

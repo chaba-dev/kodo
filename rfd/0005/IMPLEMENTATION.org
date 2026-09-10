@@ -310,14 +310,14 @@ manufactured after that no-go decision.
 
 * Phase 3: Add ChatGPT subscription device authorization beta
 
-- [ ] Generate persistence for one active, expiring, user-scoped, single-use
+- [X] Generate persistence for one active, expiring, user-scoped, single-use
   device authorization attempt per ~openai_codex~ integration, including
   encrypted sensitive fields, encryption-key and payload-format versions,
   immutable attempt and expected integration generations, provider deadline and
   polling interval, database-time claim lease, monotonically increasing claim
   epoch, and bounded cleanup. Enforce ~ON DELETE CASCADE~ from integrations to
   attempts and their claim state.
-- [ ] Encrypt every attempt payload with a unique nonce and AEAD associated data
+- [X] Encrypt every attempt payload with a unique nonce and AEAD associated data
   binding attempt ID, integration ID, user ID, provider, immutable attempt
   generation, and payload-format version; fail closed on swaps, tampering,
   unknown formats, and unavailable keys.

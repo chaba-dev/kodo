@@ -3,6 +3,7 @@ defmodule Kodo.Integrations.CredentialKeyRingTest do
 
   alias Kodo.AccountsFixtures
   alias Kodo.Integrations.CredentialKeyRing
+  alias Kodo.Integrations.DeviceAuthorizationAttempt
   alias Kodo.Integrations.Integration
 
   @config_key Kodo.Integrations.CredentialEncryption
@@ -23,6 +24,16 @@ defmodule Kodo.Integrations.CredentialKeyRingTest do
 
   test "fails readiness when a referenced encryption key is missing" do
     insert_connected("retired-v1")
+
+    assert {:error, {:credential_encryption_keys_missing, ["retired-v1"]}} =
+             CredentialKeyRing.validate_referenced_versions()
+  end
+
+  test "validates keys referenced only by active device authorization attempts" do
+    insert_attempt("test-old")
+    assert :ok = CredentialKeyRing.validate_referenced_versions()
+
+    insert_attempt("retired-v1")
 
     assert {:error, {:credential_encryption_keys_missing, ["retired-v1"]}} =
              CredentialKeyRing.validate_referenced_versions()
@@ -56,6 +67,38 @@ defmodule Kodo.Integrations.CredentialKeyRingTest do
     }
     |> change()
     |> Integration.constraint_changeset()
+    |> Repo.insert!()
+  end
+
+  defp insert_attempt(key_version) do
+    user = AccountsFixtures.user_fixture()
+
+    integration =
+      %Integration{user_id: user.id}
+      |> Integration.create_changeset(%{
+        provider: "openai_codex",
+        authentication_type: "oauth"
+      })
+      |> Repo.insert!()
+
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    %DeviceAuthorizationAttempt{
+      id: Ecto.UUID.generate(),
+      user_id: user.id,
+      integration_id: integration.id,
+      provider: "openai_codex",
+      attempt_generation: 1,
+      expected_integration_generation: 0,
+      encrypted_payload: "opaque",
+      encryption_key_version: key_version,
+      payload_format_version: 1,
+      provider_deadline: DateTime.add(now, 900, :second),
+      polling_interval_ms: 5_000,
+      next_poll_at: now
+    }
+    |> change()
+    |> DeviceAuthorizationAttempt.constraint_changeset()
     |> Repo.insert!()
   end
 end

@@ -11,8 +11,35 @@ defmodule Kodo.Integrations.CredentialEncryption do
 
   @doc "Encrypts a credential payload using the configured current key."
   def encrypt(%Integration{} = integration, payload) when is_map(payload) do
+    with {:ok, encrypted} <- encrypt_bound(credential_identity(integration), payload) do
+      {:ok,
+       %{
+         encrypted_credentials: encrypted.ciphertext,
+         encryption_key_version: encrypted.key_version,
+         credential_format_version: encrypted.format_version
+       }}
+    end
+  end
+
+  def encrypt(_integration, _payload), do: {:error, :credential_payload_invalid}
+
+  @doc "Decrypts and authenticates an integration's credential payload."
+  def decrypt(%Integration{credential_format_version: version}) when version != @format_version,
+    do: {:error, :credential_payload_version_unsupported}
+
+  def decrypt(%Integration{} = integration) do
+    decrypt_bound(
+      credential_identity(integration),
+      integration.encrypted_credentials,
+      integration.encryption_key_version,
+      integration.credential_format_version
+    )
+  end
+
+  @doc false
+  def encrypt_bound(identity, payload) when is_list(identity) and is_map(payload) do
     with {:ok, ring} <- key_ring(),
-         {:ok, associated_data} <- associated_data(integration, @format_version),
+         {:ok, associated_data} <- associated_data(identity, @format_version),
          {:ok, plaintext} <- encode_payload(payload) do
       nonce = :crypto.strong_rand_bytes(@nonce_bytes)
       key = Map.fetch!(ring.keys, ring.current_key_version)
@@ -30,9 +57,9 @@ defmodule Kodo.Integrations.CredentialEncryption do
 
       {:ok,
        %{
-         encrypted_credentials: nonce <> tag <> ciphertext,
-         encryption_key_version: ring.current_key_version,
-         credential_format_version: @format_version
+         ciphertext: nonce <> tag <> ciphertext,
+         key_version: ring.current_key_version,
+         format_version: @format_version
        }}
     else
       {:error, :credential_payload_invalid} = error -> error
@@ -40,17 +67,19 @@ defmodule Kodo.Integrations.CredentialEncryption do
     end
   end
 
-  def encrypt(_integration, _payload), do: {:error, :credential_payload_invalid}
+  def encrypt_bound(_identity, _payload), do: {:error, :credential_payload_invalid}
 
-  @doc "Decrypts and authenticates an integration's credential payload."
-  def decrypt(%Integration{credential_format_version: version}) when version != @format_version,
-    do: {:error, :credential_payload_version_unsupported}
+  @doc false
+  def decrypt_bound(_identity, _ciphertext, _key_version, version)
+      when version != @format_version,
+      do: {:error, :credential_payload_version_unsupported}
 
-  def decrypt(%Integration{} = integration) do
+  def decrypt_bound(identity, encrypted_payload, key_version, @format_version)
+      when is_list(identity) do
     with {:ok, ring} <- key_ring(),
-         {:ok, key} <- fetch_decryption_key(ring, integration.encryption_key_version),
-         {:ok, associated_data} <- associated_data(integration, @format_version),
-         {:ok, nonce, tag, ciphertext} <- unpack(integration.encrypted_credentials),
+         {:ok, key} <- fetch_decryption_key(ring, key_version),
+         {:ok, associated_data} <- associated_data(identity, @format_version),
+         {:ok, nonce, tag, ciphertext} <- unpack(encrypted_payload),
          plaintext when is_binary(plaintext) <-
            :crypto.crypto_one_time_aead(
              :aes_256_gcm,
@@ -118,17 +147,18 @@ defmodule Kodo.Integrations.CredentialEncryption do
     end
   end
 
-  defp associated_data(integration, format_version) do
-    values = [
+  defp credential_identity(integration) do
+    [
       integration.id,
       integration.user_id,
       integration.provider,
-      integration.authentication_type,
-      format_version
+      integration.authentication_type
     ]
+  end
 
-    if Enum.all?(values, &(not is_nil(&1))) do
-      Jason.encode(values)
+  defp associated_data(identity, format_version) do
+    if Enum.all?(identity, &(not is_nil(&1))) do
+      Jason.encode(identity ++ [format_version])
     else
       {:error, :credential_identity_incomplete}
     end

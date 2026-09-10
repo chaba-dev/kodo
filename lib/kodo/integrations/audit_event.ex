@@ -12,6 +12,8 @@ defmodule Kodo.Integrations.AuditEvent do
     validation_unavailable
     integration_activated
     integration_disconnected
+    device_authorization_started
+    device_authorization_cancelled
     oauth_succeeded
     refresh_succeeded
     refresh_invalid_grant
