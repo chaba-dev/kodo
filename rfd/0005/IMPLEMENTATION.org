@@ -397,15 +397,18 @@ manufactured after that no-go decision.
   compatibility record for its capability contract; show billing confirmation
   rather than requiring sudo, and reject the whole atomic role set when any role
   is incompatible. Emit a credential-free route-change audit event.
-- [ ] Under the existing durable session lock, assign each accepted turn a route
+  The durable change boundary and audit event are implemented, but no interaction
+  is exposed because the live ~gpt-5.4~ record is explicitly rejected: Platform
+  returned ~gpt-5.4-2026-03-05~ while ChatGPT returned ~gpt-5.4~.
+- [X] Under the existing durable session lock, assign each accepted turn a route
   revision and persist its complete per-role model, execution-route, and
   capability-contract snapshot. Write confirmed route changes as pending
   revisions under the same lock and apply them only to later accepted turns.
-- [ ] Use the persisted turn snapshot for primary, search, review, every tool
+- [X] Use the persisted turn snapshot for primary, search, review, every tool
   continuation, and process/node restart recovery; replay normalized visible
   assistant/tool history after a route change without provider-specific
   reasoning, signature, or cache state.
-- [ ] Route requests whose persisted turn snapshot selects ~openai_codex~ only
+- [X] Route requests whose persisted turn snapshot selects ~openai_codex~ only
   through the user's ChatGPT integration and prohibit silent fallback to OpenAI
   API billing.
 - [ ] Test authorization ownership and expiry, polling backoff, two-node refresh
@@ -427,7 +430,7 @@ manufactured after that no-go decision.
   cross-route replay, no automatic route fallback, same-origin and cross-origin
   redirect rejection, malicious verification URLs, absence of a
   credential-bearing follow-up request, and secret redaction.
-- [ ] Run the Phase 0 live compatibility suite against the production path and
+- [X] Run the Phase 0 live compatibility suite against the production path and
   do not declare ChatGPT/Codex implementation complete while a required
   capability fails; classify later contract failures as regressions and never
   fall back to Platform billing.
