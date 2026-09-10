@@ -66,14 +66,38 @@ defmodule Kodo.Agent.ModelMapping do
 
     roles =
       Map.new(mapping["roles"], fn {role, role_mapping} ->
+        contract = Roles.fetch!(role_atom(role), role_mapping["role_contract"])
+
         {role,
          role_mapping
          |> Map.put("execution_route", role_mapping["provider"])
-         |> Map.put("model_selector", model_selector(role_mapping["model"]))}
+         |> Map.put("model_selector", model_selector(role_mapping["model"]))
+         |> Map.put("capability_contract", capability_contract(contract))}
       end)
 
     %{mapping | "roles" => roles}
   end
+
+  defp capability_contract(contract) do
+    %{
+      "id" => contract.id,
+      "toolset_version" => contract.toolset_version,
+      "requirements" => %{
+        "tools" => contract.capabilities.tools,
+        "structured_output" => stringify(contract.capabilities.structured_output),
+        "min_context" => contract.capabilities.min_context,
+        "input_modalities" => Enum.map(contract.capabilities.input_modalities, &to_string/1)
+      }
+    }
+  end
+
+  defp role_atom("primary"), do: :primary
+  defp role_atom("search"), do: :search
+  defp role_atom("review"), do: :review
+
+  defp stringify(value) when is_boolean(value), do: value
+  defp stringify(value) when is_atom(value), do: Atom.to_string(value)
+  defp stringify(value), do: value
 
   defp normalize_role(current, persisted) do
     normalized =

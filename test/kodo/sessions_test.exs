@@ -334,6 +334,17 @@ defmodule Kodo.SessionsTest do
     assert snapshot.payload["model_mapping"]["roles"]["primary"]["model_selector"] ==
              "gpt-4o-mini"
 
+    assert snapshot.payload["model_mapping"]["roles"]["primary"]["capability_contract"] == %{
+             "id" => "alpha-v1",
+             "toolset_version" => "workspace-v5",
+             "requirements" => %{
+               "tools" => true,
+               "structured_output" => false,
+               "min_context" => 100_000,
+               "input_modalities" => ["text"]
+             }
+           }
+
     assert message.type == "user_message"
     assert message.sequence == snapshot.sequence + 1
     assert status.type == "session_status_changed"
