@@ -118,6 +118,50 @@ defmodule Kodo.Integrations.DeviceAuthorizationTest do
     assert calls(client) == []
   end
 
+  test "a poll admitted before takeover may finish but cannot persist its result", %{
+    scope: scope,
+    integration: integration
+  } do
+    owner = self()
+
+    blocking_poll = fn :poll, _payload ->
+      send(owner, {:poll_admitted, self()})
+
+      receive do
+        :finish_poll -> {:ok, exchange_payload()}
+      end
+    end
+
+    client = fake_client(poll: [blocking_poll])
+    {claim, payload} = claimed_attempt(scope, integration)
+    supervisor = start_supervised!(Task.Supervisor)
+
+    task =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        DeviceAuthorization.run(scope, claim, payload, client_opts(client))
+      end)
+
+    assert_receive {:poll_admitted, poller}
+
+    Repo.update!(
+      change(claim, claim_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second))
+    )
+
+    assert {:ok, {takeover, ^payload}} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    send(poller, :finish_poll)
+
+    assert {:error, :stale_device_authorization_claim} = Task.await(task)
+    assert Repo.reload!(takeover).state == "active"
+    assert Repo.reload!(integration).connection_status == "disconnected"
+    assert calls(client) == [{:poll, payload}]
+  end
+
   test "begin persists the provider response and launches a supervised finite task", %{
     scope: scope,
     integration: integration

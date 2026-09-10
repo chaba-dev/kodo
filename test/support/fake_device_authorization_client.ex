@@ -8,16 +8,19 @@ defmodule Kodo.Test.FakeDeviceAuthorizationClient do
   defp respond(opts, operation, payload) do
     agent = Keyword.fetch!(opts, :agent)
 
-    Agent.get_and_update(agent, fn state ->
-      [response | remaining] = Map.fetch!(state.responses, operation)
+    response =
+      Agent.get_and_update(agent, fn state ->
+        [response | remaining] = Map.fetch!(state.responses, operation)
 
-      new_state = %{
-        state
-        | calls: [{operation, payload} | state.calls],
-          responses: Map.put(state.responses, operation, remaining)
-      }
+        new_state = %{
+          state
+          | calls: [{operation, payload} | state.calls],
+            responses: Map.put(state.responses, operation, remaining)
+        }
 
-      {response, new_state}
-    end)
+        {response, new_state}
+      end)
+
+    if is_function(response, 2), do: response.(operation, payload), else: response
   end
 end
