@@ -1,6 +1,7 @@
 defmodule Kodo.SessionsTest do
   use Kodo.DataCase
 
+  alias Kodo.Agent.ExecutionRouteChange
   alias Kodo.Cluster.Instances
   alias Kodo.Integrations
   alias Kodo.Runners
@@ -379,42 +380,21 @@ defmodule Kodo.SessionsTest do
     assert Integrations.list_audit_events(scope) == []
   end
 
-  test "requires an owned usable destination integration before changing routes", %{
+  test "does not reveal another user's session through route changes", %{
     runner: runner,
     scope: scope
   } do
     other_scope = user_scope_fixture()
 
-    {:ok, _other_integration} =
-      Integrations.connect(other_scope, "openai", "api_key", %{"api_key" => "other-key"})
-
     {:ok, session} =
       Sessions.create_session(scope, %{
         runner_id: runner.id,
-        title: "Owned route",
-        model: "openai_codex:gpt-5.4"
+        title: "Private route",
+        model: "openai:gpt-5.4"
       })
 
-    records = [
-      %{
-        role: "primary",
-        source: "openai_codex",
-        destination: "openai",
-        selector: "gpt-5.4",
-        role_contract: "alpha-v1",
-        status: :approved
-      }
-    ]
-
-    assert {:error, :destination_integration_required} =
-             Sessions.change_execution_route(scope, session.id, "openai",
-               compatibility_records: records
-             )
-
     assert {:error, :session_not_found} =
-             Sessions.change_execution_route(other_scope, session.id, "openai",
-               compatibility_records: records
-             )
+             Sessions.change_execution_route(other_scope, session.id, "openai_codex")
 
     refute Enum.any?(
              Sessions.events_after(session.id),
@@ -422,13 +402,10 @@ defmodule Kodo.SessionsTest do
            )
   end
 
-  test "applies a confirmed route revision only to subsequently accepted turns", %{
+  test "applies a persisted route revision only to subsequently accepted turns", %{
     runner: runner,
     scope: scope
   } do
-    {:ok, _integration} =
-      Integrations.connect(scope, "openai", "api_key", %{"api_key" => "route-change-key"})
-
     {:ok, session} =
       Sessions.create_session(scope, %{
         runner_id: runner.id,
@@ -449,9 +426,25 @@ defmodule Kodo.SessionsTest do
       }
     ]
 
+    [created | _events] = Sessions.events_after(session.id)
+
+    assert {:ok, changed_mapping} =
+             ExecutionRouteChange.change(
+               created.payload["model_mapping"],
+               "openai",
+               records
+             )
+
     assert {:ok, route_event} =
-             Sessions.change_execution_route(scope, session.id, "openai",
-               compatibility_records: records
+             Sessions.append_event(
+               session.id,
+               "execution_route_changed",
+               %{
+                 "route_revision" => 2,
+                 "destination" => "openai",
+                 "model_mapping" => changed_mapping
+               },
+               source: "user"
              )
 
     assert first_snapshot.payload["route_revision"] == 1
@@ -472,9 +465,6 @@ defmodule Kodo.SessionsTest do
              "primary",
              "execution_route"
            ]) == "openai"
-
-    assert %{event_type: "execution_route_changed", provider: "openai"} =
-             scope |> Integrations.list_audit_events() |> List.last()
   end
 
   test "advances ownership epochs and fences every stale state mutation", %{

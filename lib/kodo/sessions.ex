@@ -799,9 +799,9 @@ defmodule Kodo.Sessions do
   end
 
   @doc "Queues an approved billing-route revision for turns accepted after this event."
-  def change_execution_route(%Scope{} = scope, session_id, destination, opts \\ []) do
+  def change_execution_route(%Scope{} = scope, session_id, destination) do
     case Repo.transaction(fn ->
-           change_execution_route_locked(scope, session_id, destination, opts)
+           change_execution_route_locked(scope, session_id, destination)
          end) do
       {:ok, event} = result ->
         broadcast(event)
@@ -1026,7 +1026,7 @@ defmodule Kodo.Sessions do
     end
   end
 
-  defp change_execution_route_locked(scope, session_id, destination, opts) do
+  defp change_execution_route_locked(scope, session_id, destination) do
     session = lock_user_session!(scope, session_id)
     projection = session.id |> events_after() |> Projection.from_events()
 
@@ -1036,9 +1036,7 @@ defmodule Kodo.Sessions do
           {"session", %{primary: %{model: session.model}}}
         ])
 
-    records = Keyword.get(opts, :compatibility_records, ExecutionRouteChange.approved_records())
-
-    with {:ok, changed_mapping} <- ExecutionRouteChange.change(mapping, destination, records),
+    with {:ok, changed_mapping} <- ExecutionRouteChange.change(mapping, destination),
          {:ok, integration} <- Integrations.admit_execution_route_change(scope, destination),
          {:ok, event} <-
            append_locked(
