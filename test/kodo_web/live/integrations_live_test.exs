@@ -222,6 +222,32 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert [%{provider: "openai_codex"}] = Integrations.list_integrations(scope)
   end
 
+  test "removes an expired one-time code when the page loads", %{conn: conn, scope: scope} do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Expired attempt"
+             )
+
+    assert {:ok, attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "expired-device", "user_code" => "EXPIRED"},
+               0
+             )
+
+    Repo.update!(
+      Ecto.Changeset.change(attempt,
+        provider_deadline: DateTime.add(DateTime.utc_now(), -1, :second)
+      )
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    refute has_element?(view, "#integration-#{integration.id}-device-authorization")
+    assert Repo.reload!(attempt).state == "expired"
+  end
+
   test "shows completion and reauthorization after the device flow succeeds", %{
     conn: conn,
     scope: scope
