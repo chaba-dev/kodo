@@ -492,7 +492,11 @@ defmodule Kodo.Agent.Loop do
          :ok <- rehoming_boundary(),
          {:ok, response} <-
            Sessions.dispatch_if_owner(ownership, fn ->
-             generate(adapter, request, transcript(events, contract), tools,
+             generate(
+               adapter,
+               request,
+               transcript(events, contract, primary["execution_route"] || primary["provider"]),
+               tools,
                timeout: budgets[:model_timeout],
                reasoning: primary["reasoning"]
              )
@@ -511,7 +515,7 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp transcript(events, contract) do
+  defp transcript(events, contract, current_route) do
     system = %{"role" => "system", "content" => contract.prompt}
 
     primary_invocations =
@@ -519,24 +523,54 @@ defmodule Kodo.Agent.Loop do
       |> Enum.filter(&(&1.type == "model_invocation_started"))
       |> MapSet.new(& &1.payload["invocation_id"])
 
+    invocation_routes =
+      events
+      |> Enum.filter(&(&1.type == "model_invocation_started"))
+      |> Map.new(&{&1.payload["invocation_id"], &1.payload["provider"]})
+
     Enum.reduce(events, [system], fn event, messages ->
-      case transcript_message(event, primary_invocations) do
+      case transcript_message(event, primary_invocations, invocation_routes, current_route) do
         nil -> messages
         message -> messages ++ [message]
       end
     end)
   end
 
-  defp transcript_message(%{type: "user_message", payload: payload}, _primary_invocations),
-    do: %{"role" => "user", "content" => payload["content"]}
+  defp transcript_message(
+         %{type: "user_message", payload: payload},
+         _primary_invocations,
+         _invocation_routes,
+         _current_route
+       ),
+       do: %{"role" => "user", "content" => payload["content"]}
 
-  defp transcript_message(%{type: "model_response", payload: payload}, _primary_invocations),
-    do: assistant_message(payload)
+  defp transcript_message(
+         %{type: "model_response", payload: payload},
+         _primary_invocations,
+         invocation_routes,
+         current_route
+       ) do
+    if invocation_routes[payload["invocation_id"]] == current_route do
+      assistant_message(payload)
+    else
+      visible_assistant_message(payload)
+    end
+  end
 
-  defp transcript_message(%{type: "review_feedback", payload: payload}, _primary_invocations),
-    do: %{"role" => "user", "content" => payload["content"]}
+  defp transcript_message(
+         %{type: "review_feedback", payload: payload},
+         _primary_invocations,
+         _invocation_routes,
+         _current_route
+       ),
+       do: %{"role" => "user", "content" => payload["content"]}
 
-  defp transcript_message(%{type: type, payload: payload}, primary_invocations)
+  defp transcript_message(
+         %{type: type, payload: payload},
+         primary_invocations,
+         _invocation_routes,
+         _current_route
+       )
        when type in ["tool_completed", "tool_failed"] do
     if MapSet.member?(primary_invocations, payload["invocation_id"]) do
       content =
@@ -551,18 +585,23 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp transcript_message(_event, _primary_invocations), do: nil
+  defp transcript_message(_event, _primary_invocations, _invocation_routes, _current_route),
+    do: nil
 
   defp assistant_message(%{"assistant" => nil} = payload) do
+    visible_assistant_message(payload)
+  end
+
+  defp assistant_message(%{"assistant" => provider_state}),
+    do: %{"role" => "assistant", "provider_state" => provider_state}
+
+  defp visible_assistant_message(payload) do
     %{
       "role" => "assistant",
       "content" => payload["text"] || "",
       "tool_calls" => payload["tool_calls"] || []
     }
   end
-
-  defp assistant_message(%{"assistant" => provider_state}),
-    do: %{"role" => "assistant", "provider_state" => provider_state}
 
   defp start_invocation(
          session_id,
