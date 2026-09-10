@@ -54,7 +54,7 @@ defmodule Kodo.Integrations.DeviceAuthorizationTokens do
   defp expiration(%{"exp" => unix}, now) when is_integer(unix) do
     with {:ok, expires_at} <- DateTime.from_unix(unix),
          true <- DateTime.after?(expires_at, now) do
-      {:ok, expires_at}
+      {:ok, %{expires_at | microsecond: {0, 6}}}
     else
       _invalid -> :error
     end

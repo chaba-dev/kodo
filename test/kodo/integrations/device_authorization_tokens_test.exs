@@ -16,7 +16,7 @@ defmodule Kodo.Integrations.DeviceAuthorizationTokensTest do
     }
 
     assert {:ok, normalized} = DeviceAuthorizationTokens.normalize(tokens, @now)
-    assert normalized.expires_at == DateTime.add(@now, 3_600, :second)
+    assert DateTime.to_unix(normalized.expires_at) == DateTime.to_unix(@now) + 3_600
 
     assert normalized.credentials ==
              Map.put(tokens, "account_id", "account-secret")
