@@ -278,6 +278,24 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
   end
 
+  test "stops normally when its user and session disappear during inference", %{
+    scope: scope,
+    session: session
+  } do
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    assert :ok = ActiveSession.start_turn(coordinator, "wait")
+    assert_receive :fake_llm_waiting
+
+    task = :sys.get_state(coordinator).task.pid
+    coordinator_ref = Process.monitor(coordinator)
+
+    Repo.delete!(scope.user)
+    send(task, :never)
+
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
+    assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
+  end
+
   test "reconciles a repeated turn request while its task is active", %{session: session} do
     request_id = Ecto.UUID.generate()
     assert {:ok, pid} = Sessions.ensure_started(session.id)

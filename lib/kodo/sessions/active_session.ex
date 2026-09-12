@@ -122,6 +122,9 @@ defmodule Kodo.Sessions.ActiveSession do
       {:error, :stale_ownership} = error ->
         {:stop, :normal, error, stop_task(state)}
 
+      {:error, :session_not_found} = error ->
+        {:stop, :normal, error, state}
+
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
@@ -136,6 +139,9 @@ defmodule Kodo.Sessions.ActiveSession do
 
       {:error, :stale_ownership} = error ->
         {:stop, :normal, error, stop_task(state)}
+
+      {:error, :session_not_found} = error ->
+        {:stop, :normal, error, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -243,6 +249,10 @@ defmodule Kodo.Sessions.ActiveSession do
         reply_drain_waiters(state, :ok)
         {:stop, :normal, state |> Map.put(:task, nil) |> Map.delete(:drain_waiters)}
 
+      {:error, :session_not_found} ->
+        reply_drain_waiters(state, :ok)
+        {:stop, :normal, state |> Map.put(:task, nil) |> Map.delete(:drain_waiters)}
+
       {:error, :stale_ownership} ->
         reply_drain_waiters(state, {:error, :stale_ownership})
         {:stop, :normal, stop_task(state)}
@@ -259,6 +269,9 @@ defmodule Kodo.Sessions.ActiveSession do
         {:stop, :normal, {:error, :already_finished}, %{state | task: nil}}
 
       {:error, :session_not_active} ->
+        {:stop, :normal, {:error, :already_finished}, %{state | task: nil}}
+
+      {:error, :session_not_found} ->
         {:stop, :normal, {:error, :already_finished}, %{state | task: nil}}
 
       {:error, :stale_ownership} = error ->
