@@ -72,14 +72,23 @@ defmodule Kodo.Agent.ModelMappingTest do
   end
 
   test "canonicalizes every supported string model specification in snapshots" do
-    for specification <- ["openai:gpt-4o-mini", "gpt-4o-mini@openai"] do
+    specifications = [
+      {"openai:gpt-4o-mini", "openai", "gpt-4o-mini"},
+      {"gpt-4o-mini@openai", "openai", "gpt-4o-mini"},
+      {"openrouter:nvidia/nemotron-3-super-120b-a12b:free", "openrouter",
+       "nvidia/nemotron-3-super-120b-a12b:free"},
+      {"nvidia/nemotron-3-super-120b-a12b:free@openrouter", "openrouter",
+       "nvidia/nemotron-3-super-120b-a12b:free"}
+    ]
+
+    for {specification, route, selector} <- specifications do
       mapping = ModelMapping.balanced([{"session", %{primary: %{model: specification}}}])
       snapshot = ModelMapping.snapshot(mapping)
       primary = snapshot["roles"]["primary"]
 
-      assert primary["model"] == "openai:gpt-4o-mini"
-      assert primary["execution_route"] == "openai"
-      assert primary["model_selector"] == "gpt-4o-mini"
+      assert primary["model"] == "#{route}:#{selector}"
+      assert primary["execution_route"] == route
+      assert primary["model_selector"] == selector
       assert {:ok, ^snapshot} = ModelMapping.validate_snapshot(snapshot)
     end
   end

@@ -253,11 +253,9 @@ defmodule Kodo.Agent.ModelMapping do
   end
 
   defp model_route_and_selector(%{"model" => model, "provider" => provider}) do
-    case String.split(model, [":", "@"], parts: 2) do
-      [^provider, selector] -> {provider, selector}
-      [selector, ^provider] -> {provider, selector}
-      [_other, selector] -> {provider, selector}
-      [selector] -> {provider, selector}
+    case LLMDB.Spec.parse_spec(model) do
+      {:ok, {parsed_provider, selector}} -> {Atom.to_string(parsed_provider), selector}
+      {:error, _reason} -> {provider, model}
     end
   end
 

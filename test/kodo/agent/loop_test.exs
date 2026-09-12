@@ -310,8 +310,13 @@ defmodule Kodo.Agent.LoopTest do
     |> Ecto.Changeset.change(model: "gpt-4o-mini@openai")
     |> Repo.update!()
 
+    legacy_payload =
+      created.payload
+      |> Map.delete("model_mapping")
+      |> Map.put("model", "gpt-4o-mini@openai")
+
     created
-    |> Ecto.Changeset.change(payload: Map.delete(created.payload, "model_mapping"))
+    |> Ecto.Changeset.change(payload: legacy_payload)
     |> Repo.update!()
 
     {:ok, _event} =
