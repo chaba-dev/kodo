@@ -51,8 +51,8 @@ defmodule Kodo.Integrations.ReqRefreshClient do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         decode_success(body)
 
-      {:ok, %Req.Response{status: 400, body: body}} ->
-        if invalid_grant?(body),
+      {:ok, %Req.Response{status: status, body: body}} when status in [400, 401] ->
+        if permanent_refresh_failure?(status, body),
           do: {:error, :invalid_grant},
           else: {:error, :provider_unavailable}
 
@@ -77,10 +77,19 @@ defmodule Kodo.Integrations.ReqRefreshClient do
     end
   end
 
-  defp invalid_grant?(body) do
+  defp permanent_refresh_failure?(401, _body), do: true
+
+  defp permanent_refresh_failure?(400, body) do
     case decode_json(body) do
-      {:ok, %{"error" => "invalid_grant"}} -> true
-      _other -> false
+      {:ok, %{"error" => "invalid_grant"}} ->
+        true
+
+      {:ok, %{"code" => code}}
+      when code in ~w(refresh_token_expired refresh_token_reused refresh_token_invalidated) ->
+        true
+
+      _other ->
+        false
     end
   end
 

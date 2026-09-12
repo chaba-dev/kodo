@@ -29,13 +29,25 @@ defmodule Kodo.Integrations.ReqRefreshClientTest do
              ReqRefreshClient.refresh("refresh-secret", plug: plug)
   end
 
-  test "classifies only an exact invalid_grant response as invalid credentials" do
+  test "classifies the pinned permanent refresh failures as invalid credentials" do
     invalid_grant = fn conn ->
       conn |> Plug.Conn.put_status(400) |> Req.Test.json(%{"error" => "invalid_grant"})
     end
 
     assert {:error, :invalid_grant} =
              ReqRefreshClient.refresh("refresh-secret", plug: invalid_grant)
+
+    for {status, body} <- [
+          {401, %{"code" => "token_expired"}},
+          {400, %{"code" => "refresh_token_expired"}},
+          {400, %{"code" => "refresh_token_reused"}},
+          {400, %{"code" => "refresh_token_invalidated"}}
+        ] do
+      plug = fn conn -> conn |> Plug.Conn.put_status(status) |> Req.Test.json(body) end
+
+      assert {:error, :invalid_grant} =
+               ReqRefreshClient.refresh("refresh-secret", plug: plug)
+    end
 
     for body <- [%{"error" => "temporarily_unavailable"}, %{"message" => "invalid_grant"}] do
       plug = fn conn -> conn |> Plug.Conn.put_status(400) |> Req.Test.json(body) end
