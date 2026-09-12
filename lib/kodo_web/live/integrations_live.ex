@@ -64,6 +64,7 @@ defmodule KodoWeb.IntegrationsLive do
       |> assign(:api_key_form, empty_form())
       |> assign(:validation_tasks, %{})
       |> assign(:device_authorization_tasks, %{})
+      |> assign(:device_authorization_retries, %{})
       |> load_integrations()
 
     socket =
@@ -371,10 +372,13 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   def handle_info(
-        {:device_authorization_changed, _integration_id, _attempt_generation, state, _error},
+        {:device_authorization_changed, integration_id, attempt_generation, state, _error},
         socket
       ) do
-    socket = load_integrations(socket)
+    socket =
+      socket
+      |> maybe_clear_device_authorization_retry(integration_id, attempt_generation, state)
+      |> load_integrations()
 
     if state == "failed" do
       {:noreply, put_flash(socket, :error, "Authorization failed. Try again.")}
@@ -383,8 +387,19 @@ defmodule KodoWeb.IntegrationsLive do
     end
   end
 
-  def handle_info({:retry_device_authorization, integration_id}, socket) do
-    {:noreply, resume_device_authorization(socket, integration_id, true)}
+  def handle_info({:retry_device_authorization, integration_id, attempt_generation}, socket) do
+    socket =
+      socket
+      |> clear_device_authorization_retry(integration_id, attempt_generation)
+      |> load_integrations()
+
+    case socket.assigns.device_authorizations[integration_id] do
+      %{attempt_generation: ^attempt_generation} ->
+        {:noreply, resume_device_authorization(socket, integration_id, attempt_generation, true)}
+
+      _terminal_or_replaced ->
+        {:noreply, socket}
+    end
   end
 
   defp save_api_key(
@@ -514,28 +529,59 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   defp resume_device_authorizations(socket) do
-    Enum.reduce(socket.assigns.device_authorizations, socket, fn {integration_id, _attempt},
-                                                                 acc ->
-      resume_device_authorization(acc, integration_id, true)
+    Enum.reduce(socket.assigns.device_authorizations, socket, fn {integration_id, attempt}, acc ->
+      resume_device_authorization(acc, integration_id, attempt.attempt_generation, true)
     end)
   end
 
-  defp resume_device_authorization(socket, integration_id, schedule_retry?) do
+  defp resume_device_authorization(socket, integration_id, attempt_generation, schedule_retry?) do
     case DeviceAuthorization.resume(socket.assigns.current_scope, integration_id) do
       {:ok, task} ->
-        track_device_authorization_task(socket, task, integration_id)
+        socket
+        |> clear_device_authorization_retry(integration_id, attempt_generation)
+        |> track_device_authorization_task(task, integration_id)
 
       {:error, :device_authorization_not_claimable} when schedule_retry? ->
-        Process.send_after(
-          self(),
-          {:retry_device_authorization, integration_id},
-          @device_authorization_retry_ms
-        )
-
-        socket
+        schedule_device_authorization_retry(socket, integration_id, attempt_generation)
 
       {:error, _reason} ->
         socket
+    end
+  end
+
+  defp schedule_device_authorization_retry(socket, integration_id, attempt_generation) do
+    key = {integration_id, attempt_generation}
+
+    if Map.has_key?(socket.assigns.device_authorization_retries, key) do
+      socket
+    else
+      timer =
+        Process.send_after(
+          self(),
+          {:retry_device_authorization, integration_id, attempt_generation},
+          @device_authorization_retry_ms
+        )
+
+      update(socket, :device_authorization_retries, &Map.put(&1, key, timer))
+    end
+  end
+
+  defp maybe_clear_device_authorization_retry(socket, _integration_id, _generation, "active"),
+    do: socket
+
+  defp maybe_clear_device_authorization_retry(socket, integration_id, generation, _state),
+    do: clear_device_authorization_retry(socket, integration_id, generation)
+
+  defp clear_device_authorization_retry(socket, integration_id, attempt_generation) do
+    key = {integration_id, attempt_generation}
+
+    case Map.pop(socket.assigns.device_authorization_retries, key) do
+      {nil, retries} ->
+        assign(socket, :device_authorization_retries, retries)
+
+      {timer, retries} ->
+        Process.cancel_timer(timer)
+        assign(socket, :device_authorization_retries, retries)
     end
   end
 

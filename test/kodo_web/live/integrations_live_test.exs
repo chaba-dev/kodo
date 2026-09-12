@@ -354,6 +354,50 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert Repo.reload!(attempt).state == "cancelled"
   end
 
+  test "stops remount retries when the exact authorization attempt becomes terminal", %{
+    conn: conn,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Contended subscription"
+             )
+
+    assert {:ok, attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "CONTENDED"},
+               30_000
+             )
+
+    assert {:ok, {_claim, _payload}} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    retry_key = {integration.id, attempt.attempt_generation}
+    assert Map.has_key?(live_assign(view, :device_authorization_retries), retry_key)
+
+    assert {:ok, _cancelled} =
+             Integrations.cancel_device_authorization(
+               scope,
+               attempt.id,
+               attempt.attempt_generation
+             )
+
+    _ = :sys.get_state(view.pid)
+    assert live_assign(view, :device_authorization_retries) == %{}
+
+    send(view.pid, {:retry_device_authorization, integration.id, attempt.attempt_generation})
+    _ = :sys.get_state(view.pid)
+    assert live_assign(view, :device_authorization_retries) == %{}
+  end
+
   test "shows completion and reauthorization after the device flow succeeds", %{
     conn: conn,
     scope: scope
