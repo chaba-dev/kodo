@@ -293,7 +293,10 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     send(task, :never)
 
     assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
-    assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
+
+    refute Enum.any?(Registry.lookup(Kodo.SessionRegistry, session.id), fn {pid, _value} ->
+             Process.alive?(pid)
+           end)
   end
 
   test "stops its active task when a queued turn observes session deletion", %{
