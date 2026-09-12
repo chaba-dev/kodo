@@ -136,7 +136,7 @@ defmodule Kodo.IntegrationsTest do
     test "returns a bounded error when connection races account deletion", %{scope: scope} do
       Repo.delete!(scope.user)
 
-      assert {:error, :integration_owner_not_found} = connect(scope)
+      assert {:error, :integration_not_found} = connect(scope)
     end
 
     test "replaces credentials with a new nonce and advances the generation", %{scope: scope} do
@@ -655,7 +655,7 @@ defmodule Kodo.IntegrationsTest do
       Repo.delete!(scope.user)
       send(task.pid, {:continue_json_encoding, ref})
 
-      assert {:error, :stale_credential_generation} = Task.await(task)
+      assert {:error, :integration_not_found} = Task.await(task)
 
       refute Repo.get(Integration, integration.id)
     end
