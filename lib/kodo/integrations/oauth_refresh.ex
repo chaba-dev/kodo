@@ -2,7 +2,6 @@ defmodule Kodo.Integrations.OAuthRefresh do
   @moduledoc "Runs generation-fenced, just-in-time OAuth refreshes as finite tasks."
 
   alias Kodo.Accounts.Scope
-  alias Kodo.Cluster.InstanceManager
   alias Kodo.Integrations
   alias Kodo.Integrations.CredentialEncryption
   alias Kodo.Integrations.Integration
@@ -24,7 +23,7 @@ defmodule Kodo.Integrations.OAuthRefresh do
   end
 
   defp refresh(scope, integration, opts) do
-    owner_id = Keyword.get_lazy(opts, :claim_owner_id, &InstanceManager.current_boot_id/0)
+    owner_id = Keyword.get_lazy(opts, :claim_owner_id, &Ecto.UUID.generate/0)
 
     deadline =
       System.monotonic_time(:millisecond) + Keyword.get(opts, :wait_timeout, @wait_timeout_ms)
@@ -51,6 +50,9 @@ defmodule Kodo.Integrations.OAuthRefresh do
 
       {:error, :stale_credential_generation} ->
         current_result(scope, integration)
+
+      {:error, :integration_reauthorization_required} ->
+        {:error, :integration_reauthorization_required}
 
       {:error, _reason} ->
         {:error, :provider_unavailable}
@@ -84,7 +86,10 @@ defmodule Kodo.Integrations.OAuthRefresh do
         {:error, :provider_unavailable}
 
       nil ->
-        _result = Task.shutdown(task, :brutal_kill)
+        # The caller is bounded, but an admitted worker must retain ownership of a rotated-token
+        # response long enough to persist it. Ignoring detaches the eventual task reply without
+        # cancelling the finite supervised operation.
+        _result = Task.ignore(task)
         {:error, :provider_unavailable}
     end
   end
@@ -93,7 +98,8 @@ defmodule Kodo.Integrations.OAuthRefresh do
     client = Keyword.get(opts, :client, configured_client())
     client_options = Keyword.get(opts, :client_options, [])
 
-    with {:ok, current} <- CredentialEncryption.decrypt(claim),
+    with {:ok, admitted} <- Integrations.admit_refresh_claim(scope, claim),
+         {:ok, current} <- CredentialEncryption.decrypt(admitted),
          {:ok, refresh_token} <- fetch_refresh_token(current),
          {:ok, response} <- safe_refresh(client, refresh_token, client_options),
          {:ok, normalized} <- RefreshTokens.normalize(response, current),
@@ -117,6 +123,9 @@ defmodule Kodo.Integrations.OAuthRefresh do
       {:error, :stale_credential_generation} ->
         current_result(scope, claim)
 
+      {:error, :stale_refresh_claim} ->
+        current_result(scope, claim)
+
       {:error, _reason} ->
         _result = Integrations.fail_refresh(scope, claim)
         {:error, :provider_unavailable}
@@ -134,7 +143,7 @@ defmodule Kodo.Integrations.OAuthRefresh do
   defp current_result(scope, integration) do
     case Integrations.get_integration(scope, integration.id) do
       {:ok, %{connection_status: "connected"} = current}
-      when current.credential_generation > integration.credential_generation ->
+      when current.refresh_source_generation == integration.credential_generation ->
         {:ok, current}
 
       {:ok, %{connection_status: "reauthorization_required"}} ->

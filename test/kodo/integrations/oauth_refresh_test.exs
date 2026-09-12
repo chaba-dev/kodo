@@ -164,7 +164,44 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
     assert persisted["access_token"] == second_tokens["access_token"]
   end
 
-  test "user deletion cascades OAuth state and fences an in-flight refresh", context do
+  test "persists a rotated response after its caller stops waiting", context do
+    owner = self()
+
+    blocked = fn _refresh_token ->
+      send(owner, {:rotated_response_ready, self()})
+
+      receive do
+        :persist_rotated_response -> {:ok, rotated_tokens("account", "detached")}
+      end
+    end
+
+    client = fake_client([blocked])
+
+    caller =
+      Task.async(fn ->
+        OAuthRefresh.ensure_fresh(context.scope, context.integration,
+          client: FakeRefreshClient,
+          client_options: [agent: client],
+          supervisor: context.supervisor,
+          claim_owner_id: Ecto.UUID.generate(),
+          wait_timeout: 1
+        )
+      end)
+
+    assert_receive {:rotated_response_ready, worker}
+    worker_ref = Process.monitor(worker)
+    assert {:error, :provider_unavailable} = Task.await(caller)
+    send(worker, :persist_rotated_response)
+    assert_receive {:DOWN, ^worker_ref, :process, ^worker, :normal}
+
+    refreshed = Repo.reload!(context.integration)
+    assert refreshed.refresh_source_generation == context.integration.credential_generation
+    assert refreshed.credential_generation == context.integration.credential_generation + 1
+    assert {:ok, credentials} = CredentialEncryption.decrypt(refreshed)
+    assert credentials["refresh_token"] == "detached-refresh"
+  end
+
+  test "an active reauthorization attempt blocks refresh without using its credential", context do
     assert {:ok, _attempt} =
              Integrations.begin_device_authorization(
                context.scope,
@@ -174,7 +211,25 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
                0
              )
 
-    integration = Repo.reload!(context.integration)
+    reauthorizing = Repo.reload!(context.integration)
+    client = fake_client([])
+
+    assert {:error, :integration_reauthorization_required} =
+             OAuthRefresh.ensure_fresh(context.scope, reauthorizing,
+               force: true,
+               client: FakeRefreshClient,
+               client_options: [agent: client],
+               supervisor: context.supervisor,
+               claim_owner_id: Ecto.UUID.generate()
+             )
+
+    assert Agent.get(client, & &1.refresh_tokens) == []
+
+    assert Repo.reload!(reauthorizing).credential_generation ==
+             reauthorizing.credential_generation
+  end
+
+  test "user deletion cascades OAuth state and fences an in-flight refresh", context do
     owner = self()
 
     blocked = fn _refresh_token ->
@@ -186,10 +241,20 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
     end
 
     client = fake_client([blocked])
-    refresh = Task.async(fn -> refresh(%{context | integration: integration}, client) end)
+    refresh = Task.async(fn -> refresh(context, client) end)
     assert_receive {:deletion_refresh_started, worker}
 
-    assert Repo.reload!(integration).refresh_claim_owner_id
+    assert Repo.reload!(context.integration).refresh_claim_owner_id
+
+    assert {:ok, _attempt} =
+             Integrations.begin_device_authorization(
+               context.scope,
+               context.integration.id,
+               context.integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "CODE"},
+               0
+             )
+
     Repo.delete!(context.scope.user)
     refute Repo.exists?(Integration)
     refute Repo.exists?(DeviceAuthorizationAttempt)

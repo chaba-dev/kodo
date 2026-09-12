@@ -428,7 +428,7 @@ defmodule Kodo.Integrations do
       id,
       generation,
       credentials,
-      opts,
+      Keyword.put(opts, :refresh_source_generation, generation),
       ~w(connected reauthorization_required),
       "oauth",
       "refresh_succeeded"
@@ -442,11 +442,9 @@ defmodule Kodo.Integrations do
       when is_integer(generation) and generation >= 0 do
     with {:ok, id} <- cast_uuid(id),
          {:ok, claim_owner_id} <- cast_uuid(claim_owner_id) do
-      lease_expires_at =
-        DateTime.add(database_now(), @refresh_claim_lease_ms, :millisecond)
-
       query =
         from integration in Integration,
+          as: :integration,
           where:
             integration.id == ^id and integration.user_id == ^user.id and
               integration.provider == "openai_codex" and
@@ -454,27 +452,58 @@ defmodule Kodo.Integrations do
               integration.connection_status == "connected" and
               integration.credential_generation == ^generation and
               (is_nil(integration.refresh_claim_owner_id) or
-                 integration.refresh_lease_expires_at <= fragment("clock_timestamp()"))
+                 integration.refresh_lease_expires_at <= fragment("clock_timestamp()")) and
+              not exists(
+                from attempt in DeviceAuthorizationAttempt,
+                  where:
+                    attempt.integration_id == parent_as(:integration).id and
+                      attempt.state == "active"
+              ),
+          update: [
+            set: [
+              refresh_claim_owner_id: ^claim_owner_id,
+              refresh_claim_generation: ^generation,
+              refresh_lease_expires_at:
+                fragment(
+                  "clock_timestamp() + (? * interval '1 millisecond')",
+                  ^@refresh_claim_lease_ms
+                ),
+              updated_at: fragment("clock_timestamp()")
+            ],
+            inc: [refresh_claim_epoch: 1]
+          ],
+          select: integration
 
-      updates = [
-        set: [
-          refresh_claim_owner_id: claim_owner_id,
-          refresh_claim_generation: generation,
-          refresh_lease_expires_at: lease_expires_at,
-          updated_at: now()
-        ],
-        inc: [refresh_claim_epoch: 1]
-      ]
-
-      case Repo.update_all(query, updates) do
-        {1, nil} -> {:ok, Repo.get_by!(Integration, id: id, user_id: user.id)}
-        {0, nil} -> refresh_claim_conflict(user.id, id, generation)
+      case Repo.update_all(query, []) do
+        {1, [claim]} -> {:ok, claim}
+        {0, []} -> refresh_claim_conflict(user.id, id, generation)
       end
     end
   end
 
   def claim_refresh(%Scope{}, _id, _generation, _claim_owner_id),
     do: {:error, :stale_credential_generation}
+
+  @doc "Revalidates an exact refresh claim immediately before credential use."
+  def admit_refresh_claim(%Scope{user: user}, %Integration{} = claim) do
+    active_attempt =
+      from attempt in DeviceAuthorizationAttempt,
+        where: attempt.integration_id == ^claim.id and attempt.state == "active"
+
+    query =
+      exact_refresh_claim_query(user.id, claim)
+      |> where(
+        [integration],
+        integration.connection_status == "connected" and
+          integration.refresh_lease_expires_at > fragment("clock_timestamp()") and
+          not exists(subquery(active_attempt))
+      )
+
+    case Repo.one(query) do
+      %Integration{} = admitted -> {:ok, admitted}
+      nil -> {:error, :stale_refresh_claim}
+    end
+  end
 
   @doc "Releases only the exact refresh claim represented by the supplied snapshot."
   def release_refresh_claim(%Scope{user: user}, %Integration{} = claim) do
@@ -496,6 +525,8 @@ defmodule Kodo.Integrations do
   def require_refresh_reauthorization(%Scope{user: user}, %Integration{} = claim, error_code)
       when error_code in ~w(refresh_invalid_grant refresh_account_identity_mismatch) do
     Repo.transaction(fn ->
+      lock_user!(user.id)
+
       changes = [
         connection_status: "reauthorization_required",
         active: false,
@@ -526,6 +557,8 @@ defmodule Kodo.Integrations do
 
   def fail_refresh(%Scope{user: user}, %Integration{} = claim) do
     Repo.transaction(fn ->
+      lock_user!(user.id)
+
       case Repo.update_all(exact_refresh_claim_query(user.id, claim),
              set: [
                refresh_claim_owner_id: nil,
@@ -1249,6 +1282,7 @@ defmodule Kodo.Integrations do
           connection_status: "connected",
           validation_status: "unverified",
           credential_generation: generation + 1,
+          refresh_source_generation: opts[:refresh_source_generation],
           expires_at: opts[:expires_at],
           validated_at: nil,
           refreshed_at: opts[:refreshed_at],
@@ -1276,15 +1310,26 @@ defmodule Kodo.Integrations do
   defp require_connected(%Integration{}), do: {:error, :integration_not_connected}
 
   defp refresh_claim_conflict(user_id, id, generation) do
-    case Repo.get_by(Integration, id: id, user_id: user_id) do
-      %Integration{credential_generation: ^generation, refresh_claim_owner_id: owner}
+    active_authorization? =
+      Repo.exists?(
+        from attempt in DeviceAuthorizationAttempt,
+          where:
+            attempt.integration_id == ^id and attempt.user_id == ^user_id and
+              attempt.state == "active"
+      )
+
+    case {Repo.get_by(Integration, id: id, user_id: user_id), active_authorization?} do
+      {%Integration{credential_generation: ^generation}, true} ->
+        {:error, :integration_reauthorization_required}
+
+      {%Integration{credential_generation: ^generation, refresh_claim_owner_id: owner}, false}
       when not is_nil(owner) ->
         {:error, :refresh_in_progress}
 
-      %Integration{} ->
+      {%Integration{}, _active?} ->
         {:error, :stale_credential_generation}
 
-      nil ->
+      {nil, _active?} ->
         {:error, :integration_not_found}
     end
   end
@@ -1428,6 +1473,10 @@ defmodule Kodo.Integrations do
       %Integration{provider: provider} -> lock_provider_identity(user_id, provider)
       nil -> :ok
     end
+  end
+
+  defp maybe_lock_transition(user_id, _integration_id, "refresh_succeeded") do
+    lock_user!(user_id)
   end
 
   defp maybe_lock_transition(_user_id, _integration_id, _event_type), do: :ok
