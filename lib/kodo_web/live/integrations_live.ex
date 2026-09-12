@@ -308,8 +308,9 @@ defmodule KodoWeb.IntegrationsLive do
   def handle_event("disconnect", %{"modal-token" => modal_token}, socket) do
     with true <- socket.assigns.action == "disconnect",
          true <- modal_token == socket.assigns.modal_token,
-         %{id: id, credential_generation: generation, connection_status: "connected"} <-
+         %{id: id, credential_generation: generation, connection_status: connection_status} <-
            socket.assigns.action_target,
+         true <- connection_status in ~w(connected reauthorization_required),
          {:ok, integration} <-
            Integrations.disconnect(socket.assigns.current_scope, id, generation) do
       {:noreply,
@@ -601,8 +602,12 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp action_target(
          "reauthorize",
-         %{provider: "openai_codex", connection_status: "connected"} = integration
-       ),
+         %{
+           provider: "openai_codex",
+           connection_status: connection_status
+         } = integration
+       )
+       when connection_status in ~w(connected reauthorization_required),
        do: {:ok, target_metadata(integration)}
 
   defp action_target(
@@ -611,8 +616,9 @@ defmodule KodoWeb.IntegrationsLive do
        ),
        do: {:ok, target_metadata(integration)}
 
-  defp action_target("disconnect", %{connection_status: "connected"} = integration),
-    do: {:ok, target_metadata(integration)}
+  defp action_target("disconnect", %{connection_status: connection_status} = integration)
+       when connection_status in ~w(connected reauthorization_required),
+       do: {:ok, target_metadata(integration)}
 
   defp action_target(_action, _integration), do: :error
 
@@ -929,7 +935,7 @@ defmodule KodoWeb.IntegrationsLive do
 
               <div class="flex shrink-0 flex-wrap gap-2 self-start">
                 <.link
-                  :if={!integration_connected?(integration)}
+                  :if={integration.connection_status == "disconnected"}
                   id={dom_id(integration, "reconnect")}
                   patch={action_path(integration, "connect")}
                   phx-click={JS.push_focus()}
@@ -986,7 +992,10 @@ defmodule KodoWeb.IntegrationsLive do
                   Replace key
                 </.link>
                 <.link
-                  :if={integration_connected?(integration) and integration.provider == "openai_codex"}
+                  :if={
+                    integration.provider == "openai_codex" and
+                      integration.connection_status in ~w(connected reauthorization_required)
+                  }
                   id={dom_id(integration, "reauthorize")}
                   patch={action_path(integration, "reauthorize")}
                   phx-click={JS.push_focus()}
@@ -995,7 +1004,7 @@ defmodule KodoWeb.IntegrationsLive do
                   Reauthorize
                 </.link>
                 <.link
-                  :if={integration_connected?(integration)}
+                  :if={integration.connection_status in ~w(connected reauthorization_required)}
                   id={dom_id(integration, "disconnect")}
                   patch={action_path(integration, "disconnect")}
                   phx-click={JS.push_focus()}

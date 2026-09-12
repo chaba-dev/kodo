@@ -856,6 +856,51 @@ defmodule Kodo.IntegrationsTest do
                Repo.reload!(valid)
     end
 
+    test "a later authorization completion preserves its inactive account decision", %{
+      scope: scope
+    } do
+      first = oauth_integration(scope)
+
+      assert {:ok, active} =
+               Integrations.oauth_succeeded(scope, first.id, 0, %{"access_token" => "first"})
+
+      second = oauth_integration(scope)
+
+      assert {:ok, _attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 second.id,
+                 second.credential_generation,
+                 %{"device_auth_id" => "second", "user_code" => "SECOND"},
+                 0
+               )
+
+      assert {:ok, {claim, _payload}} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 second.id,
+                 Ecto.UUID.generate()
+               )
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(scope, active.id, active.credential_generation)
+
+      assert {:ok, completed} =
+               Integrations.complete_device_authorization(
+                 scope,
+                 claim,
+                 %{
+                   "access_token" => "second-access",
+                   "refresh_token" => "second-refresh",
+                   "id_token" => "second-id",
+                   "account_id" => "second-account"
+                 },
+                 DateTime.add(DateTime.utc_now(), 3_600, :second)
+               )
+
+      refute completed.active
+    end
+
     test "attempt operations suppress identifiers and ciphertext from query observability", %{
       scope: scope
     } do
@@ -980,6 +1025,15 @@ defmodule Kodo.IntegrationsTest do
 
       assert {:error, :device_authorization_not_claimable} =
                Integrations.claim_device_authorization(scope, integration.id, second_owner)
+
+      assert {:error, :device_authorization_not_claimable} =
+               Integrations.claim_device_authorization(scope, integration.id, first_owner)
+
+      Repo.update!(
+        change(first_claim,
+          claim_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)
+        )
+      )
 
       assert {:ok, {replacement_claim, ^payload}} =
                Integrations.claim_device_authorization(scope, integration.id, first_owner)

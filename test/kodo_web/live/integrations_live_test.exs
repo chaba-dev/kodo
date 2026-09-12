@@ -392,6 +392,37 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert has_element?(view, "#{status(integration)} dd.text-green-700", "Valid")
   end
 
+  test "offers recovery and disconnect actions when ChatGPT authorization is required", %{
+    conn: conn,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Expired subscription"
+             )
+
+    assert {:ok, connected} =
+             Integrations.oauth_succeeded(scope, integration.id, 0, %{
+               "access_token" => "access",
+               "refresh_token" => "refresh"
+             })
+
+    assert {:ok, required} =
+             Integrations.refresh_invalid_grant(
+               scope,
+               connected.id,
+               connected.credential_generation
+             )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    assert has_element?(view, "#integration-#{required.id}-reauthorize", "Reauthorize")
+    assert has_element?(view, "#integration-#{required.id}-disconnect", "Disconnect")
+    refute has_element?(view, "#integration-#{required.id}-reconnect")
+
+    view |> element("#integration-#{required.id}-reauthorize") |> render_click()
+    assert has_element?(view, "#device-authorization-form")
+  end
+
   test "adds multiple accounts for one provider without exposing secrets", %{
     conn: conn,
     scope: scope

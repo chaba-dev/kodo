@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict cMSeT1HADB9gn2fd6oRSfRA6k31lS6KseACcNAs16bTriITaRrwptynxWKofvCj
+\restrict zlmayUQMxfTEc8sR5OS893sgwJPRmRbQbN8OxqjM51G1hsJJMUZbtQRN809vFYQ
 
 -- Dumped from database version 15.19 (Debian 15.19-0+deb12u1)
 -- Dumped by pg_dump version 15.19 (Debian 15.19-0+deb12u1)
@@ -135,6 +135,7 @@ CREATE TABLE public.device_authorization_attempts (
     terminal_error_code character varying(64),
     inserted_at timestamp without time zone NOT NULL,
     updated_at timestamp without time zone NOT NULL,
+    activate_on_completion boolean DEFAULT false NOT NULL,
     CONSTRAINT device_attempts_claim_epoch_valid CHECK ((claim_epoch >= 0)),
     CONSTRAINT device_attempts_claim_valid CHECK (((((state)::text = 'active'::text) AND (terminal_error_code IS NULL) AND (((claim_owner_id IS NULL) AND (claim_lease_expires_at IS NULL)) OR ((claim_owner_id IS NOT NULL) AND (claim_lease_expires_at IS NOT NULL)))) OR (((state)::text <> 'active'::text) AND (claim_owner_id IS NULL) AND (claim_lease_expires_at IS NULL)))),
     CONSTRAINT device_attempts_generations_valid CHECK (((attempt_generation > 0) AND (expected_integration_generation >= 0))),
@@ -782,7 +783,7 @@ ALTER TABLE ONLY public.users_tokens
 -- PostgreSQL database dump complete
 --
 
-\unrestrict cMSeT1HADB9gn2fd6oRSfRA6k31lS6KseACcNAs16bTriITaRrwptynxWKofvCj
+\unrestrict zlmayUQMxfTEc8sR5OS893sgwJPRmRbQbN8OxqjM51G1hsJJMUZbtQRN809vFYQ
 
 INSERT INTO public."schema_migrations" (version) VALUES (20260807073017);
 INSERT INTO public."schema_migrations" (version) VALUES (20260808062115);
@@ -803,3 +804,4 @@ INSERT INTO public."schema_migrations" (version) VALUES (20260907083117);
 INSERT INTO public."schema_migrations" (version) VALUES (20260907161929);
 INSERT INTO public."schema_migrations" (version) VALUES (20260910044734);
 INSERT INTO public."schema_migrations" (version) VALUES (20260912195208);
+INSERT INTO public."schema_migrations" (version) VALUES (20260912200217);

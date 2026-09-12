@@ -932,7 +932,13 @@ defmodule Kodo.Integrations do
             })
           )
           |> Repo.update!()
-          |> maybe_activate_completed_oauth(user_id)
+
+        integration =
+          if attempt.activate_on_completion do
+            integration |> change(active: true, updated_at: timestamp) |> Repo.update!()
+          else
+            integration
+          end
 
         attempt
         |> change(terminal_attempt_changes("completed", nil, timestamp))
@@ -980,14 +986,6 @@ defmodule Kodo.Integrations do
     case Repo.one(query, @secret_repo_options) do
       %DeviceAuthorizationAttempt{} = attempt -> attempt
       nil -> Repo.rollback(:stale_device_authorization_claim)
-    end
-  end
-
-  defp maybe_activate_completed_oauth(integration, user_id) do
-    if integration.active or active_provider_account_exists?(user_id, integration.provider) do
-      integration
-    else
-      integration |> change(active: true, updated_at: now()) |> Repo.update!()
     end
   end
 
@@ -1060,6 +1058,9 @@ defmodule Kodo.Integrations do
     timestamp = database_now()
     expected_integration_generation = integration.credential_generation + 1
 
+    activate_on_completion =
+      integration.active or !active_provider_account_exists?(user_id, integration.provider)
+
     supersede_active_device_authorization(integration.id, timestamp)
 
     integration =
@@ -1079,7 +1080,8 @@ defmodule Kodo.Integrations do
       integration_id: integration.id,
       provider: "openai_codex",
       attempt_generation: next_device_authorization_generation(integration.id),
-      expected_integration_generation: expected_integration_generation
+      expected_integration_generation: expected_integration_generation,
+      activate_on_completion: activate_on_completion
     }
 
     case DeviceAuthorizationEncryption.encrypt(attempt, payload) do
@@ -1094,6 +1096,7 @@ defmodule Kodo.Integrations do
             provider: "openai_codex",
             attempt_generation: attempt.attempt_generation,
             expected_integration_generation: expected_integration_generation,
+            activate_on_completion: activate_on_completion,
             provider_deadline: deadline,
             polling_interval_ms: polling_interval_ms,
             next_poll_at: next_poll_at
