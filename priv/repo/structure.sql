@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict zlmayUQMxfTEc8sR5OS893sgwJPRmRbQbN8OxqjM51G1hsJJMUZbtQRN809vFYQ
+\restrict bhNtvgo2sLbQAwP0xzeErVvadl8Hb8oQ9uHPQt7qDfIjayod6OKCW93lzqbuYlP
 
 -- Dumped from database version 15.19 (Debian 15.19-0+deb12u1)
 -- Dumped by pg_dump version 15.19 (Debian 15.19-0+deb12u1)
@@ -189,6 +189,7 @@ CREATE TABLE public.provider_integrations (
     refresh_claim_generation bigint,
     refresh_lease_expires_at timestamp without time zone,
     refresh_source_generation bigint,
+    refresh_restore_active boolean DEFAULT false NOT NULL,
     CONSTRAINT provider_integrations_active_connected CHECK (((NOT active) OR ((connection_status)::text = 'connected'::text))),
     CONSTRAINT provider_integrations_authentication_type_valid CHECK (((authentication_type)::text = ANY ((ARRAY['api_key'::character varying, 'oauth'::character varying])::text[]))),
     CONSTRAINT provider_integrations_credential_generation_valid CHECK ((credential_generation >= 0)),
@@ -783,7 +784,7 @@ ALTER TABLE ONLY public.users_tokens
 -- PostgreSQL database dump complete
 --
 
-\unrestrict zlmayUQMxfTEc8sR5OS893sgwJPRmRbQbN8OxqjM51G1hsJJMUZbtQRN809vFYQ
+\unrestrict bhNtvgo2sLbQAwP0xzeErVvadl8Hb8oQ9uHPQt7qDfIjayod6OKCW93lzqbuYlP
 
 INSERT INTO public."schema_migrations" (version) VALUES (20260807073017);
 INSERT INTO public."schema_migrations" (version) VALUES (20260808062115);
@@ -805,3 +806,4 @@ INSERT INTO public."schema_migrations" (version) VALUES (20260907161929);
 INSERT INTO public."schema_migrations" (version) VALUES (20260910044734);
 INSERT INTO public."schema_migrations" (version) VALUES (20260912195208);
 INSERT INTO public."schema_migrations" (version) VALUES (20260912200217);
+INSERT INTO public."schema_migrations" (version) VALUES (20260912213842);

@@ -1441,6 +1441,68 @@ defmodule Kodo.IntegrationsTest do
       assert Repo.reload!(admission).state == "completed"
     end
 
+    test "device completion does not undo a later decision to leave no active account", %{
+      scope: scope
+    } do
+      integration = oauth_integration(scope)
+
+      assert {:ok, integration} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
+                 "access_token" => "old-access",
+                 "refresh_token" => "old-refresh",
+                 "account_id" => "old-account"
+               })
+
+      assert {:ok, _attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 0
+               )
+
+      assert {:ok, {claim, _payload}} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 integration.id,
+                 Ecto.UUID.generate()
+               )
+
+      sibling = oauth_integration(scope)
+
+      assert {:ok, sibling} =
+               Integrations.oauth_succeeded(scope, sibling.id, 0, %{
+                 "access_token" => "sibling-access",
+                 "refresh_token" => "sibling-refresh",
+                 "account_id" => "sibling-account"
+               })
+
+      assert {:ok, sibling} =
+               Integrations.activate(scope, sibling.id, sibling.credential_generation)
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(scope, sibling.id, sibling.credential_generation)
+
+      assert {:ok, completed} =
+               Integrations.complete_device_authorization(
+                 scope,
+                 Repo.reload!(claim),
+                 %{
+                   "access_token" => "new-access",
+                   "refresh_token" => "new-refresh",
+                   "id_token" => "new-identity",
+                   "account_id" => "old-account"
+                 },
+                 DateTime.add(DateTime.utc_now(), 3_600, :second)
+               )
+
+      refute completed.active
+
+      assert {:error, :integration_not_found} =
+               Integrations.get_active_integration_by_provider(scope, "openai_codex")
+    end
+
     test "cancellation is owned and generation fenced and removes the one-time code", %{
       scope: scope
     } do

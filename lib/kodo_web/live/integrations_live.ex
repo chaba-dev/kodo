@@ -482,6 +482,26 @@ defmodule KodoWeb.IntegrationsLive do
     socket
     |> assign(:integrations, integrations)
     |> assign(:device_authorizations, device_authorizations)
+    |> reconcile_device_authorization_retries()
+  end
+
+  defp reconcile_device_authorization_retries(socket) do
+    active_keys =
+      MapSet.new(socket.assigns.device_authorizations, fn {integration_id, attempt} ->
+        {integration_id, attempt.attempt_generation}
+      end)
+
+    retries =
+      Enum.reduce(socket.assigns.device_authorization_retries, %{}, fn {key, timer}, kept ->
+        if MapSet.member?(active_keys, key) do
+          Map.put(kept, key, timer)
+        else
+          Process.cancel_timer(timer)
+          kept
+        end
+      end)
+
+    assign(socket, :device_authorization_retries, retries)
   end
 
   # Browser-facing state needs lifecycle metadata only. In particular, keeping

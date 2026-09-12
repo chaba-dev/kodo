@@ -112,7 +112,7 @@ defmodule Kodo.Integrations.OAuthRefresh do
              normalized.credentials,
              expires_at: normalized.expires_at,
              refreshed_at: DateTime.utc_now(),
-             restore_active: claim.active
+             restore_active: claim.refresh_restore_active
            ),
          {:ok, usable} <- ensure_persisted_access_is_fresh(scope, integration, opts) do
       {:ok, usable}
@@ -127,6 +127,7 @@ defmodule Kodo.Integrations.OAuthRefresh do
         current_result(scope, claim, opts)
 
       {:error, :stale_refresh_claim} ->
+        _result = Integrations.release_refresh_claim(scope, claim)
         current_result(scope, claim, opts)
 
       {:error, _reason} ->
@@ -139,7 +140,19 @@ defmodule Kodo.Integrations.OAuthRefresh do
     if DateTime.after?(integration.expires_at, DateTime.utc_now()) do
       {:ok, integration}
     else
-      refresh(scope, integration, Keyword.delete(opts, :now))
+      remaining = Keyword.get(opts, :expired_success_retries, 1)
+
+      if remaining > 0 do
+        refresh(
+          scope,
+          integration,
+          opts
+          |> Keyword.delete(:now)
+          |> Keyword.put(:expired_success_retries, remaining - 1)
+        )
+      else
+        {:error, :provider_unavailable}
+      end
     end
   end
 

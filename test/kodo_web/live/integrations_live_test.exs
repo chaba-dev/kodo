@@ -398,6 +398,91 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert live_assign(view, :device_authorization_retries) == %{}
   end
 
+  test "drops an old retry immediately when a new authorization supersedes it", %{
+    conn: conn,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Superseded subscription"
+             )
+
+    assert {:ok, first} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "first", "user_code" => "FIRST"},
+               30_000
+             )
+
+    assert {:ok, {_claim, _payload}} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    retry_key = {integration.id, first.attempt_generation}
+    assert Map.has_key?(live_assign(view, :device_authorization_retries), retry_key)
+
+    assert {:ok, second} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               first.expected_integration_generation,
+               %{"device_auth_id" => "second", "user_code" => "SECOND"},
+               30_000
+             )
+
+    _ = :sys.get_state(view.pid)
+    assert second.attempt_generation > first.attempt_generation
+    assert live_assign(view, :device_authorization_retries) == %{}
+  end
+
+  test "updates an open authorization panel when polling advances to exchange", %{
+    conn: conn,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Advancing subscription"
+             )
+
+    assert {:ok, _attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "ADVANCE"},
+               30_000
+             )
+
+    assert {:ok, {claim, _payload}} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    panel = "#integration-#{integration.id}-device-authorization"
+    assert has_element?(view, panel, "Waiting for OpenAI authorization")
+    assert has_element?(view, "#integration-#{integration.id}-copy-device-code")
+
+    assert {:ok, _exchange} =
+             Integrations.store_device_authorization_exchange(scope, claim, %{
+               "authorization_code" => "code",
+               "code_challenge" => "challenge",
+               "code_verifier" => "verifier"
+             })
+
+    _ = :sys.get_state(view.pid)
+    assert has_element?(view, panel, "Completing OpenAI authorization")
+    refute has_element?(view, "#integration-#{integration.id}-copy-device-code")
+  end
+
   test "shows completion and reauthorization after the device flow succeeds", %{
     conn: conn,
     scope: scope

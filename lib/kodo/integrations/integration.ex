@@ -39,6 +39,7 @@ defmodule Kodo.Integrations.Integration do
     field :refresh_claim_epoch, :integer, default: 0
     field :refresh_claim_generation, :integer
     field :refresh_lease_expires_at, :utc_datetime_usec
+    field :refresh_restore_active, :boolean, default: false
 
     belongs_to :user, Kodo.Accounts.User, type: :id
 
