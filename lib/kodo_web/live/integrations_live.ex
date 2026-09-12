@@ -987,6 +987,12 @@ defmodule KodoWeb.IntegrationsLive do
                           >
                             Copy
                           </button>
+                          <span
+                            id={dom_id(integration, "copy-device-code-status")}
+                            role="status"
+                            aria-live="polite"
+                            class="sr-only"
+                          ></span>
                         </div>
                       </div>
                     </div>
@@ -1311,9 +1317,16 @@ defmodule KodoWeb.IntegrationsLive do
         export default {
           mounted() {
             this.el.addEventListener("click", async () => {
-              await navigator.clipboard.writeText(this.el.dataset.copyText)
-              this.el.textContent = "Copied"
-              window.setTimeout(() => { this.el.textContent = "Copy" }, 1500)
+              const status = this.el.nextElementSibling
+
+              try {
+                await navigator.clipboard.writeText(this.el.dataset.copyText)
+                this.el.textContent = "Copied"
+                status.textContent = "One-time code copied."
+                window.setTimeout(() => { this.el.textContent = "Copy" }, 1500)
+              } catch (_error) {
+                status.textContent = "Could not copy. Select and copy the code manually."
+              }
             })
           }
         }

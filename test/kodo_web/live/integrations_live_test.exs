@@ -160,6 +160,11 @@ defmodule KodoWeb.IntegrationsLiveTest do
              "#integration-#{integration.id}-copy-device-code[data-copy-text='ABCD-EFGH'][aria-label='Copy one-time code']"
            )
 
+    assert has_element?(
+             view,
+             "#integration-#{integration.id}-copy-device-code-status[role='status'][aria-live='polite']"
+           )
+
     refute inspect(:sys.get_state(view.pid)) =~ "private-device"
 
     render_click(view, "cancel_device_authorization", %{
