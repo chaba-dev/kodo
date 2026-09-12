@@ -184,15 +184,13 @@ defmodule Kodo.Agent.Loop do
          {:ok, request} <- resolve_request(context.session_id, review),
          {:ok, admission} <-
            start_review_invocation(
-             context.session_id,
+             context,
              primary_invocation_id,
              review_invocation_id,
-             context.mapping,
              review,
              contract,
              capability_validation,
-             request,
-             context.ownership
+             request
            ),
          {:ok, generated} <-
            Sessions.dispatch_if_owner(context.ownership, fn ->
@@ -239,18 +237,16 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp start_review_invocation(
-         session_id,
+         context,
          primary_invocation_id,
          invocation_id,
-         mapping,
          review,
          contract,
          capability_validation,
-         request,
-         ownership
+         request
        ) do
     case Sessions.append_admitted_model_event(
-           session_id,
+           context.session_id,
            "review_invocation_started",
            %{
              "invocation_id" => invocation_id,
@@ -265,13 +261,13 @@ defmodule Kodo.Agent.Loop do
              "role_contract" => contract.id,
              "toolset_version" => contract.toolset_version,
              "capability_validation" => capability_validation,
-             "model_mapping" => mapping
+             "model_mapping" => context.mapping
            },
            request.model,
            request.credential,
            version: 2,
            parent_id: primary_invocation_id,
-           ownership: ownership
+           ownership: context.ownership
          ) do
       {:ok, {_event, admission}} -> {:ok, admission}
       error -> normalize_admission_error(error, request)
