@@ -6,6 +6,8 @@ defmodule Kodo.SessionsTest do
   alias Kodo.Agent.ModelSettings
   alias Kodo.Cluster.Instances
   alias Kodo.Integrations
+  alias Kodo.Integrations.CredentialEncryption
+  alias Kodo.Integrations.Integration
   alias Kodo.LLM
   alias Kodo.LLM.ProviderError
   alias Kodo.Runners
@@ -365,6 +367,29 @@ defmodule Kodo.SessionsTest do
     assert Enum.count(Sessions.events_after(session.id), &(&1.type == "user_message")) == 1
   end
 
+  test "accepts alternate provider-qualified model syntax into a canonical snapshot", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, _integration} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "alternate-key"})
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Alternate model syntax",
+               model: "gpt-4o-mini@openai"
+             })
+
+    assert {:ok, [snapshot, _message, _status]} =
+             Sessions.begin_turn(session.id, "Accept supported syntax")
+
+    primary = snapshot.payload["model_mapping"]["roles"]["primary"]
+    assert primary["model"] == "openai:gpt-4o-mini"
+    assert primary["model_selector"] == "gpt-4o-mini"
+    assert primary["execution_route"] == "openai"
+  end
+
   test "rejects a turn before acceptance when any configured role lacks access", %{
     runner: runner,
     scope: scope
@@ -421,12 +446,30 @@ defmodule Kodo.SessionsTest do
     assert Enum.map(Sessions.events_after(session.id), & &1.type) == ["session_created"]
   end
 
-  test "holds provider selection locks through turn acceptance", %{
+  test "holds the provider selection lock acquired by turn acceptance", %{
     runner: runner,
     scope: scope
   } do
-    assert {:ok, _integration} =
-             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "locked-key"})
+    integration = %Integration{
+      id: Ecto.UUID.generate(),
+      user_id: scope.user.id,
+      provider: "openai",
+      authentication_type: "api_key"
+    }
+
+    assert {:ok, encrypted} =
+             CredentialEncryption.encrypt(integration, %{"api_key" => "locked-key"})
+
+    integration
+    |> change(
+      Map.merge(encrypted, %{
+        display_name: "Lock fixture",
+        active: true,
+        connection_status: "connected",
+        validation_status: "unverified"
+      })
+    )
+    |> Repo.insert!()
 
     assert {:ok, session} =
              Sessions.create_session(scope, %{

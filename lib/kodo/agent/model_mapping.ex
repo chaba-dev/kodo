@@ -67,11 +67,14 @@ defmodule Kodo.Agent.ModelMapping do
     roles =
       Map.new(mapping["roles"], fn {role, role_mapping} ->
         contract = Roles.fetch!(role_atom(role), role_mapping["role_contract"])
+        {route, selector} = model_route_and_selector(role_mapping)
 
         {role,
          role_mapping
-         |> Map.put("execution_route", role_mapping["provider"])
-         |> Map.put("model_selector", model_selector(role_mapping["model"]))
+         |> Map.put("provider", route)
+         |> Map.put("execution_route", route)
+         |> Map.put("model", canonical_model(route, selector, role_mapping["model"]))
+         |> Map.put("model_selector", selector)
          |> Map.put_new("capability_contract", capability_contract(contract))}
       end)
 
@@ -249,10 +252,18 @@ defmodule Kodo.Agent.ModelMapping do
     end
   end
 
-  defp model_selector(model) do
-    case String.split(model, ":", parts: 2) do
-      [_provider, selector] -> selector
-      [selector] -> selector
+  defp model_route_and_selector(%{"model" => model, "provider" => provider}) do
+    case String.split(model, [":", "@"], parts: 2) do
+      [^provider, selector] -> {provider, selector}
+      [selector, ^provider] -> {provider, selector}
+      [_other, selector] -> {provider, selector}
+      [selector] -> {provider, selector}
     end
   end
+
+  defp canonical_model(route, selector, _original)
+       when is_binary(route) and route != "" and is_binary(selector) and selector != "",
+       do: "#{route}:#{selector}"
+
+  defp canonical_model(_route, _selector, original), do: original
 end

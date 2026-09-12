@@ -71,6 +71,19 @@ defmodule Kodo.Agent.ModelMappingTest do
              ModelMapping.validate_snapshot(malformed)
   end
 
+  test "canonicalizes every supported string model specification in snapshots" do
+    for specification <- ["openai:gpt-4o-mini", "gpt-4o-mini@openai"] do
+      mapping = ModelMapping.balanced([{"session", %{primary: %{model: specification}}}])
+      snapshot = ModelMapping.snapshot(mapping)
+      primary = snapshot["roles"]["primary"]
+
+      assert primary["model"] == "openai:gpt-4o-mini"
+      assert primary["execution_route"] == "openai"
+      assert primary["model_selector"] == "gpt-4o-mini"
+      assert {:ok, ^snapshot} = ModelMapping.validate_snapshot(snapshot)
+    end
+  end
+
   test "rejects malformed capability requirements instead of accepting a partial envelope" do
     snapshot = ModelMapping.snapshot(ModelMapping.balanced())
 
