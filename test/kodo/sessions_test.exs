@@ -6,6 +6,7 @@ defmodule Kodo.SessionsTest do
   alias Kodo.Agent.ModelSettings
   alias Kodo.Cluster.Instances
   alias Kodo.Integrations
+  alias Kodo.LLM
   alias Kodo.LLM.ProviderError
   alias Kodo.Runners
   alias Kodo.Sessions
@@ -384,6 +385,87 @@ defmodule Kodo.SessionsTest do
              Sessions.start_turn(scope, session.id, "Do not accept", Ecto.UUID.generate())
 
     assert Enum.map(Sessions.events_after(session.id), & &1.type) == ["session_created"]
+  end
+
+  test "atomically records invocation admission for the exact active credential generation", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "admitted-key"})
+
+    assert {:ok, model, reference} = LLM.resolve_integration(scope, "openai:gpt-4o-mini")
+    assert {:ok, credential} = LLM.admit_credential(scope, model, reference)
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Admitted generation",
+               model: "openai:gpt-4o-mini"
+             })
+
+    payload = %{
+      "invocation_id" => Ecto.UUID.generate(),
+      "provider" => "forged-provider",
+      "authentication_type" => "forged-authentication",
+      "billing_path" => "forged-billing"
+    }
+
+    assert {:ok, event} =
+             Sessions.append_admitted_model_event(
+               session.id,
+               "model_invocation_started",
+               payload,
+               credential
+             )
+
+    assert event.payload == %{
+             payload
+             | "provider" => credential.provider,
+               "authentication_type" => credential.authentication_type,
+               "billing_path" => Atom.to_string(credential.billing_path)
+           }
+
+    refute inspect(event) =~ "admitted-key"
+    assert integration.credential_generation == credential.credential_generation
+  end
+
+  test "rejects a decrypted credential replaced before invocation admission", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "stale-key"})
+
+    assert {:ok, model, reference} = LLM.resolve_integration(scope, "openai:gpt-4o-mini")
+    assert {:ok, credential} = LLM.admit_credential(scope, model, reference)
+
+    assert {:ok, _replacement} =
+             Integrations.replace_credentials(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"api_key" => "replacement-key"}
+             )
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Stale generation",
+               model: "openai:gpt-4o-mini"
+             })
+
+    events_before = Sessions.events_after(session.id)
+
+    assert {:error, :stale_credential_generation} =
+             Sessions.append_admitted_model_event(
+               session.id,
+               "model_invocation_started",
+               %{"invocation_id" => Ecto.UUID.generate()},
+               credential
+             )
+
+    assert Sessions.events_after(session.id) == events_before
   end
 
   test "rejects route changes without approved exact-identity evidence", %{

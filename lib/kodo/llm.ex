@@ -90,6 +90,20 @@ defmodule Kodo.LLM do
     end
   end
 
+  @doc false
+  def admit_credential(%Scope{} = scope, %LLMDB.Model{} = model, %IntegrationRef{} = reference),
+    do: resolve_credential(scope, model, reference)
+
+  @doc false
+  def generate_admitted(%LLMDB.Model{} = model, %Credential{} = credential, messages, tools, opts) do
+    adapter = Keyword.get(opts, :adapter, adapter())
+    adapter_opts = Keyword.delete(opts, :adapter)
+
+    with :ok <- reject_credential_options(adapter_opts) do
+      adapter.generate(model, messages, tools, credential, adapter_opts)
+    end
+  end
+
   @doc "Generates a structured object after scoped credential admission."
   def generate_object(
         %Scope{} = scope,
@@ -104,6 +118,22 @@ defmodule Kodo.LLM do
 
     with :ok <- reject_credential_options(adapter_opts),
          {:ok, credential} <- resolve_credential(scope, model, reference) do
+      adapter.generate_object(model, messages, schema, credential, adapter_opts)
+    end
+  end
+
+  @doc false
+  def generate_object_admitted(
+        %LLMDB.Model{} = model,
+        %Credential{} = credential,
+        messages,
+        schema,
+        opts
+      ) do
+    adapter = Keyword.get(opts, :adapter, adapter())
+    adapter_opts = Keyword.delete(opts, :adapter)
+
+    with :ok <- reject_credential_options(adapter_opts) do
       adapter.generate_object(model, messages, schema, credential, adapter_opts)
     end
   end

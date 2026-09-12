@@ -6,6 +6,7 @@ defmodule Kodo.Agent.Loop do
   alias Kodo.Agent.Roles
   alias Kodo.Agent.Tools
   alias Kodo.LLM
+  alias Kodo.LLM.ProviderError
   alias Kodo.RunnerProtocol
   alias Kodo.Runners
   alias Kodo.Sessions
@@ -247,7 +248,7 @@ defmodule Kodo.Agent.Loop do
        ) do
     invocation_id = Ecto.UUID.generate()
 
-    case Sessions.append_event(
+    case Sessions.append_admitted_model_event(
            session_id,
            "review_invocation_started",
            %{
@@ -257,20 +258,21 @@ defmodule Kodo.Agent.Loop do
              "provider" => canonical_provider(request),
              "model" => review["model"],
              "model_identity" => request.model.id,
-             "authentication_type" => request.reference.authentication_type,
-             "billing_path" => Atom.to_string(request.reference.billing_path),
+             "authentication_type" => request.credential.authentication_type,
+             "billing_path" => Atom.to_string(request.credential.billing_path),
              "reasoning" => review["reasoning"],
              "role_contract" => contract.id,
              "toolset_version" => contract.toolset_version,
              "capability_validation" => capability_validation,
              "model_mapping" => mapping
            },
+           request.credential,
            version: 2,
            parent_id: primary_invocation_id,
            ownership: ownership
          ) do
       {:ok, _event} -> {:ok, invocation_id}
-      error -> error
+      error -> normalize_admission_error(error, request)
     end
   end
 
@@ -620,7 +622,7 @@ defmodule Kodo.Agent.Loop do
        ) do
     invocation_id = Ecto.UUID.generate()
 
-    case Sessions.append_event(
+    case Sessions.append_admitted_model_event(
            session_id,
            "model_invocation_started",
            %{
@@ -630,19 +632,20 @@ defmodule Kodo.Agent.Loop do
              "provider" => canonical_provider(request),
              "model" => primary["model"],
              "model_identity" => request.model.id,
-             "authentication_type" => request.reference.authentication_type,
-             "billing_path" => Atom.to_string(request.reference.billing_path),
+             "authentication_type" => request.credential.authentication_type,
+             "billing_path" => Atom.to_string(request.credential.billing_path),
              "reasoning" => primary["reasoning"],
              "role_contract" => primary["role_contract"],
              "toolset_version" => primary["toolset_version"],
              "capability_validation" => capability_validation,
              "model_mapping" => mapping
            },
+           request.credential,
            version: 4,
            ownership: ownership
          ) do
       {:ok, _event} -> {:ok, invocation_id}
-      error -> error
+      error -> normalize_admission_error(error, request)
     end
   end
 
@@ -1125,7 +1128,7 @@ defmodule Kodo.Agent.Loop do
        ) do
     invocation_id = Ecto.UUID.generate()
 
-    case Sessions.append_event(
+    case Sessions.append_admitted_model_event(
            context.session_id,
            "subagent_invocation_started",
            %{
@@ -1136,20 +1139,21 @@ defmodule Kodo.Agent.Loop do
              "provider" => canonical_provider(request),
              "model" => search["model"],
              "model_identity" => request.model.id,
-             "authentication_type" => request.reference.authentication_type,
-             "billing_path" => Atom.to_string(request.reference.billing_path),
+             "authentication_type" => request.credential.authentication_type,
+             "billing_path" => Atom.to_string(request.credential.billing_path),
              "reasoning" => search["reasoning"],
              "role_contract" => contract.id,
              "toolset_version" => contract.toolset_version,
              "capability_validation" => capability_validation,
              "model_mapping" => context.mapping
            },
+           request.credential,
            version: 2,
            parent_id: context.invocation_id,
            ownership: context.ownership
          ) do
       {:ok, _event} -> {:ok, invocation_id}
-      error -> error
+      error -> normalize_admission_error(error, request)
     end
   end
 
@@ -1686,16 +1690,21 @@ defmodule Kodo.Agent.Loop do
   defp resolve_request(session_id, role) do
     with {:ok, scope} <- Sessions.owner_scope(session_id),
          {:ok, model, reference} <-
-           LLM.resolve_integration(scope, ModelMapping.request_model(role)) do
-      {:ok, %{scope: scope, model: model, reference: reference}}
+           LLM.resolve_integration(scope, ModelMapping.request_model(role)),
+         {:ok, credential} <- LLM.admit_credential(scope, model, reference) do
+      {:ok, %{model: model, credential: credential}}
     end
   end
 
+  defp normalize_admission_error({:error, :stale_credential_generation}, request),
+    do: {:error, ProviderError.from_integration(:stale_credential_generation, request.model)}
+
+  defp normalize_admission_error(error, _request), do: error
+
   defp generate(adapter, request, messages, tools, opts) do
-    LLM.generate(
-      request.scope,
+    LLM.generate_admitted(
       request.model,
-      request.reference,
+      request.credential,
       messages,
       tools,
       Keyword.put(opts, :adapter, adapter)
@@ -1703,10 +1712,9 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp generate_object(adapter, request, messages, schema, opts) do
-    LLM.generate_object(
-      request.scope,
+    LLM.generate_object_admitted(
       request.model,
-      request.reference,
+      request.credential,
       messages,
       schema,
       Keyword.put(opts, :adapter, adapter)

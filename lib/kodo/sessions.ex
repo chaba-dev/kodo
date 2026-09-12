@@ -15,6 +15,7 @@ defmodule Kodo.Sessions do
   alias Kodo.ControlPlaneTelemetry
   alias Kodo.Integrations
   alias Kodo.LLM
+  alias Kodo.LLM.Credential
   alias Kodo.LLM.ProviderError
   alias Kodo.Repo
   alias Kodo.Runners.Runner
@@ -541,6 +542,39 @@ defmodule Kodo.Sessions do
     end
   end
 
+  @doc false
+  def append_admitted_model_event(
+        session_id,
+        type,
+        payload,
+        %Credential{} = credential,
+        opts \\ []
+      ) do
+    case Repo.transaction(fn ->
+           session = lock_session!(session_id, opts)
+           admit_model_credential!(session, credential)
+
+           payload =
+             Map.merge(payload, %{
+               "provider" => credential.provider,
+               "authentication_type" => credential.authentication_type,
+               "billing_path" => Atom.to_string(credential.billing_path)
+             })
+
+           case append_locked(session, type, payload, opts) do
+             {:ok, event} -> event
+             {:error, changeset} -> Repo.rollback(changeset)
+           end
+         end) do
+      {:ok, event} = result ->
+        broadcast(event)
+        result
+
+      error ->
+        error
+    end
+  end
+
   def start_turn(%Scope{} = scope, session_id, content, client_request_id) do
     case get_session(scope, session_id) do
       %Session{} ->
@@ -573,6 +607,24 @@ defmodule Kodo.Sessions do
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp admit_model_credential!(session, credential) do
+    admitted? =
+      Integrations.Integration
+      |> where(
+        [integration],
+        integration.id == ^credential.integration_id and
+          integration.user_id == ^session.user_id and integration.provider == ^credential.provider and
+          integration.authentication_type == ^credential.authentication_type and
+          integration.credential_generation == ^credential.credential_generation and
+          integration.connection_status == "connected" and integration.active and
+          integration.validation_status != "invalid"
+      )
+      |> lock("FOR SHARE")
+      |> Repo.exists?()
+
+    if !admitted?, do: Repo.rollback(:stale_credential_generation)
   end
 
   def cancel(session_id) do
