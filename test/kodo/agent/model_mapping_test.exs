@@ -93,6 +93,20 @@ defmodule Kodo.Agent.ModelMappingTest do
     end
   end
 
+  test "canonicalizes application-defined execution route spellings idempotently" do
+    for specification <- ["openai_codex:gpt-5.4", "openai-codex:gpt-5.4"] do
+      mapping = ModelMapping.balanced([{"session", %{primary: %{model: specification}}}])
+
+      snapshot = ModelMapping.snapshot(mapping)
+      primary = snapshot["roles"]["primary"]
+
+      assert primary["model"] == "openai_codex:gpt-5.4"
+      assert primary["model_selector"] == "gpt-5.4"
+      assert ModelMapping.snapshot(snapshot) == snapshot
+      assert {:ok, ^snapshot} = ModelMapping.validate_snapshot(snapshot)
+    end
+  end
+
   test "rejects malformed capability requirements instead of accepting a partial envelope" do
     snapshot = ModelMapping.snapshot(ModelMapping.balanced())
 

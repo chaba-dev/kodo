@@ -252,7 +252,32 @@ defmodule Kodo.Agent.ModelMapping do
     end
   end
 
+  defp model_route_and_selector(%{
+         "execution_route" => route,
+         "model_selector" => selector
+       })
+       when is_binary(route) and route != "" and is_binary(selector) and selector != "",
+       do: {route, selector}
+
+  defp model_route_and_selector(%{"model" => model, "provider" => provider})
+       when is_binary(model) and is_binary(provider) and provider != "" do
+    accepted_prefix =
+      [provider, String.replace(provider, "_", "-")]
+      |> Enum.uniq()
+      |> Enum.find(&String.starts_with?(model, &1 <> ":"))
+
+    if accepted_prefix do
+      {provider, String.replace_prefix(model, accepted_prefix <> ":", "")}
+    else
+      parse_model_route_and_selector(model, provider)
+    end
+  end
+
   defp model_route_and_selector(%{"model" => model, "provider" => provider}) do
+    parse_model_route_and_selector(model, provider)
+  end
+
+  defp parse_model_route_and_selector(model, provider) do
     case LLMDB.Spec.parse_spec(model) do
       {:ok, {parsed_provider, selector}} -> {Atom.to_string(parsed_provider), selector}
       {:error, _reason} -> {provider, model}
