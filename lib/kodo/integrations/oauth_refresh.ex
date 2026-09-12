@@ -143,7 +143,8 @@ defmodule Kodo.Integrations.OAuthRefresh do
   defp current_result(scope, integration) do
     case Integrations.get_integration(scope, integration.id) do
       {:ok, %{connection_status: "connected"} = current}
-      when current.refresh_source_generation == integration.credential_generation ->
+      when current.refresh_source_generation == integration.credential_generation and
+             current.credential_generation == integration.credential_generation + 1 ->
         {:ok, current}
 
       {:ok, %{connection_status: "reauthorization_required"}} ->

@@ -823,6 +823,7 @@ defmodule Kodo.IntegrationsTest do
       assert after_start.connection_status == "connected"
       assert after_start.validation_status == "valid"
       assert after_start.active
+      assert is_nil(after_start.refresh_source_generation)
 
       assert {:ok, _cancelled} =
                Integrations.cancel_device_authorization(
@@ -899,6 +900,32 @@ defmodule Kodo.IntegrationsTest do
                )
 
       refute completed.active
+    end
+
+    test "an inactive account does not become active merely because its sibling was disconnected",
+         %{
+           scope: scope
+         } do
+      first = oauth_integration(scope)
+
+      assert {:ok, active} =
+               Integrations.oauth_succeeded(scope, first.id, 0, %{"access_token" => "first"})
+
+      second = oauth_integration(scope)
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(scope, active.id, active.credential_generation)
+
+      assert {:ok, attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 second.id,
+                 second.credential_generation,
+                 %{"device_auth_id" => "second", "user_code" => "SECOND"},
+                 0
+               )
+
+      refute attempt.activate_on_completion
     end
 
     test "attempt operations suppress identifiers and ciphertext from query observability", %{

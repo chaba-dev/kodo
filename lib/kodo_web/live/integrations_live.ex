@@ -333,7 +333,12 @@ defmodule KodoWeb.IntegrationsLive do
 
       Map.has_key?(socket.assigns.device_authorization_tasks, reference) ->
         Process.demonitor(reference, [:flush])
-        {:noreply, socket |> drop_device_authorization_task(reference) |> load_integrations()}
+
+        {:noreply,
+         socket
+         |> drop_device_authorization_task(reference)
+         |> load_integrations()
+         |> resume_device_authorizations()}
 
       true ->
         {:noreply, socket}
@@ -346,7 +351,11 @@ defmodule KodoWeb.IntegrationsLive do
         {:noreply, socket |> drop_validation_task(reference) |> load_integrations()}
 
       Map.has_key?(socket.assigns.device_authorization_tasks, reference) ->
-        {:noreply, socket |> drop_device_authorization_task(reference) |> load_integrations()}
+        {:noreply,
+         socket
+         |> drop_device_authorization_task(reference)
+         |> load_integrations()
+         |> resume_device_authorizations()}
 
       true ->
         {:noreply, socket}
@@ -375,7 +384,7 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   def handle_info({:retry_device_authorization, integration_id}, socket) do
-    {:noreply, resume_device_authorization(socket, integration_id, false)}
+    {:noreply, resume_device_authorization(socket, integration_id, true)}
   end
 
   defp save_api_key(
@@ -505,12 +514,9 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   defp resume_device_authorizations(socket) do
-    Enum.reduce(socket.assigns.integrations, socket, fn integration, acc ->
-      if integration.provider == "openai_codex" do
-        resume_device_authorization(acc, integration.id, true)
-      else
-        acc
-      end
+    Enum.reduce(socket.assigns.device_authorizations, socket, fn {integration_id, _attempt},
+                                                                 acc ->
+      resume_device_authorization(acc, integration_id, true)
     end)
   end
 
@@ -542,7 +548,17 @@ defmodule KodoWeb.IntegrationsLive do
           Map.put(attempts, integration.id, %{
             attempt_id: attempt.id,
             attempt_generation: attempt.attempt_generation,
+            stage: :polling,
             user_code: user_code,
+            provider_deadline: attempt.provider_deadline
+          })
+
+        {:ok, {attempt, %{"authorization_code" => _code}}} ->
+          Map.put(attempts, integration.id, %{
+            attempt_id: attempt.id,
+            attempt_generation: attempt.attempt_generation,
+            stage: :exchanging,
+            user_code: nil,
             provider_deadline: attempt.provider_deadline
           })
 
@@ -869,9 +885,12 @@ defmodule KodoWeb.IntegrationsLive do
                     class="mt-4 max-w-xl rounded-2xl border border-sky-200 bg-sky-50/80 p-4 dark:border-sky-900 dark:bg-sky-950/30"
                   >
                     <p class="text-xs font-bold uppercase tracking-wider text-sky-800 dark:text-sky-300">
-                      Waiting for OpenAI authorization
+                      {if(authorization.stage == :polling,
+                        do: "Waiting for OpenAI authorization",
+                        else: "Completing OpenAI authorization"
+                      )}
                     </p>
-                    <div class="mt-3 space-y-3">
+                    <div :if={authorization.stage == :polling} class="mt-3 space-y-3">
                       <div>
                         <p class="text-xs font-medium text-zinc-500">Open this verification page</p>
                         <.link
@@ -905,6 +924,13 @@ defmodule KodoWeb.IntegrationsLive do
                         </div>
                       </div>
                     </div>
+                    <p
+                      :if={authorization.stage == :exchanging}
+                      role="status"
+                      class="mt-3 text-sm text-zinc-600 dark:text-zinc-400"
+                    >
+                      Authorization was approved. Securely exchanging credentials…
+                    </p>
                     <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
                       <p
                         role="status"

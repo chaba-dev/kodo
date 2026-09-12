@@ -69,7 +69,7 @@ defmodule Kodo.Integrations.DeviceAuthorization do
          result <- safe_poll(client, payload, options) do
       case result do
         :pending ->
-          continue(scope, admission, payload, client, options)
+          continue_after_pending(scope, admission, client, options)
 
         {:ok, exchange_payload} ->
           persist_and_exchange(scope, admission, exchange_payload, client, options)
@@ -88,6 +88,13 @@ defmodule Kodo.Integrations.DeviceAuthorization do
 
   defp continue(scope, claim, _payload, _client, _options) do
     fail(scope, claim, :device_authorization_response_invalid)
+  end
+
+  defp continue_after_pending(scope, admission, client, options) do
+    case Integrations.schedule_device_authorization_poll(scope, admission) do
+      {:ok, {scheduled, payload}} -> continue(scope, scheduled, payload, client, options)
+      {:error, reason} -> stop(reason)
+    end
   end
 
   defp await_poll_admission(scope, claim) do

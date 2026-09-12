@@ -186,6 +186,59 @@ defmodule Kodo.Integrations.DeviceAuthorizationTest do
     assert calls(client) == [{:poll, payload}]
   end
 
+  test "waits a full provider interval after a pending response", %{
+    scope: scope,
+    integration: integration
+  } do
+    owner = self()
+
+    blocking_poll = fn :poll, _payload ->
+      send(owner, {:pending_poll_started, self()})
+
+      receive do
+        :finish_pending -> :pending
+      end
+    end
+
+    second_poll = fn :poll, _payload ->
+      send(owner, :second_poll_started)
+      {:error, :device_authorization_rejected}
+    end
+
+    client = fake_client(poll: [blocking_poll, second_poll])
+
+    assert {:ok, _attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "CODE"},
+               100
+             )
+
+    assert {:ok, {claim, payload}} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    Repo.update!(change(claim, next_poll_at: DateTime.add(DateTime.utc_now(), -1, :second)))
+    claim = Repo.reload!(claim)
+    supervisor = start_supervised!(Task.Supervisor)
+
+    task =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        DeviceAuthorization.run(scope, claim, payload, client_opts(client))
+      end)
+
+    assert_receive {:pending_poll_started, poller}
+    send(poller, :finish_pending)
+    refute_receive :second_poll_started, 50
+    assert_receive :second_poll_started, 200
+    assert {:error, :device_authorization_rejected} = Task.await(task)
+  end
+
   test "begin persists the provider response and launches a supervised finite task", %{
     scope: scope,
     integration: integration

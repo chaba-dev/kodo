@@ -258,7 +258,18 @@ defmodule KodoWeb.IntegrationsLiveTest do
     conn: conn,
     scope: scope
   } do
-    _client = configure_device_client(exchange: [{:ok, device_tokens()}])
+    owner = self()
+
+    blocking_exchange = fn :exchange, _payload ->
+      send(owner, {:exchange_resumed, self()})
+
+      receive do
+        :finish_exchange -> {:ok, device_tokens()}
+      end
+    end
+
+    _client = configure_device_client(exchange: [blocking_exchange])
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
 
     assert {:ok, integration} =
              Integrations.create_oauth_integration(scope, "openai_codex",
@@ -291,13 +302,22 @@ defmodule KodoWeb.IntegrationsLiveTest do
     )
 
     {:ok, view, _html} = live(conn, ~p"/integrations")
-    monitor = Process.monitor(view.pid)
+    assert_receive {:exchange_resumed, worker}
+
+    panel = "#integration-#{integration.id}-device-authorization"
+    assert has_element?(view, panel, "Completing OpenAI authorization")
+    assert has_element?(view, panel, "Securely exchanging credentials")
+    refute has_element?(view, "#integration-#{integration.id}-copy-device-code")
+
+    send(worker, :finish_exchange)
+    integration_id = integration.id
+    assert_receive message = {:integration_changed, ^integration_id, _generation}
+    send(view.pid, message)
     _ = :sys.get_state(view.pid)
 
     assert {:ok, connected} = Integrations.get_integration(scope, integration.id)
     assert connected.connection_status == "connected"
-    refute has_element?(view, "#integration-#{integration.id}-device-authorization")
-    Process.demonitor(monitor, [:flush])
+    refute has_element?(view, panel)
   end
 
   test "cancelling authorization removes its code from another open tab", %{
