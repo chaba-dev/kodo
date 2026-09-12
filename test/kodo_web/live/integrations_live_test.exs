@@ -153,7 +153,12 @@ defmodule KodoWeb.IntegrationsLiveTest do
     panel = "#integration-#{integration.id}-device-authorization"
 
     assert has_element?(view, panel, "https://auth.openai.com/codex/device")
-    assert has_element?(view, panel, "ABCD-EFGH")
+
+    assert has_element?(
+             view,
+             "#{panel} code.whitespace-nowrap",
+             "ABCD-EFGH"
+           )
 
     assert has_element?(
              view,

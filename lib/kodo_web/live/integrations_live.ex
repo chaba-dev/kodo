@@ -1033,7 +1033,7 @@ defmodule KodoWeb.IntegrationsLive do
                       <div>
                         <p class="text-xs font-medium text-zinc-500">One-time code</p>
                         <div class="mt-1 flex items-center gap-2">
-                          <code class="select-all text-lg font-bold tracking-wider text-zinc-950 dark:text-white">
+                          <code class="shrink-0 select-all whitespace-nowrap text-lg font-bold tracking-wider text-zinc-950 dark:text-white">
                             {authorization.user_code}
                           </code>
                           <button
