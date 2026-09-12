@@ -463,6 +463,40 @@ defmodule KodoWeb.IntegrationsLiveTest do
 
     _ = :sys.get_state(view.pid)
     refute has_element?(view, "#integration-#{integration.id}-device-authorization-outcome")
+
+    assert {:ok, {claim, _payload}} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    assert {:ok, _completed} =
+             Integrations.complete_device_authorization(
+               scope,
+               claim,
+               %{
+                 "access_token" => "new-access",
+                 "refresh_token" => "new-refresh",
+                 "id_token" => "new-identity",
+                 "account_id" => "new-account"
+               },
+               DateTime.add(DateTime.utc_now(), 3_600, :second)
+             )
+
+    send(
+      view.pid,
+      {:device_authorization_changed, integration.id, first.attempt_generation, "active", nil}
+    )
+
+    send(
+      view.pid,
+      {:device_authorization_changed, integration.id, first.attempt_generation, "failed",
+       "provider_rejected"}
+    )
+
+    _ = :sys.get_state(view.pid)
+    refute has_element?(view, "#integration-#{integration.id}-device-authorization-outcome")
   end
 
   test "shows failed authorization feedback on the affected account", %{
@@ -474,11 +508,20 @@ defmodule KodoWeb.IntegrationsLiveTest do
                display_name: "Failed subscription"
              )
 
-    assert {:ok, _attempt} =
+    assert {:ok, first} =
              Integrations.begin_device_authorization(
                scope,
                integration.id,
                integration.credential_generation,
+               %{"device_auth_id" => "old-device", "user_code" => "OLD"},
+               30_000
+             )
+
+    assert {:ok, second} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               first.expected_integration_generation,
                %{"device_auth_id" => "failed-device", "user_code" => "FAILED"},
                30_000
              )
@@ -495,7 +538,23 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert {:ok, _failed} =
              Integrations.fail_device_authorization(scope, claim, "provider_rejected")
 
+    send(
+      view.pid,
+      {:device_authorization_changed, integration.id, first.attempt_generation, "active", nil}
+    )
+
+    send(
+      view.pid,
+      {:device_authorization_changed, integration.id, first.attempt_generation, "failed",
+       "provider_rejected"}
+    )
+
     _ = :sys.get_state(view.pid)
+
+    assert %{attempt_generation: generation} =
+             live_assign(view, :device_authorization_outcomes)[integration.id]
+
+    assert generation == second.attempt_generation
 
     assert has_element?(
              view,

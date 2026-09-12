@@ -377,21 +377,13 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   def handle_info(
-        {:device_authorization_changed, integration_id, attempt_generation, state, error},
+        {:device_authorization_changed, integration_id, attempt_generation, state, _error},
         socket
       ) do
-    socket =
-      socket
-      |> maybe_clear_device_authorization_retry(integration_id, attempt_generation, state)
-      |> load_integrations()
-      |> record_device_authorization_outcome(
-        integration_id,
-        attempt_generation,
-        state,
-        error
-      )
-
-    {:noreply, socket}
+    {:noreply,
+     socket
+     |> maybe_clear_device_authorization_retry(integration_id, attempt_generation, state)
+     |> load_integrations()}
   end
 
   def handle_info({:retry_device_authorization, integration_id, attempt_generation}, socket) do
@@ -626,59 +618,6 @@ defmodule KodoWeb.IntegrationsLive do
         Process.cancel_timer(timer)
         assign(socket, :device_authorization_retries, retries)
     end
-  end
-
-  defp record_device_authorization_outcome(
-         socket,
-         integration_id,
-         attempt_generation,
-         state,
-         _error
-       ) do
-    current_generation =
-      case socket.assigns.device_authorizations[integration_id] do
-        %{attempt_generation: generation} -> generation
-        nil -> nil
-      end
-
-    cond do
-      is_integer(current_generation) and current_generation > attempt_generation ->
-        socket
-
-      state == "failed" ->
-        put_device_authorization_outcome(
-          socket,
-          integration_id,
-          attempt_generation,
-          "OpenAI could not complete authorization. Try again."
-        )
-
-      state == "expired" ->
-        put_device_authorization_outcome(
-          socket,
-          integration_id,
-          attempt_generation,
-          "Authorization expired. Start again to get a new one-time code."
-        )
-
-      true ->
-        clear_device_authorization_outcome(socket, integration_id, attempt_generation)
-    end
-  end
-
-  defp put_device_authorization_outcome(socket, integration_id, generation, message) do
-    update(socket, :device_authorization_outcomes, fn outcomes ->
-      Map.put(outcomes, integration_id, %{attempt_generation: generation, message: message})
-    end)
-  end
-
-  defp clear_device_authorization_outcome(socket, integration_id, attempt_generation) do
-    update(socket, :device_authorization_outcomes, fn outcomes ->
-      case outcomes[integration_id] do
-        %{attempt_generation: generation} when generation > attempt_generation -> outcomes
-        _older_or_missing -> Map.delete(outcomes, integration_id)
-      end
-    end)
   end
 
   defp load_device_authorizations(scope, integrations) do
