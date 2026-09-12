@@ -1655,7 +1655,14 @@ defmodule Kodo.Integrations do
     case Repo.get_by(Integration, id: integration_id, user_id: user_id) do
       %Integration{provider: provider} ->
         lock_provider_identity(user_id, provider)
-        invalidate_provider_selection_recovery(user_id, provider)
+
+        case lock_provider_rows(user_id, provider, integration_id) do
+          {:ok, _integration, _provider_integrations} ->
+            invalidate_provider_selection_recovery(user_id, provider)
+
+          {:error, reason} ->
+            Repo.rollback(reason)
+        end
 
       nil ->
         :ok

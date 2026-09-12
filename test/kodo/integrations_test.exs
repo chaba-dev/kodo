@@ -1503,6 +1503,86 @@ defmodule Kodo.IntegrationsTest do
                Integrations.get_active_integration_by_provider(scope, "openai_codex")
     end
 
+    test "disconnect does not invert integration and device-attempt lock order" do
+      parent = self()
+
+      {scope, integration, attempt} =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            scope = AccountsFixtures.user_scope_fixture()
+            integration = oauth_integration(scope)
+
+            {:ok, attempt} =
+              Integrations.begin_device_authorization(
+                scope,
+                integration.id,
+                integration.credential_generation,
+                %{"device_auth_id" => "device", "user_code" => "CODE"},
+                30_000
+              )
+
+            {scope, Repo.reload!(integration), attempt}
+          end)
+        end)
+        |> Task.await()
+
+      on_exit(fn ->
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn -> Repo.delete(scope.user) end)
+        end)
+        |> Task.await()
+      end)
+
+      integration_holder =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            Repo.transaction(fn ->
+              Ecto.Adapters.SQL.query!(
+                Repo,
+                "SELECT id FROM provider_integrations WHERE id = $1 FOR UPDATE",
+                [Ecto.UUID.dump!(integration.id)]
+              )
+
+              send(parent, {:integration_locked, self()})
+
+              receive do
+                :lock_attempt ->
+                  Ecto.Adapters.SQL.query!(
+                    Repo,
+                    "SELECT id FROM device_authorization_attempts WHERE id = $1 FOR UPDATE",
+                    [Ecto.UUID.dump!(attempt.id)]
+                  )
+              end
+            end)
+          end)
+        end)
+
+      assert_receive {:integration_locked, holder}
+
+      disconnect =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            Repo.transaction(fn ->
+              %{rows: [[backend_pid]]} = Ecto.Adapters.SQL.query!(Repo, "SELECT pg_backend_pid()")
+              send(parent, {:disconnect_backend, backend_pid})
+
+              Integrations.disconnect(
+                scope,
+                integration.id,
+                integration.credential_generation
+              )
+            end)
+          end)
+        end)
+
+      assert_receive {:disconnect_backend, backend_pid}
+      assert_query_blocked!(backend_pid)
+      send(holder, :lock_attempt)
+
+      assert {:ok, {:ok, _integration}} = Task.await(disconnect)
+      assert {:ok, _result} = Task.await(integration_holder)
+    end
+
     test "cancellation is owned and generation fenced and removes the one-time code", %{
       scope: scope
     } do
@@ -1638,6 +1718,21 @@ defmodule Kodo.IntegrationsTest do
     task = Task.Supervisor.async_nolink(supervisor, operation)
     Ecto.Adapters.SQL.Sandbox.allow(Repo, self(), task.pid)
     task
+  end
+
+  defp assert_query_blocked!(backend_pid, attempts \\ 100)
+
+  defp assert_query_blocked!(_backend_pid, 0), do: flunk("query did not block")
+
+  defp assert_query_blocked!(backend_pid, attempts) do
+    %{rows: [[blocked?]]} =
+      Ecto.Adapters.SQL.query!(
+        Repo,
+        "SELECT cardinality(pg_blocking_pids($1)) > 0",
+        [backend_pid]
+      )
+
+    if blocked?, do: :ok, else: assert_query_blocked!(backend_pid, attempts - 1)
   end
 
   defp blocking_value(owner, ref, value) do
