@@ -441,6 +441,7 @@ defmodule Kodo.Integrations do
     do: {:error, :authentication_type_mismatch}
 
   defp insert_oauth_integration(user_id, changeset) do
+    lock_user!(user_id)
     lock_provider_identity(user_id, "openai_codex")
 
     case Repo.insert(changeset) do
@@ -782,6 +783,8 @@ defmodule Kodo.Integrations do
 
   defp activate_transaction(user_id, id, generation, audit?) do
     Repo.transaction(fn ->
+      lock_user!(user_id)
+
       case lock_provider_integrations(user_id, id) do
         {:ok, integration, provider_integrations} ->
           activate_locked(user_id, integration, provider_integrations, generation, audit?)
@@ -1561,6 +1564,7 @@ defmodule Kodo.Integrations do
     case Ecto.UUID.cast(id) do
       {:ok, id} ->
         Repo.transaction(fn ->
+          lock_user!(user.id)
           maybe_lock_transition(user.id, id, audit_event_type)
 
           {restore_active, changes} = Map.pop(changes, :restore_active, false)
@@ -1617,6 +1621,7 @@ defmodule Kodo.Integrations do
 
   defp insert_connected(changeset, actor_user_id, provider, event_type) do
     Repo.transaction(fn ->
+      lock_user!(actor_user_id)
       lock_provider_identity(actor_user_id, provider)
       first_account? = !provider_account_exists?(actor_user_id, provider)
 
