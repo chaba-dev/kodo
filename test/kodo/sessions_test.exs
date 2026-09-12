@@ -2,6 +2,7 @@ defmodule Kodo.SessionsTest do
   use Kodo.DataCase
 
   alias Kodo.Agent.ExecutionRouteChange
+  alias Kodo.Agent.ModelMapping
   alias Kodo.Cluster.Instances
   alias Kodo.Integrations
   alias Kodo.Runners
@@ -415,6 +416,11 @@ defmodule Kodo.SessionsTest do
 
     {:ok, [first_snapshot, _message, _status]} = Sessions.begin_turn(session.id, "First")
 
+    [created | _events] = Sessions.events_after(session.id)
+
+    primary =
+      created.payload["model_mapping"] |> ModelMapping.snapshot() |> ModelMapping.role!(:primary)
+
     records = [
       %{
         role: "primary",
@@ -422,11 +428,11 @@ defmodule Kodo.SessionsTest do
         destination: "openai",
         selector: "gpt-5.4",
         role_contract: "alpha-v1",
+        reasoning: primary["reasoning"],
+        capability_contract: primary["capability_contract"],
         status: :approved
       }
     ]
-
-    [created | _events] = Sessions.events_after(session.id)
 
     assert {:ok, changed_mapping} =
              ExecutionRouteChange.change(

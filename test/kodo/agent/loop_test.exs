@@ -99,10 +99,14 @@ defmodule Kodo.Agent.LoopTest do
     [created] = Sessions.events_after(session.id)
 
     mapping =
-      update_in(created.payload["model_mapping"], ["roles"], fn roles ->
+      created.payload["model_mapping"]
+      |> Kodo.Agent.ModelMapping.snapshot()
+      |> update_in(["roles"], fn roles ->
         Map.new(roles, fn {role, role_mapping} ->
           {role,
            role_mapping
+           |> Map.put("provider", "openai_codex")
+           |> Map.put("model", "openai_codex:gpt-5.4")
            |> Map.put("execution_route", "openai_codex")
            |> Map.put("model_selector", "gpt-5.4")}
         end)
@@ -136,6 +140,46 @@ defmodule Kodo.Agent.LoopTest do
     assert error.provider == "openai_codex"
 
     refute Enum.any?(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
+  end
+
+  test "rejects a malformed persisted turn capability envelope before dispatch", %{
+    session: session,
+    ownership: ownership
+  } do
+    [created] = Sessions.events_after(session.id)
+
+    malformed =
+      update_in(
+        created.payload,
+        ["model_mapping", "roles", "primary"],
+        &Map.delete(&1, "capability_contract")
+      )
+
+    {:ok, _snapshot} =
+      Sessions.append_event(
+        session.id,
+        "turn_route_snapshot",
+        %{"route_revision" => 1, "model_mapping" => malformed["model_mapping"]},
+        source: "system",
+        ownership: ownership
+      )
+
+    {:ok, _message} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "do not repair this snapshot"},
+        ownership: ownership
+      )
+
+    assert {:error, :invalid_model_mapping_snapshot} =
+             Loop.run(session.id,
+               adapter: Kodo.Test.FakeLLM,
+               budgets: budgets([]),
+               ownership: ownership
+             )
+
+    refute_received {:llm_request, _model, _system, _tools, _opts}
   end
 
   test "drops provider-private assistant state when replay crosses execution routes", %{

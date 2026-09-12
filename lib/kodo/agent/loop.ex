@@ -33,29 +33,21 @@ defmodule Kodo.Agent.Loop do
 
     latest_response = List.last(responses)
 
-    case rehoming_boundary() do
-      :ok ->
-        case within_budget(invocations, tokens, budgets) do
-          :ok ->
-            action = next_action(latest_invocation, latest_response)
+    with :ok <- validate_turn_mapping(projection),
+         :ok <- rehoming_boundary(),
+         :ok <- within_budget(invocations, tokens, budgets) do
+      action = next_action(latest_invocation, latest_response)
 
-            resume_action(
-              action,
-              session_id,
-              projection,
-              events,
-              adapter,
-              budgets,
-              invocations,
-              ownership
-            )
-
-          error ->
-            error
-        end
-
-      error ->
-        error
+      resume_action(
+        action,
+        session_id,
+        projection,
+        events,
+        adapter,
+        budgets,
+        invocations,
+        ownership
+      )
     end
   end
 
@@ -459,7 +451,21 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp turn_mapping(projection) do
-    projection.turn_model_mapping || projection.model_mapping || legacy_mapping(projection.model)
+    case {projection.turn_route_snapshot_present, projection.turn_model_mapping} do
+      {false, _mapping} ->
+        mapping = projection.model_mapping || legacy_mapping(projection.model)
+        ModelMapping.snapshot(mapping)
+
+      {true, snapshot} ->
+        snapshot
+    end
+  end
+
+  defp validate_turn_mapping(projection) do
+    case ModelMapping.validate_snapshot(turn_mapping(projection)) do
+      {:ok, _mapping} -> :ok
+      {:error, _reason} = error -> error
+    end
   end
 
   defp infer(session_id, projection, events, adapter, budgets, invocation, ownership) do

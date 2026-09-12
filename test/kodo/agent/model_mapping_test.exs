@@ -58,4 +58,55 @@ defmodule Kodo.Agent.ModelMappingTest do
     assert mapping["roles"]["search"]["model"] == "not-a-model"
     assert mapping["roles"]["search"]["provider"] == nil
   end
+
+  test "rejects malformed immutable snapshots instead of filling current defaults" do
+    snapshot = ModelMapping.snapshot(ModelMapping.balanced())
+
+    assert {:ok, ^snapshot} = ModelMapping.validate_snapshot(snapshot)
+
+    malformed =
+      update_in(snapshot, ["roles", "primary"], &Map.delete(&1, "capability_contract"))
+
+    assert {:error, :invalid_model_mapping_snapshot} =
+             ModelMapping.validate_snapshot(malformed)
+  end
+
+  test "rejects malformed capability requirements instead of accepting a partial envelope" do
+    snapshot = ModelMapping.snapshot(ModelMapping.balanced())
+
+    malformed =
+      put_in(
+        snapshot,
+        ["roles", "primary", "capability_contract", "requirements", "min_context"],
+        "current default"
+      )
+
+    assert {:error, :invalid_model_mapping_snapshot} =
+             ModelMapping.validate_snapshot(malformed)
+  end
+
+  test "rejects capability variants and toolsets with no executable implementation" do
+    snapshot = ModelMapping.snapshot(ModelMapping.balanced())
+
+    unsupported_output =
+      put_in(
+        snapshot,
+        ["roles", "primary", "capability_contract", "requirements", "structured_output"],
+        true
+      )
+
+    assert {:error, :invalid_model_mapping_snapshot} =
+             ModelMapping.validate_snapshot(unsupported_output)
+
+    unsupported_toolset =
+      snapshot
+      |> put_in(["roles", "primary", "toolset_version"], "workspace-v999")
+      |> put_in(
+        ["roles", "primary", "capability_contract", "toolset_version"],
+        "workspace-v999"
+      )
+
+    assert {:error, :invalid_model_mapping_snapshot} =
+             ModelMapping.validate_snapshot(unsupported_toolset)
+  end
 end
