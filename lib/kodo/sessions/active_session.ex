@@ -123,7 +123,7 @@ defmodule Kodo.Sessions.ActiveSession do
         {:stop, :normal, error, stop_task(state)}
 
       {:error, :session_not_found} = error ->
-        {:stop, :normal, error, state}
+        {:stop, :normal, error, stop_task(state)}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -141,7 +141,7 @@ defmodule Kodo.Sessions.ActiveSession do
         {:stop, :normal, error, stop_task(state)}
 
       {:error, :session_not_found} = error ->
-        {:stop, :normal, error, state}
+        {:stop, :normal, error, stop_task(state)}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -166,6 +166,9 @@ defmodule Kodo.Sessions.ActiveSession do
 
           {:error, :stale_ownership} = error ->
             {:stop, :normal, error, stop_task(state)}
+
+          {:error, :session_not_found} = error ->
+            {:stop, :normal, error, %{state | task: nil}}
 
           {:error, reason} ->
             {:stop, {:cancellation_persistence_failed, reason}, {:error, reason}, state}
@@ -272,7 +275,7 @@ defmodule Kodo.Sessions.ActiveSession do
         {:stop, :normal, {:error, :already_finished}, %{state | task: nil}}
 
       {:error, :session_not_found} ->
-        {:stop, :normal, {:error, :already_finished}, %{state | task: nil}}
+        {:stop, :normal, {:error, :session_not_found}, %{state | task: nil}}
 
       {:error, :stale_ownership} = error ->
         {:stop, :normal, error, stop_task(state)}

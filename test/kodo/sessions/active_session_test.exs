@@ -296,6 +296,62 @@ defmodule Kodo.Sessions.ActiveSessionTest do
     assert Registry.lookup(Kodo.SessionRegistry, session.id) == []
   end
 
+  test "stops its active task when a queued turn observes session deletion", %{
+    scope: scope,
+    session: session
+  } do
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    assert :ok = ActiveSession.start_turn(coordinator, "wait")
+    assert_receive :fake_llm_waiting
+
+    task = :sys.get_state(coordinator).task.pid
+    task_ref = Process.monitor(task)
+    coordinator_ref = Process.monitor(coordinator)
+    Repo.delete!(scope.user)
+
+    assert {:error, :session_not_found} = ActiveSession.start_turn(coordinator, "queued turn")
+    assert_receive {:DOWN, ^task_ref, :process, ^task, :killed}
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
+  end
+
+  test "cancellation stops normally when deletion wins before task shutdown", %{
+    scope: scope,
+    session: session
+  } do
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    assert :ok = ActiveSession.start_turn(coordinator, "wait")
+    assert_receive :fake_llm_waiting
+    coordinator_ref = Process.monitor(coordinator)
+
+    Repo.delete!(scope.user)
+
+    assert {:error, :session_not_found} = ActiveSession.cancel(coordinator)
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
+  end
+
+  test "cancellation preserves missing-session outcome from a completed task", %{
+    scope: scope,
+    session: session
+  } do
+    assert {:ok, coordinator} = Sessions.ensure_started(session.id)
+    assert :ok = ActiveSession.start_turn(coordinator, "wait")
+    assert_receive :fake_llm_waiting
+
+    task = :sys.get_state(coordinator).task.pid
+    task_ref = Process.monitor(task)
+    coordinator_ref = Process.monitor(coordinator)
+    :ok = :sys.suspend(coordinator)
+    reply_ref = make_ref()
+    send(coordinator, {:"$gen_call", {self(), reply_ref}, :cancel})
+    send(task, :never)
+    assert_receive {:DOWN, ^task_ref, :process, ^task, :normal}
+    Repo.delete!(scope.user)
+    :ok = :sys.resume(coordinator)
+
+    assert_receive {^reply_ref, {:error, :session_not_found}}
+    assert_receive {:DOWN, ^coordinator_ref, :process, ^coordinator, :normal}
+  end
+
   test "reconciles a repeated turn request while its task is active", %{session: session} do
     request_id = Ecto.UUID.generate()
     assert {:ok, pid} = Sessions.ensure_started(session.id)
