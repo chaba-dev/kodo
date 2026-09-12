@@ -251,6 +251,30 @@ defmodule Kodo.Integrations do
     end
   end
 
+  @doc "Returns bounded terminal authorization feedback without loading encrypted payloads."
+  def get_device_authorization_outcome(%Scope{user: user}, integration_id) do
+    with {:ok, integration_id} <- cast_uuid(integration_id) do
+      DeviceAuthorizationAttempt
+      |> join(:inner, [attempt], integration in assoc(attempt, :integration))
+      |> where(
+        [attempt, integration],
+        attempt.integration_id == ^integration_id and integration.user_id == ^user.id
+      )
+      |> order_by([attempt], desc: attempt.attempt_generation)
+      |> limit(1)
+      |> select([attempt], %{
+        attempt_generation: attempt.attempt_generation,
+        state: attempt.state,
+        terminal_error_code: attempt.terminal_error_code
+      })
+      |> Repo.one()
+      |> case do
+        %{state: state} = outcome when state in ["failed", "expired"] -> {:ok, outcome}
+        _missing_or_non_failure -> {:error, :device_authorization_outcome_not_found}
+      end
+    end
+  end
+
   @doc false
   def expire_device_authorization(%Scope{user: user}, integration_id) do
     with {:ok, integration_id} <- cast_uuid(integration_id) do

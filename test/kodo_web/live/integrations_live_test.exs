@@ -162,7 +162,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
 
     assert has_element?(
              view,
-             "#integration-#{integration.id}-copy-device-code-status[role='status'][aria-live='polite']"
+             "#integration-#{integration.id}-copy-device-code-status[role='status'][aria-live='polite']:not(.sr-only)"
            )
 
     refute inspect(:sys.get_state(view.pid)) =~ "private-device"
@@ -257,6 +257,13 @@ defmodule KodoWeb.IntegrationsLiveTest do
     {:ok, view, _html} = live(conn, ~p"/integrations")
     refute has_element?(view, "#integration-#{integration.id}-device-authorization")
     assert Repo.reload!(attempt).state == "expired"
+    _ = :sys.get_state(view.pid)
+
+    assert has_element?(
+             view,
+             "#integration-#{integration.id}-device-authorization-outcome[role='alert']",
+             "Authorization expired"
+           )
   end
 
   test "resumes an exchange-stage authorization after its worker lease expires", %{
@@ -403,7 +410,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert live_assign(view, :device_authorization_retries) == %{}
   end
 
-  test "drops an old retry immediately when a new authorization supersedes it", %{
+  test "replaces an old retry when another tab supersedes an authorization", %{
     conn: conn,
     scope: scope
   } do
@@ -443,7 +450,60 @@ defmodule KodoWeb.IntegrationsLiveTest do
 
     _ = :sys.get_state(view.pid)
     assert second.attempt_generation > first.attempt_generation
-    assert live_assign(view, :device_authorization_retries) == %{}
+
+    retries = live_assign(view, :device_authorization_retries)
+    refute Map.has_key?(retries, retry_key)
+    assert Map.has_key?(retries, {integration.id, second.attempt_generation})
+
+    send(
+      view.pid,
+      {:device_authorization_changed, integration.id, first.attempt_generation, "failed",
+       "provider_rejected"}
+    )
+
+    _ = :sys.get_state(view.pid)
+    refute has_element?(view, "#integration-#{integration.id}-device-authorization-outcome")
+  end
+
+  test "shows failed authorization feedback on the affected account", %{
+    conn: conn,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Failed subscription"
+             )
+
+    assert {:ok, _attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "failed-device", "user_code" => "FAILED"},
+               30_000
+             )
+
+    assert {:ok, {claim, _payload}} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+
+    assert {:ok, _failed} =
+             Integrations.fail_device_authorization(scope, claim, "provider_rejected")
+
+    _ = :sys.get_state(view.pid)
+
+    assert has_element?(
+             view,
+             "#integration-#{integration.id}-device-authorization-outcome[role='alert']",
+             "OpenAI could not complete authorization"
+           )
+
+    refute has_element?(view, "#integration-#{integration.id}-device-authorization")
   end
 
   test "updates an open authorization panel when polling advances to exchange", %{

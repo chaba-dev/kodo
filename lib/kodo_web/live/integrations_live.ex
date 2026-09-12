@@ -65,6 +65,7 @@ defmodule KodoWeb.IntegrationsLive do
       |> assign(:validation_tasks, %{})
       |> assign(:device_authorization_tasks, %{})
       |> assign(:device_authorization_retries, %{})
+      |> assign(:device_authorization_outcomes, %{})
       |> load_integrations()
 
     socket =
@@ -234,7 +235,11 @@ defmodule KodoWeb.IntegrationsLive do
            ) do
       {:noreply,
        socket
-       |> track_device_authorization_task(started.task, integration.id)
+       |> track_device_authorization_task(
+         started.task,
+         integration.id,
+         started.attempt.attempt_generation
+       )
        |> put_flash(:info, "Authorization started. Enter the one-time code with OpenAI.")
        |> push_patch(to: ~p"/integrations")}
     else
@@ -372,19 +377,21 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   def handle_info(
-        {:device_authorization_changed, integration_id, attempt_generation, state, _error},
+        {:device_authorization_changed, integration_id, attempt_generation, state, error},
         socket
       ) do
     socket =
       socket
       |> maybe_clear_device_authorization_retry(integration_id, attempt_generation, state)
       |> load_integrations()
+      |> record_device_authorization_outcome(
+        integration_id,
+        attempt_generation,
+        state,
+        error
+      )
 
-    if state == "failed" do
-      {:noreply, put_flash(socket, :error, "Authorization failed. Try again.")}
-    else
-      {:noreply, socket}
-    end
+    {:noreply, socket}
   end
 
   def handle_info({:retry_device_authorization, integration_id, attempt_generation}, socket) do
@@ -479,9 +486,13 @@ defmodule KodoWeb.IntegrationsLive do
 
     device_authorizations = load_device_authorizations(socket.assigns.current_scope, integrations)
 
+    device_authorization_outcomes =
+      load_device_authorization_outcomes(socket.assigns.current_scope, integrations)
+
     socket
     |> assign(:integrations, integrations)
     |> assign(:device_authorizations, device_authorizations)
+    |> assign(:device_authorization_outcomes, device_authorization_outcomes)
     |> reconcile_device_authorization_retries()
   end
 
@@ -501,7 +512,19 @@ defmodule KodoWeb.IntegrationsLive do
         end
       end)
 
-    assign(socket, :device_authorization_retries, retries)
+    socket = assign(socket, :device_authorization_retries, retries)
+
+    tracked_keys = MapSet.new(socket.assigns.device_authorization_tasks, &elem(&1, 1))
+
+    if connected?(socket) do
+      Enum.reduce(active_keys, socket, fn {integration_id, generation} = key, acc ->
+        if Map.has_key?(retries, key) or MapSet.member?(tracked_keys, key),
+          do: acc,
+          else: schedule_device_authorization_retry(acc, integration_id, generation)
+      end)
+    else
+      socket
+    end
   end
 
   # Browser-facing state needs lifecycle metadata only. In particular, keeping
@@ -538,9 +561,9 @@ defmodule KodoWeb.IntegrationsLive do
     update(socket, :validation_tasks, &Map.delete(&1, reference))
   end
 
-  defp track_device_authorization_task(socket, task, integration_id) do
+  defp track_device_authorization_task(socket, task, integration_id, attempt_generation) do
     update(socket, :device_authorization_tasks, fn tasks ->
-      Map.put(tasks, task.ref, integration_id)
+      Map.put(tasks, task.ref, {integration_id, attempt_generation})
     end)
   end
 
@@ -559,7 +582,7 @@ defmodule KodoWeb.IntegrationsLive do
       {:ok, task} ->
         socket
         |> clear_device_authorization_retry(integration_id, attempt_generation)
-        |> track_device_authorization_task(task, integration_id)
+        |> track_device_authorization_task(task, integration_id, attempt_generation)
 
       {:error, :device_authorization_not_claimable} when schedule_retry? ->
         schedule_device_authorization_retry(socket, integration_id, attempt_generation)
@@ -605,6 +628,59 @@ defmodule KodoWeb.IntegrationsLive do
     end
   end
 
+  defp record_device_authorization_outcome(
+         socket,
+         integration_id,
+         attempt_generation,
+         state,
+         _error
+       ) do
+    current_generation =
+      case socket.assigns.device_authorizations[integration_id] do
+        %{attempt_generation: generation} -> generation
+        nil -> nil
+      end
+
+    cond do
+      is_integer(current_generation) and current_generation > attempt_generation ->
+        socket
+
+      state == "failed" ->
+        put_device_authorization_outcome(
+          socket,
+          integration_id,
+          attempt_generation,
+          "OpenAI could not complete authorization. Try again."
+        )
+
+      state == "expired" ->
+        put_device_authorization_outcome(
+          socket,
+          integration_id,
+          attempt_generation,
+          "Authorization expired. Start again to get a new one-time code."
+        )
+
+      true ->
+        clear_device_authorization_outcome(socket, integration_id, attempt_generation)
+    end
+  end
+
+  defp put_device_authorization_outcome(socket, integration_id, generation, message) do
+    update(socket, :device_authorization_outcomes, fn outcomes ->
+      Map.put(outcomes, integration_id, %{attempt_generation: generation, message: message})
+    end)
+  end
+
+  defp clear_device_authorization_outcome(socket, integration_id, attempt_generation) do
+    update(socket, :device_authorization_outcomes, fn outcomes ->
+      case outcomes[integration_id] do
+        %{attempt_generation: generation} when generation > attempt_generation -> outcomes
+        _older_or_missing -> Map.delete(outcomes, integration_id)
+      end
+    end)
+  end
+
   defp load_device_authorizations(scope, integrations) do
     integrations
     |> Enum.filter(&(&1.provider == "openai_codex"))
@@ -632,6 +708,34 @@ defmodule KodoWeb.IntegrationsLive do
           attempts
       end
     end)
+  end
+
+  defp load_device_authorization_outcomes(scope, integrations) do
+    integrations
+    |> Enum.filter(&(&1.provider == "openai_codex"))
+    |> Map.new(fn integration ->
+      outcome =
+        case Integrations.get_device_authorization_outcome(scope, integration.id) do
+          {:ok, %{attempt_generation: generation, state: "failed"}} ->
+            %{
+              attempt_generation: generation,
+              message: "OpenAI could not complete authorization. Try again."
+            }
+
+          {:ok, %{attempt_generation: generation, state: "expired"}} ->
+            %{
+              attempt_generation: generation,
+              message: "Authorization expired. Start again to get a new one-time code."
+            }
+
+          {:error, :device_authorization_outcome_not_found} ->
+            nil
+        end
+
+      {integration.id, outcome}
+    end)
+    |> Enum.reject(fn {_integration_id, outcome} -> is_nil(outcome) end)
+    |> Map.new()
   end
 
   defp find_device_authorization(authorizations, attempt_id) do
@@ -945,6 +1049,14 @@ defmodule KodoWeb.IntegrationsLive do
                   >
                     {validation_detail(integration)}
                   </p>
+                  <p
+                    :if={outcome = @device_authorization_outcomes[integration.id]}
+                    id={dom_id(integration, "device-authorization-outcome")}
+                    role="alert"
+                    class="mt-3 max-w-xl rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium leading-5 text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300"
+                  >
+                    {outcome.message}
+                  </p>
                   <div
                     :if={authorization = @device_authorizations[integration.id]}
                     id={dom_id(integration, "device-authorization")}
@@ -991,7 +1103,7 @@ defmodule KodoWeb.IntegrationsLive do
                             id={dom_id(integration, "copy-device-code-status")}
                             role="status"
                             aria-live="polite"
-                            class="sr-only"
+                            class="text-xs font-medium text-zinc-600 dark:text-zinc-300"
                           ></span>
                         </div>
                       </div>
