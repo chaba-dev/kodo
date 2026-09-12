@@ -157,6 +157,7 @@ defmodule Kodo.Integrations do
           polling_interval_ms
         )
       end)
+      |> notify_device_authorization_change()
     end
   end
 
@@ -279,6 +280,7 @@ defmodule Kodo.Integrations do
       audit!(user.id, integration, "device_authorization_failed")
       attempt
     end)
+    |> notify_device_authorization_change()
   end
 
   def fail_device_authorization(%Scope{}, %DeviceAuthorizationAttempt{}, _error_code),
@@ -290,6 +292,7 @@ defmodule Kodo.Integrations do
       Repo.transaction(fn ->
         cancel_device_authorization_locked(user.id, attempt_id, attempt_generation)
       end)
+      |> notify_device_authorization_change()
     end
   end
 
@@ -752,7 +755,7 @@ defmodule Kodo.Integrations do
     lease_expires_at = DateTime.add(timestamp, @device_authorization_claim_lease_ms, :millisecond)
 
     query =
-      claimable_device_authorization_query(user_id, integration_id, claim_owner_id, timestamp)
+      claimable_device_authorization_query(user_id, integration_id, timestamp)
       |> select([attempt, _integration], attempt)
 
     case Repo.update_all(
@@ -772,7 +775,7 @@ defmodule Kodo.Integrations do
     end
   end
 
-  defp claimable_device_authorization_query(user_id, integration_id, claim_owner_id, timestamp) do
+  defp claimable_device_authorization_query(user_id, integration_id, timestamp) do
     from attempt in DeviceAuthorizationAttempt,
       join: integration in Integration,
       on: integration.id == attempt.integration_id and integration.user_id == attempt.user_id,
@@ -780,8 +783,7 @@ defmodule Kodo.Integrations do
         attempt.user_id == ^user_id and attempt.integration_id == ^integration_id and
           attempt.state == "active" and attempt.provider_deadline > ^timestamp and
           integration.credential_generation == attempt.expected_integration_generation and
-          (is_nil(attempt.claim_owner_id) or attempt.claim_lease_expires_at <= ^timestamp or
-             attempt.claim_owner_id == ^claim_owner_id)
+          (is_nil(attempt.claim_owner_id) or attempt.claim_lease_expires_at <= ^timestamp)
   end
 
   # The boolean terms below are one atomic database fence, not control-flow branches.
@@ -1566,6 +1568,19 @@ defmodule Kodo.Integrations do
   end
 
   defp notify_integration_change(error), do: error
+
+  defp notify_device_authorization_change({:ok, attempt} = result) do
+    Phoenix.PubSub.broadcast(
+      Kodo.PubSub,
+      "integration:#{attempt.user_id}",
+      {:device_authorization_changed, attempt.integration_id, attempt.attempt_generation,
+       attempt.state, attempt.terminal_error_code}
+    )
+
+    result
+  end
+
+  defp notify_device_authorization_change(error), do: error
 
   defp constraint_error?(changeset, type) do
     Enum.any?(changeset.errors, fn {_field, {_message, metadata}} ->

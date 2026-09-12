@@ -44,6 +44,7 @@ defmodule KodoWeb.IntegrationsLive do
   @providers Enum.map(@provider_configs, & &1.id)
   @actions ~w(connect replace reauthorize disconnect)
   @max_api_key_bytes 4_096
+  @device_authorization_retry_ms 30_100
 
   @impl true
   def mount(_params, _session, socket) do
@@ -65,7 +66,14 @@ defmodule KodoWeb.IntegrationsLive do
       |> assign(:device_authorization_tasks, %{})
       |> load_integrations()
 
-    socket = if connected?(socket), do: resume_device_authorizations(socket), else: socket
+    socket =
+      if connected?(socket) do
+        {:ok, _deleted_count} = Integrations.cleanup_device_authorizations()
+        resume_device_authorizations(socket)
+      else
+        socket
+      end
+
     {:ok, socket}
   end
 
@@ -251,7 +259,7 @@ defmodule KodoWeb.IntegrationsLive do
 
   def handle_event(
         "cancel_device_authorization",
-        %{"attempt" => attempt_id, "generation" => generation},
+        %{"device_authorization_attempt_id" => attempt_id, "generation" => generation},
         socket
       ) do
     with {attempt_generation, ""} <- Integer.parse(generation),
@@ -350,6 +358,23 @@ defmodule KodoWeb.IntegrationsLive do
 
   def handle_info({:integration_changed, _id, _generation}, socket) do
     {:noreply, load_integrations(socket)}
+  end
+
+  def handle_info(
+        {:device_authorization_changed, _integration_id, _attempt_generation, state, _error},
+        socket
+      ) do
+    socket = load_integrations(socket)
+
+    if state == "failed" do
+      {:noreply, put_flash(socket, :error, "Authorization failed. Try again.")}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:retry_device_authorization, integration_id}, socket) do
+    {:noreply, resume_device_authorization(socket, integration_id, false)}
   end
 
   defp save_api_key(
@@ -479,13 +504,32 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   defp resume_device_authorizations(socket) do
-    Enum.reduce(socket.assigns.device_authorizations, socket, fn {integration_id, _attempt},
-                                                                 acc ->
-      case DeviceAuthorization.resume(acc.assigns.current_scope, integration_id) do
-        {:ok, task} -> track_device_authorization_task(acc, task, integration_id)
-        {:error, _reason} -> acc
+    Enum.reduce(socket.assigns.integrations, socket, fn integration, acc ->
+      if integration.provider == "openai_codex" do
+        resume_device_authorization(acc, integration.id, true)
+      else
+        acc
       end
     end)
+  end
+
+  defp resume_device_authorization(socket, integration_id, schedule_retry?) do
+    case DeviceAuthorization.resume(socket.assigns.current_scope, integration_id) do
+      {:ok, task} ->
+        track_device_authorization_task(socket, task, integration_id)
+
+      {:error, :device_authorization_not_claimable} when schedule_retry? ->
+        Process.send_after(
+          self(),
+          {:retry_device_authorization, integration_id},
+          @device_authorization_retry_ms
+        )
+
+        socket
+
+      {:error, _reason} ->
+        socket
+    end
   end
 
   defp load_device_authorizations(scope, integrations) do
@@ -871,7 +915,7 @@ defmodule KodoWeb.IntegrationsLive do
                         id={dom_id(integration, "cancel-device-authorization")}
                         type="button"
                         phx-click="cancel_device_authorization"
-                        phx-value-attempt={authorization.attempt_id}
+                        phx-value-device_authorization_attempt_id={authorization.attempt_id}
                         phx-value-generation={authorization.attempt_generation}
                         phx-disable-with="Cancelling…"
                         class="rounded-lg px-3 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100 disabled:opacity-60 dark:text-red-400 dark:hover:bg-red-950/40"

@@ -2,7 +2,6 @@ defmodule Kodo.Integrations.DeviceAuthorization do
   @moduledoc "Runs finite, durable ChatGPT device authorization tasks."
 
   alias Kodo.Accounts.Scope
-  alias Kodo.Cluster.InstanceManager
   alias Kodo.Integrations
   alias Kodo.Integrations.DeviceAuthorizationAttempt
   alias Kodo.Integrations.DeviceAuthorizationTokens
@@ -34,21 +33,22 @@ defmodule Kodo.Integrations.DeviceAuthorization do
   end
 
   def resume(%Scope{} = scope, integration_id, opts \\ []) do
-    claim_owner_id = Keyword.get_lazy(opts, :claim_owner_id, &InstanceManager.current_boot_id/0)
+    # A claim identifies one finite worker, not its VM. Reusing a node boot ID
+    # would let a second browser tab replace a healthy worker on the same node.
+    claim_owner_id = Keyword.get_lazy(opts, :claim_owner_id, &Ecto.UUID.generate/0)
     supervisor = Keyword.get(opts, :supervisor, Kodo.ControlPlaneTaskSupervisor)
 
-    with owner when is_binary(owner) <- claim_owner_id,
-         {:ok, {claim, payload}} <-
-           Integrations.claim_device_authorization(scope, integration_id, owner) do
-      task =
-        Task.Supervisor.async_nolink(supervisor, fn ->
-          run(scope, claim, payload, opts)
-        end)
+    case Integrations.claim_device_authorization(scope, integration_id, claim_owner_id) do
+      {:ok, {claim, payload}} ->
+        task =
+          Task.Supervisor.async_nolink(supervisor, fn ->
+            run(scope, claim, payload, opts)
+          end)
 
-      {:ok, task}
-    else
-      nil -> {:error, :device_authorization_owner_unavailable}
-      {:error, _reason} = error -> error
+        {:ok, task}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 

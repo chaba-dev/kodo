@@ -118,6 +118,30 @@ defmodule Kodo.Integrations.DeviceAuthorizationTest do
     assert calls(client) == []
   end
 
+  test "a healthy claim cannot be replaced by another task using the same node owner", %{
+    scope: scope,
+    integration: integration
+  } do
+    owner = Ecto.UUID.generate()
+
+    assert {:ok, _attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "CODE"},
+               0
+             )
+
+    assert {:ok, {claim, _payload}} =
+             Integrations.claim_device_authorization(scope, integration.id, owner)
+
+    assert {:error, :device_authorization_not_claimable} =
+             Integrations.claim_device_authorization(scope, integration.id, owner)
+
+    assert Repo.reload!(claim).claim_epoch == claim.claim_epoch
+  end
+
   test "a poll admitted before takeover may finish but cannot persist its result", %{
     scope: scope,
     integration: integration

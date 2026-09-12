@@ -163,7 +163,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     refute inspect(:sys.get_state(view.pid)) =~ "private-device"
 
     render_click(view, "cancel_device_authorization", %{
-      "attempt" => Ecto.UUID.generate(),
+      "device_authorization_attempt_id" => Ecto.UUID.generate(),
       "generation" => "1"
     })
 
@@ -252,6 +252,86 @@ defmodule KodoWeb.IntegrationsLiveTest do
     {:ok, view, _html} = live(conn, ~p"/integrations")
     refute has_element?(view, "#integration-#{integration.id}-device-authorization")
     assert Repo.reload!(attempt).state == "expired"
+  end
+
+  test "resumes an exchange-stage authorization after its worker lease expires", %{
+    conn: conn,
+    scope: scope
+  } do
+    _client = configure_device_client(exchange: [{:ok, device_tokens()}])
+
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Recovering subscription"
+             )
+
+    assert {:ok, _attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "CODE"},
+               0
+             )
+
+    assert {:ok, {claim, _payload}} =
+             Integrations.claim_device_authorization(scope, integration.id, Ecto.UUID.generate())
+
+    assert {:ok, persisted} =
+             Integrations.store_device_authorization_exchange(scope, claim, %{
+               "authorization_code" => "authorization",
+               "code_challenge" => "challenge",
+               "code_verifier" => "verifier"
+             })
+
+    Repo.update!(
+      Ecto.Changeset.change(persisted,
+        claim_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)
+      )
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    monitor = Process.monitor(view.pid)
+    _ = :sys.get_state(view.pid)
+
+    assert {:ok, connected} = Integrations.get_integration(scope, integration.id)
+    assert connected.connection_status == "connected"
+    refute has_element?(view, "#integration-#{integration.id}-device-authorization")
+    Process.demonitor(monitor, [:flush])
+  end
+
+  test "cancelling authorization removes its code from another open tab", %{
+    conn: conn,
+    scope: scope,
+    user: user
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Shared subscription"
+             )
+
+    assert {:ok, attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "SHARED"},
+               30_000
+             )
+
+    {:ok, first_view, _html} = live(conn, ~p"/integrations")
+    {:ok, second_view, _html} = live(log_in_user(build_conn(), user), ~p"/integrations")
+    panel = "#integration-#{integration.id}-device-authorization"
+    assert has_element?(first_view, panel, "SHARED")
+    assert has_element?(second_view, panel, "SHARED")
+
+    first_view
+    |> element("#integration-#{integration.id}-cancel-device-authorization")
+    |> render_click()
+
+    _ = :sys.get_state(second_view.pid)
+    refute has_element?(second_view, panel)
+    assert Repo.reload!(attempt).state == "cancelled"
   end
 
   test "shows completion and reauthorization after the device flow succeeds", %{
