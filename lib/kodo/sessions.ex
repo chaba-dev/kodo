@@ -16,6 +16,8 @@ defmodule Kodo.Sessions do
   alias Kodo.Integrations
   alias Kodo.LLM
   alias Kodo.LLM.Credential
+  alias Kodo.LLM.IntegrationRef
+  alias Kodo.LLM.InvocationAdmission
   alias Kodo.LLM.ProviderError
   alias Kodo.Repo
   alias Kodo.Runners.Runner
@@ -547,15 +549,16 @@ defmodule Kodo.Sessions do
         session_id,
         type,
         payload,
+        %LLMDB.Model{} = model,
         %Credential{} = credential,
         opts \\ []
       ) do
     transaction = fn ->
-      append_admitted_model_event_locked(session_id, type, payload, credential, opts)
+      append_admitted_model_event_locked(session_id, type, payload, model, credential, opts)
     end
 
     case Repo.transaction(transaction) do
-      {:ok, event} = result ->
+      {:ok, {event, _admission}} = result ->
         broadcast(event)
         result
 
@@ -591,6 +594,10 @@ defmodule Kodo.Sessions do
       |> turn_route_snapshot()
       |> Map.fetch!("model_mapping")
 
+    preflight_mapping(scope, mapping)
+  end
+
+  defp preflight_mapping(scope, mapping) do
     mapping["roles"]
     |> Map.values()
     |> Enum.uniq_by(& &1["execution_route"])
@@ -603,36 +610,55 @@ defmodule Kodo.Sessions do
   end
 
   defp admit_model_credential!(session, credential) do
-    admitted? =
+    integration =
       Integrations.Integration
+      |> where([integration], integration.id == ^credential.integration_id)
+      |> where([integration], integration.user_id == ^session.user_id)
+      |> where([integration], integration.provider == ^credential.provider)
       |> where(
         [integration],
-        integration.id == ^credential.integration_id and
-          integration.user_id == ^session.user_id and integration.provider == ^credential.provider and
-          integration.authentication_type == ^credential.authentication_type and
-          integration.credential_generation == ^credential.credential_generation and
-          integration.connection_status == "connected" and integration.active and
-          integration.validation_status != "invalid"
+        integration.authentication_type == ^credential.authentication_type
       )
+      |> where(
+        [integration],
+        integration.credential_generation == ^credential.credential_generation
+      )
+      |> where([integration], integration.connection_status == "connected")
+      |> where([integration], integration.active)
+      |> where([integration], integration.validation_status != "invalid")
       |> lock("FOR SHARE")
-      |> Repo.exists?()
+      |> Repo.one()
 
-    if !admitted?, do: Repo.rollback(:stale_credential_generation)
+    case integration do
+      %Integrations.Integration{} = admitted ->
+        reference = IntegrationRef.from_integration(admitted)
+
+        if reference.billing_path == credential.billing_path,
+          do: admitted,
+          else: Repo.rollback(:stale_credential_generation)
+
+      nil ->
+        Repo.rollback(:stale_credential_generation)
+    end
   end
 
-  defp append_admitted_model_event_locked(session_id, type, payload, credential, opts) do
+  defp append_admitted_model_event_locked(session_id, type, payload, model, credential, opts) do
     session = lock_session!(session_id, opts)
-    admit_model_credential!(session, credential)
+    integration = admit_model_credential!(session, credential)
+    billing_path = IntegrationRef.from_integration(integration).billing_path
+
+    if Atom.to_string(model.provider) != integration.provider,
+      do: Repo.rollback(:stale_credential_generation)
 
     payload =
       Map.merge(payload, %{
-        "provider" => credential.provider,
-        "authentication_type" => credential.authentication_type,
-        "billing_path" => Atom.to_string(credential.billing_path)
+        "provider" => integration.provider,
+        "authentication_type" => integration.authentication_type,
+        "billing_path" => Atom.to_string(billing_path)
       })
 
     case append_locked(session, type, payload, opts) do
-      {:ok, event} -> event
+      {:ok, event} -> {event, InvocationAdmission.new(model, credential)}
       {:error, changeset} -> Repo.rollback(changeset)
     end
   end
@@ -1082,8 +1108,12 @@ defmodule Kodo.Sessions do
         |> maybe_put_request_id(client_request_id)
 
       route_snapshot = turn_route_snapshot(session)
+      scope = Scope.for_user(Repo.get!(User, session.user_id))
+      mapping = route_snapshot["model_mapping"]
 
-      with {:ok, snapshot} <-
+      with :ok <- lock_turn_integrations(scope, mapping),
+           :ok <- preflight_mapping(scope, mapping),
+           {:ok, snapshot} <-
              append_locked(
                session,
                "turn_route_snapshot",
@@ -1104,9 +1134,18 @@ defmodule Kodo.Sessions do
              append_locked(session, "session_status_changed", %{"status" => "running"}, []) do
         [snapshot, message, status_event]
       else
-        {:error, changeset} -> Repo.rollback(changeset)
+        {:error, reason} -> Repo.rollback(reason)
       end
     end
+  end
+
+  defp lock_turn_integrations(scope, mapping) do
+    providers =
+      mapping["roles"]
+      |> Map.values()
+      |> Enum.map(& &1["execution_route"])
+
+    Integrations.lock_turn_integrations(scope, providers)
   end
 
   defp change_execution_route_locked(scope, session_id, destination) do

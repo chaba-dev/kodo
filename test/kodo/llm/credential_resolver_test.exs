@@ -36,8 +36,6 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert {:ok, resolved_model, reference} =
              LLM.resolve_integration(context.scope, "openai:gpt-4o-mini")
 
-    assert {:ok, credential} = LLM.admit_credential(context.scope, resolved_model, reference)
-
     for unsafe_option <- [
           {:api_key, "caller-secret"},
           {:base_url, "https://attacker.example"},
@@ -46,7 +44,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
           {:finch_request, fn _request -> :forged end}
         ] do
       assert {:error, :credential_options_not_allowed} =
-               LLM.generate(
+               LLM.generate_evaluation(
                  context.scope,
                  resolved_model,
                  reference,
@@ -57,19 +55,18 @@ defmodule Kodo.LLM.CredentialResolverTest do
                    [unsafe_option]
                  )
                )
-
-      assert {:error, :credential_options_not_allowed} =
-               LLM.generate_admitted(
-                 resolved_model,
-                 credential,
-                 [%{"role" => "user", "content" => "final answer"}],
-                 [],
-                 Keyword.merge(
-                   [adapter: Kodo.Test.FakeLLM, timeout: 1_000],
-                   [unsafe_option]
-                 )
-               )
     end
+
+    assert {:ok, credential} = LLM.admit_credential(context.scope, resolved_model, reference)
+
+    assert {:error, :invocation_not_admitted} =
+             LLM.generate_admitted(
+               credential,
+               [%{"role" => "user", "content" => "final answer"}],
+               [],
+               adapter: Kodo.Test.FakeLLM,
+               timeout: 1_000
+             )
 
     assert {:ok, _replaced} =
              Integrations.replace_credentials(
@@ -80,7 +77,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
              )
 
     assert {:error, %Kodo.LLM.ProviderError{} = error} =
-             LLM.generate(
+             LLM.generate_evaluation(
                context.scope,
                resolved_model,
                reference,
@@ -223,7 +220,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert invalid.credential_generation == reference.credential_generation
   end
 
-  test "keeps admitted references pinned while new preflight selects the activated account",
+  test "rejects a selected reference when another account becomes active",
        context do
     assert {:ok, second} =
              Integrations.connect(context.scope, "openai", "api_key", %{
@@ -233,9 +230,7 @@ defmodule Kodo.LLM.CredentialResolverTest do
     assert {:ok, _activated} =
              Integrations.activate(context.scope, second.id, second.credential_generation)
 
-    assert {:ok, admitted} = resolve(context)
-    assert admitted.integration_id == context.integration.id
-    assert admitted.token == "scoped-secret"
+    assert {:error, :stale_credential_generation} = resolve(context)
 
     assert {:ok, next_reference} = CredentialResolver.reference(context.scope, model())
     assert next_reference.integration_id == second.id

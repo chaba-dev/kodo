@@ -11,6 +11,7 @@ defmodule Kodo.LLM do
   alias Kodo.LLM.Credential
   alias Kodo.LLM.CredentialResolver
   alias Kodo.LLM.IntegrationRef
+  alias Kodo.LLM.InvocationAdmission
   alias Kodo.LLM.ProviderError
 
   @credential_option_keys ~w(
@@ -72,8 +73,8 @@ defmodule Kodo.LLM do
     end
   end
 
-  @doc "Generates text after rechecking and decrypting the referenced credential."
-  def generate(
+  @doc "Runs the out-of-band evaluation harness with a scoped credential."
+  def generate_evaluation(
         %Scope{} = scope,
         %LLMDB.Model{} = model,
         %IntegrationRef{} = reference,
@@ -95,7 +96,12 @@ defmodule Kodo.LLM do
     do: resolve_credential(scope, model, reference)
 
   @doc false
-  def generate_admitted(%LLMDB.Model{} = model, %Credential{} = credential, messages, tools, opts) do
+  def generate_admitted(
+        %InvocationAdmission{model: model, credential: credential},
+        messages,
+        tools,
+        opts
+      ) do
     adapter = Keyword.get(opts, :adapter, adapter())
     adapter_opts = Keyword.delete(opts, :adapter)
 
@@ -104,8 +110,11 @@ defmodule Kodo.LLM do
     end
   end
 
-  @doc "Generates a structured object after scoped credential admission."
-  def generate_object(
+  def generate_admitted(_admission, _messages, _tools, _opts),
+    do: {:error, :invocation_not_admitted}
+
+  @doc "Runs structured generation for the out-of-band evaluation harness."
+  def generate_object_evaluation(
         %Scope{} = scope,
         %LLMDB.Model{} = model,
         %IntegrationRef{} = reference,
@@ -124,8 +133,7 @@ defmodule Kodo.LLM do
 
   @doc false
   def generate_object_admitted(
-        %LLMDB.Model{} = model,
-        %Credential{} = credential,
+        %InvocationAdmission{model: model, credential: credential},
         messages,
         schema,
         opts
@@ -137,6 +145,9 @@ defmodule Kodo.LLM do
       adapter.generate_object(model, messages, schema, credential, adapter_opts)
     end
   end
+
+  def generate_object_admitted(_admission, _messages, _schema, _opts),
+    do: {:error, :invocation_not_admitted}
 
   def adapter, do: Application.get_env(:kodo, :llm_adapter, Kodo.LLM.ReqLLM)
 

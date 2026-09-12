@@ -2,6 +2,7 @@ defmodule Kodo.Agent.LoopTest do
   use Kodo.DataCase
 
   alias Kodo.Agent.Loop
+  alias Kodo.Agent.ModelMapping
   alias Kodo.Agent.ModelSettings
   alias Kodo.Agent.Tools
   alias Kodo.Integrations
@@ -148,18 +149,16 @@ defmodule Kodo.Agent.LoopTest do
   } do
     [created] = Sessions.events_after(session.id)
 
-    malformed =
-      update_in(
-        created.payload,
-        ["model_mapping", "roles", "primary"],
-        &Map.delete(&1, "capability_contract")
-      )
+    baseline = ModelMapping.snapshot(created.payload["model_mapping"])
+    assert {:ok, ^baseline} = ModelMapping.validate_snapshot(baseline)
+
+    malformed = update_in(baseline, ["roles", "primary"], &Map.delete(&1, "capability_contract"))
 
     {:ok, _snapshot} =
       Sessions.append_event(
         session.id,
         "turn_route_snapshot",
-        %{"route_revision" => 1, "model_mapping" => malformed["model_mapping"]},
+        %{"route_revision" => 1, "model_mapping" => malformed},
         source: "system",
         ownership: ownership
       )

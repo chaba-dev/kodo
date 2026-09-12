@@ -18,6 +18,7 @@ defmodule Kodo.Agent.ExecutionRouteChange do
          [] <- incompatible_roles(affected, destination, records) do
       {:ok, apply_route(mapping, affected, destination)}
     else
+      {:error, _reason} = error -> error
       true -> {:error, :execution_route_unchanged}
       roles when is_list(roles) -> {:error, {:incompatible_execution_route, roles}}
     end

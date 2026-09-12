@@ -72,7 +72,7 @@ defmodule Kodo.Agent.ModelMapping do
          role_mapping
          |> Map.put("execution_route", role_mapping["provider"])
          |> Map.put("model_selector", model_selector(role_mapping["model"]))
-         |> Map.put("capability_contract", capability_contract(contract))}
+         |> Map.put_new("capability_contract", capability_contract(contract))}
       end)
 
     %{mapping | "roles" => roles}

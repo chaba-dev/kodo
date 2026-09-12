@@ -170,7 +170,7 @@ defmodule Kodo.Agent.Loop do
            ),
          :ok <- Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{context.session_id}"),
          :ok <- Runners.subscribe_lifecycle(),
-         {:ok, review_invocation_id} <-
+         {:ok, {review_invocation_id, admission}} <-
            start_review_invocation(
              context.session_id,
              primary_invocation_id,
@@ -198,7 +198,7 @@ defmodule Kodo.Agent.Loop do
 
              generate_object(
                context.adapter,
-               request,
+               admission,
                [
                  %{"role" => "system", "content" => contract.prompt},
                  %{
@@ -266,12 +266,13 @@ defmodule Kodo.Agent.Loop do
              "capability_validation" => capability_validation,
              "model_mapping" => mapping
            },
+           request.model,
            request.credential,
            version: 2,
            parent_id: primary_invocation_id,
            ownership: ownership
          ) do
-      {:ok, _event} -> {:ok, invocation_id}
+      {:ok, {_event, admission}} -> {:ok, {invocation_id, admission}}
       error -> normalize_admission_error(error, request)
     end
   end
@@ -487,7 +488,7 @@ defmodule Kodo.Agent.Loop do
          {:ok, capability_validation} <-
            adapter.validate_model(primary_model, primary, contract),
          {:ok, request} <- resolve_request(session_id, primary),
-         {:ok, invocation_id} <-
+         {:ok, {invocation_id, admission}} <-
            start_invocation(
              session_id,
              invocation,
@@ -502,7 +503,7 @@ defmodule Kodo.Agent.Loop do
            Sessions.dispatch_if_owner(ownership, fn ->
              generate(
                adapter,
-               request,
+               admission,
                transcript(events, contract, primary["execution_route"] || primary["provider"]),
                tools,
                timeout: budgets[:model_timeout],
@@ -640,11 +641,12 @@ defmodule Kodo.Agent.Loop do
              "capability_validation" => capability_validation,
              "model_mapping" => mapping
            },
+           request.model,
            request.credential,
            version: 4,
            ownership: ownership
          ) do
-      {:ok, _event} -> {:ok, invocation_id}
+      {:ok, {_event, admission}} -> {:ok, {invocation_id, admission}}
       error -> normalize_admission_error(error, request)
     end
   end
@@ -997,7 +999,7 @@ defmodule Kodo.Agent.Loop do
     with :ok <- within_budget(continuation, tokens, state.contract.budget),
          :ok <- rehoming_boundary(),
          {:ok, request} <- resolve_request(state.context.session_id, state.search),
-         {:ok, invocation_id} <-
+         {:ok, {invocation_id, admission}} <-
            start_subagent_invocation(
              state.parent_call,
              state.search,
@@ -1012,7 +1014,7 @@ defmodule Kodo.Agent.Loop do
            Sessions.dispatch_if_owner(state.context.ownership, fn ->
              generate(
                state.context.adapter,
-               request,
+               admission,
                messages,
                Tools.definitions_for_turn(
                  state.contract.toolset_version,
@@ -1147,12 +1149,13 @@ defmodule Kodo.Agent.Loop do
              "capability_validation" => capability_validation,
              "model_mapping" => context.mapping
            },
+           request.model,
            request.credential,
            version: 2,
            parent_id: context.invocation_id,
            ownership: context.ownership
          ) do
-      {:ok, _event} -> {:ok, invocation_id}
+      {:ok, {_event, admission}} -> {:ok, {invocation_id, admission}}
       error -> normalize_admission_error(error, request)
     end
   end
@@ -1701,20 +1704,18 @@ defmodule Kodo.Agent.Loop do
 
   defp normalize_admission_error(error, _request), do: error
 
-  defp generate(adapter, request, messages, tools, opts) do
+  defp generate(adapter, admission, messages, tools, opts) do
     LLM.generate_admitted(
-      request.model,
-      request.credential,
+      admission,
       messages,
       tools,
       Keyword.put(opts, :adapter, adapter)
     )
   end
 
-  defp generate_object(adapter, request, messages, schema, opts) do
+  defp generate_object(adapter, admission, messages, schema, opts) do
     LLM.generate_object_admitted(
-      request.model,
-      request.credential,
+      admission,
       messages,
       schema,
       Keyword.put(opts, :adapter, adapter)

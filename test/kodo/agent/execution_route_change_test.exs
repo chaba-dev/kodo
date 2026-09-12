@@ -74,6 +74,16 @@ defmodule Kodo.Agent.ExecutionRouteChangeTest do
              ExecutionRouteChange.change(changed_requirement, "openai_codex", records)
   end
 
+  test "returns a bounded error for a partially explicit malformed snapshot" do
+    malformed =
+      mapping_for_selector("gpt-4o-mini")
+      |> ModelMapping.snapshot()
+      |> update_in(["roles", "primary"], &Map.delete(&1, "capability_contract"))
+
+    assert {:error, :invalid_model_mapping_snapshot} =
+             ExecutionRouteChange.change(malformed, "openai_codex", [])
+  end
+
   defp mapping_for_selector(selector) do
     ModelMapping.balanced([
       {"test",
