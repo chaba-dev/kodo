@@ -14,6 +14,7 @@ defmodule Kodo.Sessions do
   alias Kodo.Cluster.Placement
   alias Kodo.ControlPlaneTelemetry
   alias Kodo.Integrations
+  alias Kodo.LLM
   alias Kodo.LLM.ProviderError
   alias Kodo.Repo
   alias Kodo.Runners.Runner
@@ -546,12 +547,32 @@ defmodule Kodo.Sessions do
         if turn_request_recorded?(session_id, client_request_id) do
           :ok
         else
-          start_turn(session_id, content, client_request_id)
+          with :ok <- preflight_turn(scope, session_id) do
+            start_turn(session_id, content, client_request_id)
+          end
         end
 
       nil ->
         {:error, :not_found}
     end
+  end
+
+  defp preflight_turn(scope, session_id) do
+    mapping =
+      session_id
+      |> get_session!()
+      |> turn_route_snapshot()
+      |> Map.fetch!("model_mapping")
+
+    mapping["roles"]
+    |> Map.values()
+    |> Enum.uniq_by(& &1["execution_route"])
+    |> Enum.reduce_while(:ok, fn role, :ok ->
+      case LLM.resolve_integration(scope, ModelMapping.request_model(role)) do
+        {:ok, _model, _reference} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   def cancel(session_id) do

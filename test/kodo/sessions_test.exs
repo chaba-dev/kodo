@@ -3,8 +3,10 @@ defmodule Kodo.SessionsTest do
 
   alias Kodo.Agent.ExecutionRouteChange
   alias Kodo.Agent.ModelMapping
+  alias Kodo.Agent.ModelSettings
   alias Kodo.Cluster.Instances
   alias Kodo.Integrations
+  alias Kodo.LLM.ProviderError
   alias Kodo.Runners
   alias Kodo.Sessions
   alias Kodo.Sessions.Session
@@ -357,6 +359,31 @@ defmodule Kodo.SessionsTest do
 
     assert {:error, :turn_in_progress} = Sessions.begin_turn(session.id, "Duplicate")
     assert Enum.count(Sessions.events_after(session.id), &(&1.type == "user_message")) == 1
+  end
+
+  test "rejects a turn before acceptance when any configured role lacks access", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :review, %{
+               model: "anthropic:claude-3-5-haiku-latest"
+             })
+
+    assert {:ok, _integration} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "primary-key"})
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Missing review provider",
+               model: "openai:gpt-4o-mini"
+             })
+
+    assert {:error, %ProviderError{provider: "anthropic", kind: :integration_required}} =
+             Sessions.start_turn(scope, session.id, "Do not accept", Ecto.UUID.generate())
+
+    assert Enum.map(Sessions.events_after(session.id), & &1.type) == ["session_created"]
   end
 
   test "rejects route changes without approved exact-identity evidence", %{
