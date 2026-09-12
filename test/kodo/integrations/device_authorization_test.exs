@@ -118,6 +118,22 @@ defmodule Kodo.Integrations.DeviceAuthorizationTest do
     assert calls(client) == []
   end
 
+  test "terminalizes an attempt whose deadline expires while its worker is paused", %{
+    scope: scope,
+    integration: integration
+  } do
+    client = fake_client(poll: [{:ok, exchange_payload()}])
+    {claim, payload} = claimed_attempt(scope, integration)
+
+    Repo.update!(change(claim, provider_deadline: DateTime.add(DateTime.utc_now(), -1, :second)))
+
+    assert {:error, :stale_device_authorization_claim} =
+             DeviceAuthorization.run(scope, claim, payload, client_opts(client))
+
+    assert %{state: "expired", encrypted_payload: nil} = Repo.reload!(claim)
+    assert calls(client) == []
+  end
+
   test "a healthy claim cannot be replaced by another task using the same node owner", %{
     scope: scope,
     integration: integration
@@ -270,6 +286,55 @@ defmodule Kodo.Integrations.DeviceAuthorizationTest do
     assert %Task{} = started.task
     assert {:error, :device_authorization_rejected} = Task.await(started.task)
     assert Repo.reload!(started.attempt).state == "failed"
+  end
+
+  test "begin claims the new attempt before another worker can take it", %{
+    scope: scope,
+    integration: integration
+  } do
+    owner = self()
+    supervisor = start_supervised!(Task.Supervisor)
+
+    blocking_poll = fn :poll, _payload ->
+      send(owner, {:begin_worker_claimed, self()})
+
+      receive do
+        :finish_begin_worker -> {:error, :device_authorization_rejected}
+      end
+    end
+
+    client =
+      fake_client(
+        create: [
+          {:ok,
+           %{
+             payload: %{"device_auth_id" => "device", "user_code" => "CODE"},
+             polling_interval_ms: 0,
+             verification_url: "https://auth.openai.com/codex/device"
+           }}
+        ],
+        poll: [blocking_poll]
+      )
+
+    assert {:ok, started} =
+             DeviceAuthorization.begin(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               client_opts(client, supervisor: supervisor, claim_owner_id: Ecto.UUID.generate())
+             )
+
+    assert_receive {:begin_worker_claimed, worker}
+
+    assert {:error, :device_authorization_not_claimable} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    send(worker, :finish_begin_worker)
+    assert {:error, :device_authorization_rejected} = Task.await(started.task)
   end
 
   test "begin rejects a client-selected verification destination before persistence", %{

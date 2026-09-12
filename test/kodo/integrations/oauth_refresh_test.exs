@@ -164,6 +164,112 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
     assert persisted["access_token"] == second_tokens["access_token"]
   end
 
+  test "a delayed success restores its active selection after provisional invalid grant",
+       context do
+    owner = self()
+
+    first_response = fn _refresh_token ->
+      send(owner, {:successful_refresh_started, self()})
+
+      receive do
+        :finish_successful_refresh -> {:ok, rotated_tokens("account", "recovered")}
+      end
+    end
+
+    client = fake_client([first_response, {:error, :invalid_grant}])
+    first = Task.async(fn -> refresh(context, client) end)
+    assert_receive {:successful_refresh_started, first_worker}
+
+    context.integration
+    |> Repo.reload!()
+    |> change(refresh_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second))
+    |> Repo.update!()
+
+    assert {:error, :integration_reauthorization_required} = refresh(context, client)
+    refute Repo.reload!(context.integration).active
+
+    send(first_worker, :finish_successful_refresh)
+    assert {:ok, recovered} = Task.await(first)
+    assert recovered.active
+
+    assert {:ok, active} =
+             Integrations.get_active_integration_by_provider(context.scope, "openai_codex")
+
+    assert active.id == context.integration.id
+  end
+
+  test "a delayed success does not replace a newer explicit active selection", context do
+    owner = self()
+
+    first_response = fn _refresh_token ->
+      send(owner, {:selectable_refresh_started, self()})
+
+      receive do
+        :finish_selectable_refresh -> {:ok, rotated_tokens("account", "late")}
+      end
+    end
+
+    client = fake_client([first_response, {:error, :invalid_grant}])
+    first = Task.async(fn -> refresh(context, client) end)
+    assert_receive {:selectable_refresh_started, first_worker}
+
+    context.integration
+    |> Repo.reload!()
+    |> change(refresh_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second))
+    |> Repo.update!()
+
+    assert {:error, :integration_reauthorization_required} = refresh(context, client)
+
+    sibling = oauth_integration(context.scope, "Second subscription")
+
+    assert {:ok, sibling} =
+             Integrations.oauth_succeeded(context.scope, sibling.id, 0, current_tokens(),
+               expires_at: DateTime.add(DateTime.utc_now(), 3_600, :second)
+             )
+
+    assert {:ok, sibling} =
+             Integrations.activate(
+               context.scope,
+               sibling.id,
+               sibling.credential_generation
+             )
+
+    send(first_worker, :finish_selectable_refresh)
+    assert {:ok, recovered} = Task.await(first)
+    refute recovered.active
+    assert Repo.reload!(sibling).active
+  end
+
+  test "persists a rotated response that expires during a worker pause and refreshes it again",
+       context do
+    admitted_at = DateTime.add(DateTime.utc_now(), -2, :second)
+
+    expired_rotation =
+      rotated_tokens("account", "short")
+      |> put_in(
+        ["access_token"],
+        jwt(%{"exp" => DateTime.utc_now() |> DateTime.to_unix() |> Kernel.-(1)})
+      )
+
+    client = fake_client([{:ok, expired_rotation}, {:ok, rotated_tokens("account", "usable")}])
+
+    assert {:ok, refreshed} =
+             OAuthRefresh.ensure_fresh(context.scope, context.integration,
+               force: true,
+               now: admitted_at,
+               client: FakeRefreshClient,
+               client_options: [agent: client],
+               supervisor: context.supervisor,
+               claim_owner_id: Ecto.UUID.generate()
+             )
+
+    assert refreshed.credential_generation == context.integration.credential_generation + 2
+    assert Agent.get(client, &Enum.reverse(&1.refresh_tokens)) == ["old-refresh", "short-refresh"]
+
+    assert {:ok, credentials} = CredentialEncryption.decrypt(refreshed)
+    assert credentials["refresh_token"] == "usable-refresh"
+  end
+
   test "persists a rotated response after its caller stops waiting", context do
     owner = self()
 
@@ -229,6 +335,36 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
              reauthorizing.credential_generation
   end
 
+  test "an expired abandoned authorization attempt is terminalized before refresh", context do
+    assert {:ok, attempt} =
+             Integrations.begin_device_authorization(
+               context.scope,
+               context.integration.id,
+               context.integration.credential_generation,
+               %{"device_auth_id" => "abandoned", "user_code" => "OLD"},
+               0
+             )
+
+    Repo.update!(
+      change(attempt, provider_deadline: DateTime.add(DateTime.utc_now(), -1, :second))
+    )
+
+    reauthorizing = Repo.reload!(context.integration)
+    client = fake_client([{:ok, rotated_tokens("account")}])
+
+    assert {:ok, _refreshed} =
+             OAuthRefresh.ensure_fresh(context.scope, reauthorizing,
+               force: true,
+               client: FakeRefreshClient,
+               client_options: [agent: client],
+               supervisor: context.supervisor,
+               claim_owner_id: Ecto.UUID.generate()
+             )
+
+    assert %{state: "expired", encrypted_payload: nil} = Repo.reload!(attempt)
+    assert Agent.get(client, &Enum.reverse(&1.refresh_tokens)) == ["old-refresh"]
+  end
+
   test "user deletion cascades OAuth state and fences an in-flight refresh", context do
     owner = self()
 
@@ -279,6 +415,16 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
       {Agent, fn -> %{responses: responses, refresh_tokens: []} end},
       id: {:fake_refresh_client, System.unique_integer([:positive])}
     )
+  end
+
+  defp oauth_integration(scope, display_name) do
+    %Integration{user_id: scope.user.id}
+    |> Integration.create_changeset(%{
+      provider: "openai_codex",
+      authentication_type: "oauth",
+      display_name: display_name
+    })
+    |> Repo.insert!()
   end
 
   defp current_tokens do

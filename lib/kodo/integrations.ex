@@ -164,11 +164,57 @@ defmodule Kodo.Integrations do
   def begin_device_authorization(%Scope{}, _id, _generation, _payload, _interval),
     do: {:error, :device_authorization_invalid}
 
+  @doc false
+  def begin_claimed_device_authorization(
+        %Scope{user: user},
+        integration_id,
+        expected_generation,
+        payload,
+        polling_interval_ms,
+        claim_owner_id
+      )
+      when is_integer(expected_generation) and expected_generation >= 0 and
+             is_integer(polling_interval_ms) and polling_interval_ms >= 0 and
+             polling_interval_ms <= 900_000 do
+    with {:ok, integration_id} <- cast_uuid(integration_id),
+         {:ok, claim_owner_id} <- cast_uuid(claim_owner_id),
+         :ok <- validate_device_authorization_payload(payload) do
+      result =
+        Repo.transaction(fn ->
+          attempt =
+            begin_device_authorization_locked(
+              user.id,
+              integration_id,
+              expected_generation,
+              payload,
+              polling_interval_ms
+            )
+
+          {claim, decrypted} =
+            claim_device_authorization_locked(user.id, integration_id, claim_owner_id)
+
+          {attempt, claim, decrypted}
+        end)
+
+      case result do
+        {:ok, {attempt, _claim, _decrypted}} ->
+          broadcast_device_authorization_change(attempt)
+          result
+
+        error ->
+          error
+      end
+    end
+  end
+
+  def begin_claimed_device_authorization(%Scope{}, _id, _generation, _payload, _interval, _owner),
+    do: {:error, :device_authorization_invalid}
+
   def get_active_device_authorization(%Scope{user: user}, integration_id) do
     with {:ok, integration_id} <- cast_uuid(integration_id) do
       result =
         Repo.transaction(fn ->
-          expired = expire_device_authorization(user.id, integration_id)
+          expired = expire_device_authorization_rows(user.id, integration_id)
           {expired, read_active_device_authorization(user.id, integration_id)}
         end)
 
@@ -187,12 +233,21 @@ defmodule Kodo.Integrations do
     end
   end
 
+  @doc false
+  def expire_device_authorization(%Scope{user: user}, integration_id) do
+    with {:ok, integration_id} <- cast_uuid(integration_id) do
+      expired = expire_device_authorization_rows(user.id, integration_id)
+      Enum.each(expired, &broadcast_device_authorization_change/1)
+      {:ok, expired}
+    end
+  end
+
   def claim_device_authorization(%Scope{user: user}, integration_id, claim_owner_id) do
     with {:ok, integration_id} <- cast_uuid(integration_id),
          {:ok, claim_owner_id} <- cast_uuid(claim_owner_id) do
       result =
         Repo.transaction(fn ->
-          expired = expire_device_authorization(user.id, integration_id)
+          expired = expire_device_authorization_rows(user.id, integration_id)
           {expired, claim_device_authorization_locked(user.id, integration_id, claim_owner_id)}
         end)
 
@@ -454,7 +509,9 @@ defmodule Kodo.Integrations do
       id,
       generation,
       credentials,
-      Keyword.put(opts, :refresh_source_generation, generation),
+      opts
+      |> Keyword.put(:refresh_source_generation, generation)
+      |> Keyword.put_new(:restore_active, false),
       ~w(connected reauthorization_required),
       "oauth",
       "refresh_succeeded"
@@ -469,6 +526,10 @@ defmodule Kodo.Integrations do
       when is_integer(generation) and generation >= 0 do
     with {:ok, id} <- cast_uuid(id),
          {:ok, claim_owner_id} <- cast_uuid(claim_owner_id) do
+      user.id
+      |> expire_device_authorization_rows(id)
+      |> Enum.each(&broadcast_device_authorization_change/1)
+
       query =
         from integration in Integration,
           as: :integration,
@@ -969,7 +1030,7 @@ defmodule Kodo.Integrations do
     if !DateTime.after?(expires_at, timestamp),
       do: Repo.rollback(:device_authorization_response_invalid)
 
-    attempt = lock_claimed_device_authorization!(user_id, integration, claim)
+    attempt = lock_device_authorization_completion!(user_id, integration, claim)
 
     case CredentialEncryption.encrypt(integration, credentials) do
       {:ok, encrypted} ->
@@ -1025,7 +1086,7 @@ defmodule Kodo.Integrations do
 
   # The boolean terms below are one atomic database fence, not control-flow branches.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp lock_claimed_device_authorization!(user_id, integration, claim) do
+  defp lock_device_authorization_completion!(user_id, integration, claim) do
     query =
       DeviceAuthorizationAttempt
       |> where(
@@ -1035,8 +1096,6 @@ defmodule Kodo.Integrations do
           attempt.attempt_generation == ^claim.attempt_generation and attempt.state == "active" and
           attempt.claim_owner_id == ^claim.claim_owner_id and
           attempt.claim_epoch == ^claim.claim_epoch and
-          attempt.claim_lease_expires_at > fragment("clock_timestamp()") and
-          attempt.provider_deadline > fragment("clock_timestamp()") and
           attempt.expected_integration_generation == ^integration.credential_generation
       )
       |> lock("FOR UPDATE")
@@ -1197,7 +1256,7 @@ defmodule Kodo.Integrations do
     |> Kernel.+(1)
   end
 
-  defp expire_device_authorization(user_id, integration_id) do
+  defp expire_device_authorization_rows(user_id, integration_id) do
     query =
       DeviceAuthorizationAttempt
       |> where(
@@ -1365,6 +1424,7 @@ defmodule Kodo.Integrations do
           refresh_claim_generation: nil,
           refresh_lease_expires_at: nil
         })
+        |> Map.put(:restore_active, opts[:restore_active])
 
       update_fenced(scope, id, generation, allowed_connections, audit_event_type, changes)
     else
@@ -1474,11 +1534,14 @@ defmodule Kodo.Integrations do
         Repo.transaction(fn ->
           maybe_lock_transition(user.id, id, audit_event_type)
 
+          {restore_active, changes} = Map.pop(changes, :restore_active, false)
+
           integration =
             execute_fenced_update(user.id, id, generation, allowed_connections, changes)
 
           maybe_terminalize_device_authorization(user.id, id, audit_event_type)
           integration = maybe_activate_initial_oauth(user.id, integration, audit_event_type)
+          integration = maybe_restore_refresh_selection(user.id, integration, restore_active)
           audit!(user.id, integration, audit_event_type)
           integration
         end)
@@ -1549,8 +1612,11 @@ defmodule Kodo.Integrations do
     end
   end
 
-  defp maybe_lock_transition(user_id, _integration_id, "refresh_succeeded") do
-    lock_user!(user_id)
+  defp maybe_lock_transition(user_id, integration_id, "refresh_succeeded") do
+    case Repo.get_by(Integration, id: integration_id, user_id: user_id) do
+      %Integration{provider: provider} -> lock_provider_identity(user_id, provider)
+      nil -> lock_user!(user_id)
+    end
   end
 
   defp maybe_lock_transition(_user_id, _integration_id, _event_type), do: :ok
@@ -1581,6 +1647,16 @@ defmodule Kodo.Integrations do
   end
 
   defp maybe_activate_initial_oauth(_user_id, integration, _event_type), do: integration
+
+  defp maybe_restore_refresh_selection(user_id, integration, true) do
+    if !integration.active and !active_provider_account_exists?(user_id, integration.provider) do
+      integration |> change(active: true, updated_at: now()) |> Repo.update!()
+    else
+      integration
+    end
+  end
+
+  defp maybe_restore_refresh_selection(_user_id, integration, _restore_active), do: integration
 
   defp provider_account_exists?(user_id, provider) do
     Repo.exists?(

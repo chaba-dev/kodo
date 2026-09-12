@@ -12,17 +12,24 @@ defmodule Kodo.Integrations.DeviceAuthorization do
   def begin(%Scope{} = scope, integration_id, expected_generation, opts \\ []) do
     client = Keyword.get(opts, :client, configured_client())
     client_options = Keyword.get(opts, :client_options, [])
+    claim_owner_id = Keyword.get_lazy(opts, :claim_owner_id, &Ecto.UUID.generate/0)
+    supervisor = Keyword.get(opts, :supervisor, Kodo.ControlPlaneTaskSupervisor)
 
     with {:ok, created} <- safe_create(client, client_options),
-         {:ok, attempt} <-
-           Integrations.begin_device_authorization(
+         {:ok, {attempt, claim, payload}} <-
+           Integrations.begin_claimed_device_authorization(
              scope,
              integration_id,
              expected_generation,
              created.payload,
-             created.polling_interval_ms
-           ),
-         {:ok, task} <- resume(scope, integration_id, opts) do
+             created.polling_interval_ms,
+             claim_owner_id
+           ) do
+      task =
+        Task.Supervisor.async_nolink(supervisor, fn ->
+          run(scope, claim, payload, opts)
+        end)
+
       {:ok,
        %{
          attempt: attempt,
@@ -78,7 +85,9 @@ defmodule Kodo.Integrations.DeviceAuthorization do
           fail(scope, admission, reason)
       end
     else
-      {:error, reason} -> stop(reason)
+      {:error, reason} ->
+        _result = Integrations.expire_device_authorization(scope, claim.integration_id)
+        stop(reason)
     end
   end
 

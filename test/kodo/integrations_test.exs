@@ -1389,6 +1389,58 @@ defmodule Kodo.IntegrationsTest do
       assert Repo.reload!(integration).connection_status == "disconnected"
     end
 
+    test "completion accepts an exchange admitted before its lease expires", %{scope: scope} do
+      integration = oauth_integration(scope)
+
+      assert {:ok, _attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 0
+               )
+
+      assert {:ok, {claim, _payload}} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 integration.id,
+                 Ecto.UUID.generate()
+               )
+
+      assert {:ok, claim} =
+               Integrations.store_device_authorization_exchange(scope, claim, %{
+                 "authorization_code" => "code",
+                 "code_challenge" => "challenge",
+                 "code_verifier" => "verifier"
+               })
+
+      assert {:ok, {admission, _payload}} =
+               Integrations.admit_device_authorization_exchange(scope, claim)
+
+      Repo.update!(
+        change(admission, claim_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second))
+      )
+
+      credentials = %{
+        "access_token" => "access",
+        "refresh_token" => "refresh",
+        "id_token" => "identity",
+        "account_id" => "account"
+      }
+
+      assert {:ok, completed} =
+               Integrations.complete_device_authorization(
+                 scope,
+                 admission,
+                 credentials,
+                 DateTime.add(DateTime.utc_now(), 3_600, :second)
+               )
+
+      assert completed.connection_status == "connected"
+      assert Repo.reload!(admission).state == "completed"
+    end
+
     test "cancellation is owned and generation fenced and removes the one-time code", %{
       scope: scope
     } do
