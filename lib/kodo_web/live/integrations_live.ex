@@ -509,14 +509,23 @@ defmodule KodoWeb.IntegrationsLive do
     tracked_keys = MapSet.new(socket.assigns.device_authorization_tasks, &elem(&1, 1))
 
     if connected?(socket) do
-      Enum.reduce(active_keys, socket, fn {integration_id, generation} = key, acc ->
-        if Map.has_key?(retries, key) or MapSet.member?(tracked_keys, key),
-          do: acc,
-          else: schedule_device_authorization_retry(acc, integration_id, generation)
+      Enum.reduce(active_keys, socket, fn key, acc ->
+        ensure_device_authorization_retry(acc, key, retries, tracked_keys)
       end)
     else
       socket
     end
+  end
+
+  defp ensure_device_authorization_retry(
+         socket,
+         {integration_id, generation} = key,
+         retries,
+         tracked_keys
+       ) do
+    if Map.has_key?(retries, key) or MapSet.member?(tracked_keys, key),
+      do: socket,
+      else: schedule_device_authorization_retry(socket, integration_id, generation)
   end
 
   # Browser-facing state needs lifecycle metadata only. In particular, keeping
