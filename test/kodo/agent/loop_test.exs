@@ -923,6 +923,11 @@ defmodule Kodo.Agent.LoopTest do
     assert_receive {:tool_request, request}
     assert request["request"] == %{"tool" => "git_diff", "paths" => []}
 
+    refute Enum.any?(
+             Sessions.events_after(session.id),
+             &(&1.type == "review_invocation_started")
+           )
+
     broadcast_success(runner, request, %{
       "result" => "output",
       "content" => "clean diff",
@@ -958,6 +963,73 @@ defmodule Kodo.Agent.LoopTest do
              event.type == "review_result" and event.payload["clean"] and
                event.payload["findings"] == []
            end)
+  end
+
+  test "resolves and admits the review credential after the final diff is available", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+
+    assert {:ok, anthropic} =
+             Integrations.connect(scope, "anthropic", "api_key", %{"api_key" => "review-key"})
+
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :review, %{
+               model: "anthropic:claude-3-5-haiku-latest"
+             })
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Fresh review credential",
+               model: "openai:gpt-4o-mini"
+             })
+
+    assert {:ok, ownership} = Sessions.claim_ownership(session.id, nil)
+
+    assert {:ok, _event} =
+             Sessions.append_event(
+               session.id,
+               "user_message",
+               %{"role" => "user", "content" => "final answer"},
+               ownership: ownership
+             )
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:tool_request, request}
+    assert request["request"]["tool"] == "git_diff"
+
+    refute Enum.any?(
+             Sessions.events_after(session.id),
+             &(&1.type == "review_invocation_started")
+           )
+
+    assert {:ok, _disconnected} =
+             Integrations.disconnect(scope, anthropic.id, anthropic.credential_generation)
+
+    broadcast_success(runner, request, %{
+      "result" => "output",
+      "content" => "clean diff",
+      "truncated" => false
+    })
+
+    assert {:error, %Kodo.LLM.ProviderError{} = error} = Task.await(loop)
+    assert error.provider == "anthropic"
+    assert error.kind == :integration_required
+
+    refute Enum.any?(
+             Sessions.events_after(session.id),
+             &(&1.type == "review_invocation_started")
+           )
   end
 
   test "feeds supported review findings back to primary and reviews the correction", %{
