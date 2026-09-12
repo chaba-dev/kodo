@@ -550,22 +550,11 @@ defmodule Kodo.Sessions do
         %Credential{} = credential,
         opts \\ []
       ) do
-    case Repo.transaction(fn ->
-           session = lock_session!(session_id, opts)
-           admit_model_credential!(session, credential)
+    transaction = fn ->
+      append_admitted_model_event_locked(session_id, type, payload, credential, opts)
+    end
 
-           payload =
-             Map.merge(payload, %{
-               "provider" => credential.provider,
-               "authentication_type" => credential.authentication_type,
-               "billing_path" => Atom.to_string(credential.billing_path)
-             })
-
-           case append_locked(session, type, payload, opts) do
-             {:ok, event} -> event
-             {:error, changeset} -> Repo.rollback(changeset)
-           end
-         end) do
+    case Repo.transaction(transaction) do
       {:ok, event} = result ->
         broadcast(event)
         result
@@ -578,16 +567,20 @@ defmodule Kodo.Sessions do
   def start_turn(%Scope{} = scope, session_id, content, client_request_id) do
     case get_session(scope, session_id) do
       %Session{} ->
-        if turn_request_recorded?(session_id, client_request_id) do
-          :ok
-        else
-          with :ok <- preflight_turn(scope, session_id) do
-            start_turn(session_id, content, client_request_id)
-          end
-        end
+        start_scoped_turn(scope, session_id, content, client_request_id)
 
       nil ->
         {:error, :not_found}
+    end
+  end
+
+  defp start_scoped_turn(scope, session_id, content, client_request_id) do
+    if turn_request_recorded?(session_id, client_request_id) do
+      :ok
+    else
+      with :ok <- preflight_turn(scope, session_id) do
+        start_turn(session_id, content, client_request_id)
+      end
     end
   end
 
@@ -625,6 +618,23 @@ defmodule Kodo.Sessions do
       |> Repo.exists?()
 
     if !admitted?, do: Repo.rollback(:stale_credential_generation)
+  end
+
+  defp append_admitted_model_event_locked(session_id, type, payload, credential, opts) do
+    session = lock_session!(session_id, opts)
+    admit_model_credential!(session, credential)
+
+    payload =
+      Map.merge(payload, %{
+        "provider" => credential.provider,
+        "authentication_type" => credential.authentication_type,
+        "billing_path" => Atom.to_string(credential.billing_path)
+      })
+
+    case append_locked(session, type, payload, opts) do
+      {:ok, event} -> event
+      {:error, changeset} -> Repo.rollback(changeset)
+    end
   end
 
   def cancel(session_id) do
