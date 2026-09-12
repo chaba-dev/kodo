@@ -58,10 +58,20 @@ defmodule Kodo.Integrations.ReqRefreshClientTest do
   end
 
   test "rejects redirects, malformed success, and unsafe caller input with bounded errors" do
-    redirect = fn conn -> Plug.Conn.send_resp(conn, 302, "private") end
+    counter = start_supervised!({Agent, fn -> 0 end})
+
+    redirect = fn conn ->
+      Agent.update(counter, &(&1 + 1))
+
+      conn
+      |> Plug.Conn.put_resp_header("location", "https://auth.openai.com/oauth/redirected")
+      |> Plug.Conn.send_resp(302, "private")
+    end
+
     malformed = fn conn -> Req.Test.json(conn, %{"refresh_token" => "private"}) end
 
     assert {:error, :redirect} = ReqRefreshClient.refresh("refresh-secret", plug: redirect)
+    assert Agent.get(counter, & &1) == 1
 
     assert {:error, :oauth_refresh_response_invalid} =
              ReqRefreshClient.refresh("refresh-secret", plug: malformed)

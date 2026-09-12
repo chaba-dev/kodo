@@ -93,6 +93,7 @@ defmodule Kodo.LLM.ReqLLMTest do
     assert options[:auth_mode] == :oauth
     assert options[:access_token] == "request-local-access"
     assert options[:chatgpt_account_id] == "request-local-account"
+    assert options[:provider_options] == [codex_originator: "kodo"]
     refute Keyword.has_key?(options, :refresh_token)
   end
 

@@ -111,13 +111,20 @@ defmodule Kodo.LLM.SafeReqAdapter do
 
   defp send_request(request, conn, timeout) do
     method = request.method |> to_string() |> String.upcase()
-    path = URI.to_string(%{request.url | scheme: nil, host: nil, port: nil, userinfo: nil})
+    path = request_target(request.url)
     headers = Req.Fields.get_list(request.headers)
 
     case Mint.HTTP.request(conn, method, path, headers, request.body) do
       {:ok, conn, ref} -> receive_response(request, conn, ref, timeout, empty_response())
       {:error, conn, reason} -> close_with_error(request, conn, reason)
     end
+  end
+
+  @doc false
+  def request_target(url) do
+    # Build a fresh URI because URI.parse/1 retains a legacy authority field.
+    # Mutating the absolute URI could therefore send `//host/path` to Mint.
+    URI.to_string(%URI{path: url.path || "/", query: url.query})
   end
 
   defp receive_response(request, conn, ref, timeout, response) do

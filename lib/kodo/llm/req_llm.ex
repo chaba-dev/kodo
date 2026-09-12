@@ -248,6 +248,7 @@ defmodule Kodo.LLM.ReqLLM do
     |> Keyword.put(:auth_mode, :oauth)
     |> Keyword.put(:access_token, token)
     |> Keyword.put(:chatgpt_account_id, account_id)
+    |> Keyword.put(:provider_options, codex_originator: "kodo")
   end
 
   # ReqLLM emits terminal errors to telemetry before returning control to Kodo.

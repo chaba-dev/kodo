@@ -5,6 +5,13 @@ defmodule Kodo.LLM.SafeReqAdapterTest do
 
   alias Kodo.LLM.SafeReqAdapter
 
+  test "uses an origin-form request target for absolute provider URLs" do
+    url = URI.parse("https://chatgpt.com/backend-api/codex/responses?stream=true")
+
+    assert SafeReqAdapter.request_target(url) ==
+             "/backend-api/codex/responses?stream=true"
+  end
+
   test "removes operation secrets and untrusted details before error steps" do
     request =
       Req.new(
