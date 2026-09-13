@@ -48,6 +48,7 @@ config :phoenix, :filter_parameters, [
   "refresh_token",
   "id_token",
   "device_code",
+  "device_authorization_attempt_id",
   "device_auth_id",
   "user_code",
   "code_verifier",

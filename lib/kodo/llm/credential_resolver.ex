@@ -48,6 +48,7 @@ defmodule Kodo.LLM.CredentialResolver do
          :ok <- require_authentication_type(integration, reference),
          :ok <- require_billing_path(integration, reference),
          :ok <- require_usable(integration),
+         :ok <- require_active(integration),
          {:ok, integration} <- OAuthRefresh.ensure_fresh(scope, integration),
          {:ok, payload} <- CredentialEncryption.decrypt(integration) do
       build_credential(integration, reference, payload)
@@ -112,6 +113,9 @@ defmodule Kodo.LLM.CredentialResolver do
 
   defp require_billing_path(%Integration{}, %IntegrationRef{}),
     do: {:error, :integration_billing_mismatch}
+
+  defp require_active(%Integration{active: true}), do: :ok
+  defp require_active(%Integration{}), do: {:error, :stale_credential_generation}
 
   defp require_usable(%Integration{connection_status: "disconnected"}),
     do: {:error, :integration_disconnected}

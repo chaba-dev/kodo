@@ -4,7 +4,7 @@ defmodule Kodo.Agent.ModelCapabilities do
   alias ReqLLM.ModelHelpers
 
   def validate(model_spec, role_mapping, contract) do
-    required = requirements(contract)
+    required = requirements(role_mapping, contract)
 
     with {:ok, model} <- resolve(model_spec),
          [] <- missing_capabilities(model, role_mapping, required) do
@@ -47,9 +47,14 @@ defmodule Kodo.Agent.ModelCapabilities do
   defp require_capability(missing, false, _capability), do: missing
 
   defp require_modalities(missing, model, required) do
-    supported = model.modalities |> then(&(&1 && &1.input)) |> List.wrap()
+    supported =
+      model.modalities
+      |> then(&(&1 && &1.input))
+      |> List.wrap()
+      |> Enum.map(&to_string/1)
 
     Enum.reduce(required, missing, fn modality, missing ->
+      modality = to_string(modality)
       require_capability(missing, modality not in supported, "input:#{modality}")
     end)
   end
@@ -83,7 +88,28 @@ defmodule Kodo.Agent.ModelCapabilities do
 
   defp context_window(model), do: (model.limits && model.limits.context) || 0
 
-  defp requirements(contract) do
+  defp requirements(
+         %{
+           "capability_contract" => %{
+             "requirements" => %{
+               "tools" => tools,
+               "structured_output" => structured_output,
+               "min_context" => min_context,
+               "input_modalities" => input_modalities
+             }
+           }
+         },
+         _contract
+       ) do
+    %{
+      tools: tools,
+      structured_output: structured_output(structured_output),
+      min_context: min_context,
+      input_modalities: input_modalities
+    }
+  end
+
+  defp requirements(_role_mapping, contract) do
     Map.get(contract, :capabilities, %{
       tools: true,
       structured_output: false,
@@ -91,4 +117,8 @@ defmodule Kodo.Agent.ModelCapabilities do
       input_modalities: [:text]
     })
   end
+
+  defp structured_output("json_schema"), do: :json_schema
+  defp structured_output("object"), do: :object
+  defp structured_output(value), do: value
 end

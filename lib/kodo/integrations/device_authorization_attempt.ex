@@ -15,6 +15,7 @@ defmodule Kodo.Integrations.DeviceAuthorizationAttempt do
     field :state, :string, default: "active"
     field :attempt_generation, :integer
     field :expected_integration_generation, :integer
+    field :activate_on_completion, :boolean, default: false
     field :encrypted_payload, :binary, redact: true
     field :encryption_key_version, :string
     field :payload_format_version, :integer
@@ -39,6 +40,7 @@ defmodule Kodo.Integrations.DeviceAuthorizationAttempt do
       :provider,
       :attempt_generation,
       :expected_integration_generation,
+      :activate_on_completion,
       :provider_deadline,
       :polling_interval_ms,
       :next_poll_at
@@ -51,6 +53,7 @@ defmodule Kodo.Integrations.DeviceAuthorizationAttempt do
       :state,
       :attempt_generation,
       :expected_integration_generation,
+      :activate_on_completion,
       :encrypted_payload,
       :encryption_key_version,
       :payload_format_version,

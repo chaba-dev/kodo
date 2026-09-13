@@ -72,11 +72,27 @@ defmodule Kodo.Agent.ModelMapping do
          role_mapping
          |> Map.put("execution_route", role_mapping["provider"])
          |> Map.put("model_selector", model_selector(role_mapping["model"]))
-         |> Map.put("capability_contract", capability_contract(contract))}
+         |> Map.put_new("capability_contract", capability_contract(contract))}
       end)
 
     %{mapping | "roles" => roles}
   end
+
+  @doc "Validates a persisted turn snapshot without repairing it from current defaults."
+  def validate_snapshot(
+        %{"profile" => profile, "profile_version" => version, "roles" => roles} = snapshot
+      )
+      when is_binary(profile) and profile != "" and is_binary(version) and version != "" and
+             is_map(roles) and map_size(roles) == 3 do
+    if Enum.sort(Map.keys(roles)) == ~w(primary review search) and
+         Enum.all?(roles, fn {role, mapping} -> valid_snapshot_role?(role, mapping) end) do
+      {:ok, snapshot}
+    else
+      {:error, :invalid_model_mapping_snapshot}
+    end
+  end
+
+  def validate_snapshot(_snapshot), do: {:error, :invalid_model_mapping_snapshot}
 
   @doc "Builds the provider-specific request model from an immutable route snapshot."
   def request_model(%{"execution_route" => route, "model_selector" => selector})
@@ -97,6 +113,67 @@ defmodule Kodo.Agent.ModelMapping do
         "input_modalities" => Enum.map(contract.capabilities.input_modalities, &to_string/1)
       }
     }
+  end
+
+  defp valid_snapshot_role?(
+         role,
+         %{
+           "model" => model,
+           "reasoning" => reasoning,
+           "provider" => provider,
+           "execution_route" => route,
+           "model_selector" => selector,
+           "role_contract" => role_contract,
+           "toolset_version" => toolset_version,
+           "capability_contract" => %{
+             "id" => capability_id,
+             "toolset_version" => capability_toolset,
+             "requirements" => %{
+               "tools" => tools,
+               "structured_output" => structured_output,
+               "min_context" => min_context,
+               "input_modalities" => modalities
+             }
+           }
+         }
+       ) do
+    valid_snapshot_identity?(role, [
+      model,
+      reasoning,
+      provider,
+      route,
+      selector,
+      role_contract,
+      toolset_version
+    ]) and
+      capability_id == role_contract and capability_toolset == toolset_version and
+      valid_snapshot_route?(model, provider, route, selector) and
+      valid_snapshot_requirements?(tools, structured_output, min_context, modalities) and
+      executable_contract?(role, role_contract, toolset_version)
+  end
+
+  defp valid_snapshot_role?(_role, _mapping), do: false
+
+  defp valid_snapshot_identity?(role, values) do
+    role in ~w(primary review search) and
+      Enum.all?(values, &(is_binary(&1) and &1 != ""))
+  end
+
+  defp valid_snapshot_route?(model, provider, route, selector) do
+    model == "#{route}:#{selector}" and provider == route
+  end
+
+  defp valid_snapshot_requirements?(tools, structured_output, min_context, modalities) do
+    is_boolean(tools) and structured_output in [false, "json_schema", "object"] and
+      is_integer(min_context) and min_context > 0 and is_list(modalities) and modalities != [] and
+      Enum.all?(modalities, &(is_binary(&1) and &1 != ""))
+  end
+
+  defp executable_contract?(role, contract_id, toolset_version) do
+    contract = Roles.fetch!(role_atom(role), contract_id)
+    contract.toolset_version == toolset_version
+  rescue
+    KeyError -> false
   end
 
   defp role_atom("primary"), do: :primary

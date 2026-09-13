@@ -44,6 +44,7 @@ defmodule KodoWeb.IntegrationsLive do
   @providers Enum.map(@provider_configs, & &1.id)
   @actions ~w(connect replace reauthorize disconnect)
   @max_api_key_bytes 4_096
+  @device_authorization_retry_ms 30_100
 
   @impl true
   def mount(_params, _session, socket) do
@@ -63,9 +64,17 @@ defmodule KodoWeb.IntegrationsLive do
       |> assign(:api_key_form, empty_form())
       |> assign(:validation_tasks, %{})
       |> assign(:device_authorization_tasks, %{})
+      |> assign(:device_authorization_retries, %{})
       |> load_integrations()
 
-    socket = if connected?(socket), do: resume_device_authorizations(socket), else: socket
+    socket =
+      if connected?(socket) do
+        {:ok, _deleted_count} = Integrations.cleanup_device_authorizations()
+        resume_device_authorizations(socket)
+      else
+        socket
+      end
+
     {:ok, socket}
   end
 
@@ -251,7 +260,7 @@ defmodule KodoWeb.IntegrationsLive do
 
   def handle_event(
         "cancel_device_authorization",
-        %{"attempt" => attempt_id, "generation" => generation},
+        %{"device_authorization_attempt_id" => attempt_id, "generation" => generation},
         socket
       ) do
     with {attempt_generation, ""} <- Integer.parse(generation),
@@ -300,8 +309,9 @@ defmodule KodoWeb.IntegrationsLive do
   def handle_event("disconnect", %{"modal-token" => modal_token}, socket) do
     with true <- socket.assigns.action == "disconnect",
          true <- modal_token == socket.assigns.modal_token,
-         %{id: id, credential_generation: generation, connection_status: "connected"} <-
+         %{id: id, credential_generation: generation, connection_status: connection_status} <-
            socket.assigns.action_target,
+         true <- connection_status in ~w(connected reauthorization_required),
          {:ok, integration} <-
            Integrations.disconnect(socket.assigns.current_scope, id, generation) do
       {:noreply,
@@ -324,7 +334,12 @@ defmodule KodoWeb.IntegrationsLive do
 
       Map.has_key?(socket.assigns.device_authorization_tasks, reference) ->
         Process.demonitor(reference, [:flush])
-        {:noreply, socket |> drop_device_authorization_task(reference) |> load_integrations()}
+
+        {:noreply,
+         socket
+         |> drop_device_authorization_task(reference)
+         |> load_integrations()
+         |> resume_device_authorizations()}
 
       true ->
         {:noreply, socket}
@@ -337,7 +352,11 @@ defmodule KodoWeb.IntegrationsLive do
         {:noreply, socket |> drop_validation_task(reference) |> load_integrations()}
 
       Map.has_key?(socket.assigns.device_authorization_tasks, reference) ->
-        {:noreply, socket |> drop_device_authorization_task(reference) |> load_integrations()}
+        {:noreply,
+         socket
+         |> drop_device_authorization_task(reference)
+         |> load_integrations()
+         |> resume_device_authorizations()}
 
       true ->
         {:noreply, socket}
@@ -350,6 +369,37 @@ defmodule KodoWeb.IntegrationsLive do
 
   def handle_info({:integration_changed, _id, _generation}, socket) do
     {:noreply, load_integrations(socket)}
+  end
+
+  def handle_info(
+        {:device_authorization_changed, integration_id, attempt_generation, state, _error},
+        socket
+      ) do
+    socket =
+      socket
+      |> maybe_clear_device_authorization_retry(integration_id, attempt_generation, state)
+      |> load_integrations()
+
+    if state == "failed" do
+      {:noreply, put_flash(socket, :error, "Authorization failed. Try again.")}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:retry_device_authorization, integration_id, attempt_generation}, socket) do
+    socket =
+      socket
+      |> clear_device_authorization_retry(integration_id, attempt_generation)
+      |> load_integrations()
+
+    case socket.assigns.device_authorizations[integration_id] do
+      %{attempt_generation: ^attempt_generation} ->
+        {:noreply, resume_device_authorization(socket, integration_id, attempt_generation, true)}
+
+      _terminal_or_replaced ->
+        {:noreply, socket}
+    end
   end
 
   defp save_api_key(
@@ -432,6 +482,26 @@ defmodule KodoWeb.IntegrationsLive do
     socket
     |> assign(:integrations, integrations)
     |> assign(:device_authorizations, device_authorizations)
+    |> reconcile_device_authorization_retries()
+  end
+
+  defp reconcile_device_authorization_retries(socket) do
+    active_keys =
+      MapSet.new(socket.assigns.device_authorizations, fn {integration_id, attempt} ->
+        {integration_id, attempt.attempt_generation}
+      end)
+
+    retries =
+      Enum.reduce(socket.assigns.device_authorization_retries, %{}, fn {key, timer}, kept ->
+        if MapSet.member?(active_keys, key) do
+          Map.put(kept, key, timer)
+        else
+          Process.cancel_timer(timer)
+          kept
+        end
+      end)
+
+    assign(socket, :device_authorization_retries, retries)
   end
 
   # Browser-facing state needs lifecycle metadata only. In particular, keeping
@@ -479,13 +549,60 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   defp resume_device_authorizations(socket) do
-    Enum.reduce(socket.assigns.device_authorizations, socket, fn {integration_id, _attempt},
-                                                                 acc ->
-      case DeviceAuthorization.resume(acc.assigns.current_scope, integration_id) do
-        {:ok, task} -> track_device_authorization_task(acc, task, integration_id)
-        {:error, _reason} -> acc
-      end
+    Enum.reduce(socket.assigns.device_authorizations, socket, fn {integration_id, attempt}, acc ->
+      resume_device_authorization(acc, integration_id, attempt.attempt_generation, true)
     end)
+  end
+
+  defp resume_device_authorization(socket, integration_id, attempt_generation, schedule_retry?) do
+    case DeviceAuthorization.resume(socket.assigns.current_scope, integration_id) do
+      {:ok, task} ->
+        socket
+        |> clear_device_authorization_retry(integration_id, attempt_generation)
+        |> track_device_authorization_task(task, integration_id)
+
+      {:error, :device_authorization_not_claimable} when schedule_retry? ->
+        schedule_device_authorization_retry(socket, integration_id, attempt_generation)
+
+      {:error, _reason} ->
+        socket
+    end
+  end
+
+  defp schedule_device_authorization_retry(socket, integration_id, attempt_generation) do
+    key = {integration_id, attempt_generation}
+
+    if Map.has_key?(socket.assigns.device_authorization_retries, key) do
+      socket
+    else
+      timer =
+        Process.send_after(
+          self(),
+          {:retry_device_authorization, integration_id, attempt_generation},
+          @device_authorization_retry_ms
+        )
+
+      update(socket, :device_authorization_retries, &Map.put(&1, key, timer))
+    end
+  end
+
+  defp maybe_clear_device_authorization_retry(socket, _integration_id, _generation, "active"),
+    do: socket
+
+  defp maybe_clear_device_authorization_retry(socket, integration_id, generation, _state),
+    do: clear_device_authorization_retry(socket, integration_id, generation)
+
+  defp clear_device_authorization_retry(socket, integration_id, attempt_generation) do
+    key = {integration_id, attempt_generation}
+
+    case Map.pop(socket.assigns.device_authorization_retries, key) do
+      {nil, retries} ->
+        assign(socket, :device_authorization_retries, retries)
+
+      {timer, retries} ->
+        Process.cancel_timer(timer)
+        assign(socket, :device_authorization_retries, retries)
+    end
   end
 
   defp load_device_authorizations(scope, integrations) do
@@ -497,7 +614,17 @@ defmodule KodoWeb.IntegrationsLive do
           Map.put(attempts, integration.id, %{
             attempt_id: attempt.id,
             attempt_generation: attempt.attempt_generation,
+            stage: :polling,
             user_code: user_code,
+            provider_deadline: attempt.provider_deadline
+          })
+
+        {:ok, {attempt, %{"authorization_code" => _code}}} ->
+          Map.put(attempts, integration.id, %{
+            attempt_id: attempt.id,
+            attempt_generation: attempt.attempt_generation,
+            stage: :exchanging,
+            user_code: nil,
             provider_deadline: attempt.provider_deadline
           })
 
@@ -557,8 +684,12 @@ defmodule KodoWeb.IntegrationsLive do
 
   defp action_target(
          "reauthorize",
-         %{provider: "openai_codex", connection_status: "connected"} = integration
-       ),
+         %{
+           provider: "openai_codex",
+           connection_status: connection_status
+         } = integration
+       )
+       when connection_status in ~w(connected reauthorization_required),
        do: {:ok, target_metadata(integration)}
 
   defp action_target(
@@ -567,8 +698,9 @@ defmodule KodoWeb.IntegrationsLive do
        ),
        do: {:ok, target_metadata(integration)}
 
-  defp action_target("disconnect", %{connection_status: "connected"} = integration),
-    do: {:ok, target_metadata(integration)}
+  defp action_target("disconnect", %{connection_status: connection_status} = integration)
+       when connection_status in ~w(connected reauthorization_required),
+       do: {:ok, target_metadata(integration)}
 
   defp action_target(_action, _integration), do: :error
 
@@ -819,9 +951,12 @@ defmodule KodoWeb.IntegrationsLive do
                     class="mt-4 max-w-xl rounded-2xl border border-sky-200 bg-sky-50/80 p-4 dark:border-sky-900 dark:bg-sky-950/30"
                   >
                     <p class="text-xs font-bold uppercase tracking-wider text-sky-800 dark:text-sky-300">
-                      Waiting for OpenAI authorization
+                      {if(authorization.stage == :polling,
+                        do: "Waiting for OpenAI authorization",
+                        else: "Completing OpenAI authorization"
+                      )}
                     </p>
-                    <div class="mt-3 space-y-3">
+                    <div :if={authorization.stage == :polling} class="mt-3 space-y-3">
                       <div>
                         <p class="text-xs font-medium text-zinc-500">Open this verification page</p>
                         <.link
@@ -855,6 +990,13 @@ defmodule KodoWeb.IntegrationsLive do
                         </div>
                       </div>
                     </div>
+                    <p
+                      :if={authorization.stage == :exchanging}
+                      role="status"
+                      class="mt-3 text-sm text-zinc-600 dark:text-zinc-400"
+                    >
+                      Authorization was approved. Securely exchanging credentials…
+                    </p>
                     <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
                       <p
                         role="status"
@@ -871,7 +1013,7 @@ defmodule KodoWeb.IntegrationsLive do
                         id={dom_id(integration, "cancel-device-authorization")}
                         type="button"
                         phx-click="cancel_device_authorization"
-                        phx-value-attempt={authorization.attempt_id}
+                        phx-value-device_authorization_attempt_id={authorization.attempt_id}
                         phx-value-generation={authorization.attempt_generation}
                         phx-disable-with="Cancelling…"
                         class="rounded-lg px-3 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100 disabled:opacity-60 dark:text-red-400 dark:hover:bg-red-950/40"
@@ -885,7 +1027,7 @@ defmodule KodoWeb.IntegrationsLive do
 
               <div class="flex shrink-0 flex-wrap gap-2 self-start">
                 <.link
-                  :if={!integration_connected?(integration)}
+                  :if={integration.connection_status == "disconnected"}
                   id={dom_id(integration, "reconnect")}
                   patch={action_path(integration, "connect")}
                   phx-click={JS.push_focus()}
@@ -942,7 +1084,10 @@ defmodule KodoWeb.IntegrationsLive do
                   Replace key
                 </.link>
                 <.link
-                  :if={integration_connected?(integration) and integration.provider == "openai_codex"}
+                  :if={
+                    integration.provider == "openai_codex" and
+                      integration.connection_status in ~w(connected reauthorization_required)
+                  }
                   id={dom_id(integration, "reauthorize")}
                   patch={action_path(integration, "reauthorize")}
                   phx-click={JS.push_focus()}
@@ -951,7 +1096,7 @@ defmodule KodoWeb.IntegrationsLive do
                   Reauthorize
                 </.link>
                 <.link
-                  :if={integration_connected?(integration)}
+                  :if={integration.connection_status in ~w(connected reauthorization_required)}
                   id={dom_id(integration, "disconnect")}
                   patch={action_path(integration, "disconnect")}
                   phx-click={JS.push_focus()}

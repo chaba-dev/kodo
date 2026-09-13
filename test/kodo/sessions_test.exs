@@ -2,8 +2,12 @@ defmodule Kodo.SessionsTest do
   use Kodo.DataCase
 
   alias Kodo.Agent.ExecutionRouteChange
+  alias Kodo.Agent.ModelMapping
+  alias Kodo.Agent.ModelSettings
   alias Kodo.Cluster.Instances
   alias Kodo.Integrations
+  alias Kodo.LLM
+  alias Kodo.LLM.ProviderError
   alias Kodo.Runners
   alias Kodo.Sessions
   alias Kodo.Sessions.Session
@@ -311,6 +315,9 @@ defmodule Kodo.SessionsTest do
     runner: runner,
     scope: scope
   } do
+    assert {:ok, _integration} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "turn-key"})
+
     {:ok, session} =
       Sessions.create_session(scope, %{
         runner_id: runner.id,
@@ -356,6 +363,209 @@ defmodule Kodo.SessionsTest do
 
     assert {:error, :turn_in_progress} = Sessions.begin_turn(session.id, "Duplicate")
     assert Enum.count(Sessions.events_after(session.id), &(&1.type == "user_message")) == 1
+  end
+
+  test "rejects a turn before acceptance when any configured role lacks access", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :review, %{
+               model: "anthropic:claude-3-5-haiku-latest"
+             })
+
+    assert {:ok, _integration} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "primary-key"})
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Missing review provider",
+               model: "openai:gpt-4o-mini"
+             })
+
+    assert {:error, %ProviderError{provider: "anthropic", kind: :integration_required}} =
+             Sessions.start_turn(scope, session.id, "Do not accept", Ecto.UUID.generate())
+
+    assert Enum.map(Sessions.events_after(session.id), & &1.type) == ["session_created"]
+  end
+
+  test "rechecks every role inside the transaction that accepts the turn", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, _override} =
+             ModelSettings.put_user_override(scope, :review, %{
+               model: "anthropic:claude-3-5-haiku-latest"
+             })
+
+    assert {:ok, _primary} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "primary-key"})
+
+    assert {:ok, review} =
+             Integrations.connect(scope, "anthropic", "api_key", %{"api_key" => "review-key"})
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Atomic role preflight",
+               model: "openai:gpt-4o-mini"
+             })
+
+    assert {:ok, _disconnected} =
+             Integrations.disconnect(scope, review.id, review.credential_generation)
+
+    assert {:error, %ProviderError{provider: "anthropic", kind: :integration_required}} =
+             Sessions.begin_turn(session.id, "Do not accept")
+
+    assert Enum.map(Sessions.events_after(session.id), & &1.type) == ["session_created"]
+  end
+
+  test "holds provider selection locks through turn acceptance", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, _integration} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "locked-key"})
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Atomic provider preflight",
+               model: "openai:gpt-4o-mini"
+             })
+
+    assert {:ok, _events} = Sessions.begin_turn(session.id, "Accept atomically")
+
+    key = "provider-integration:#{scope.user.id}:openai"
+
+    lock_available? =
+      Task.async(fn ->
+        Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+          %{rows: [[available?]]} =
+            Ecto.Adapters.SQL.query!(
+              Repo,
+              "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))",
+              [key]
+            )
+
+          available?
+        end)
+      end)
+      |> Task.await()
+
+    refute lock_available?
+  end
+
+  test "atomically records invocation admission for the exact active credential generation", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "admitted-key"})
+
+    assert {:ok, model, reference} = LLM.resolve_integration(scope, "openai:gpt-4o-mini")
+    assert {:ok, credential} = LLM.admit_credential(scope, model, reference)
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Admitted generation",
+               model: "openai:gpt-4o-mini"
+             })
+
+    payload = %{
+      "invocation_id" => Ecto.UUID.generate(),
+      "provider" => "forged-provider",
+      "authentication_type" => "forged-authentication",
+      "billing_path" => "forged-billing"
+    }
+
+    assert {:error, :stale_credential_generation} =
+             Sessions.append_admitted_model_event(
+               session.id,
+               "model_invocation_started",
+               payload,
+               model,
+               %{credential | billing_path: :aggregator}
+             )
+
+    assert {:ok, {event, admission}} =
+             Sessions.append_admitted_model_event(
+               session.id,
+               "model_invocation_started",
+               payload,
+               model,
+               credential
+             )
+
+    assert event.payload == %{
+             payload
+             | "provider" => credential.provider,
+               "authentication_type" => credential.authentication_type,
+               "billing_path" => Atom.to_string(credential.billing_path)
+           }
+
+    refute inspect(event) =~ "admitted-key"
+    assert integration.credential_generation == credential.credential_generation
+
+    assert {:error, :credential_options_not_allowed} =
+             LLM.generate_admitted(admission, [], [],
+               adapter: Kodo.Test.FakeLLM,
+               timeout: 1_000,
+               api_key: "forged"
+             )
+
+    assert {:ok, _disconnected} =
+             Integrations.disconnect(scope, integration.id, integration.credential_generation)
+
+    assert {:ok, %{type: :final_answer}} =
+             LLM.generate_admitted(
+               admission,
+               [%{"role" => "user", "content" => "final answer"}],
+               [],
+               adapter: Kodo.Test.FakeLLM,
+               timeout: 1_000
+             )
+  end
+
+  test "rejects a decrypted credential replaced before invocation admission", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "stale-key"})
+
+    assert {:ok, model, reference} = LLM.resolve_integration(scope, "openai:gpt-4o-mini")
+    assert {:ok, credential} = LLM.admit_credential(scope, model, reference)
+
+    assert {:ok, _replacement} =
+             Integrations.replace_credentials(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"api_key" => "replacement-key"}
+             )
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Stale generation",
+               model: "openai:gpt-4o-mini"
+             })
+
+    events_before = Sessions.events_after(session.id)
+
+    assert {:error, :stale_credential_generation} =
+             Sessions.append_admitted_model_event(
+               session.id,
+               "model_invocation_started",
+               %{"invocation_id" => Ecto.UUID.generate()},
+               model,
+               credential
+             )
+
+    assert Sessions.events_after(session.id) == events_before
   end
 
   test "rejects route changes without approved exact-identity evidence", %{
@@ -406,6 +616,21 @@ defmodule Kodo.SessionsTest do
     runner: runner,
     scope: scope
   } do
+    assert {:ok, codex} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Route subscription"
+             )
+
+    assert {:ok, _codex} =
+             Integrations.oauth_succeeded(scope, codex.id, codex.credential_generation, %{
+               "access_token" => "route-access",
+               "refresh_token" => "route-refresh",
+               "account_id" => "route-account"
+             })
+
+    assert {:ok, _platform} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "route-key"})
+
     {:ok, session} =
       Sessions.create_session(scope, %{
         runner_id: runner.id,
@@ -415,6 +640,11 @@ defmodule Kodo.SessionsTest do
 
     {:ok, [first_snapshot, _message, _status]} = Sessions.begin_turn(session.id, "First")
 
+    [created | _events] = Sessions.events_after(session.id)
+
+    primary =
+      created.payload["model_mapping"] |> ModelMapping.snapshot() |> ModelMapping.role!(:primary)
+
     records = [
       %{
         role: "primary",
@@ -422,11 +652,11 @@ defmodule Kodo.SessionsTest do
         destination: "openai",
         selector: "gpt-5.4",
         role_contract: "alpha-v1",
+        reasoning: primary["reasoning"],
+        capability_contract: primary["capability_contract"],
         status: :approved
       }
     ]
-
-    [created | _events] = Sessions.events_after(session.id)
 
     assert {:ok, changed_mapping} =
              ExecutionRouteChange.change(
@@ -434,6 +664,13 @@ defmodule Kodo.SessionsTest do
                "openai",
                records
              )
+
+    changed_mapping =
+      put_in(
+        changed_mapping,
+        ["roles", "primary", "capability_contract", "requirements", "min_context"],
+        200_000
+      )
 
     assert {:ok, route_event} =
              Sessions.append_event(
@@ -465,6 +702,15 @@ defmodule Kodo.SessionsTest do
              "primary",
              "execution_route"
            ]) == "openai"
+
+    assert get_in(second_snapshot.payload, [
+             "model_mapping",
+             "roles",
+             "primary",
+             "capability_contract",
+             "requirements",
+             "min_context"
+           ]) == 200_000
   end
 
   test "advances ownership epochs and fences every stale state mutation", %{

@@ -13,6 +13,7 @@ defmodule Kodo.Sessions.Projection do
     :model_mapping,
     route_revision: 1,
     turn_route_revision: nil,
+    turn_route_snapshot_present: false,
     turn_model_mapping: nil,
     approval_policy: "standard",
     status: "idle",
@@ -90,7 +91,10 @@ defmodule Kodo.Sessions.Projection do
   defp reduce(projection, "turn_route_snapshot", payload) do
     %{
       projection
-      | turn_model_mapping: normalize_model_mapping(payload["model_mapping"]),
+      | # Turn snapshots are immutable records. Repairing one with today's
+        # defaults would silently change a replayed request.
+        turn_route_snapshot_present: true,
+        turn_model_mapping: payload["model_mapping"],
         turn_route_revision: payload["route_revision"]
     }
   end

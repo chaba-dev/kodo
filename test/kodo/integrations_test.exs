@@ -823,6 +823,7 @@ defmodule Kodo.IntegrationsTest do
       assert after_start.connection_status == "connected"
       assert after_start.validation_status == "valid"
       assert after_start.active
+      assert is_nil(after_start.refresh_source_generation)
 
       assert {:ok, _cancelled} =
                Integrations.cancel_device_authorization(
@@ -854,6 +855,77 @@ defmodule Kodo.IntegrationsTest do
 
       assert %{connection_status: "connected", validation_status: "valid", active: true} =
                Repo.reload!(valid)
+    end
+
+    test "a later authorization completion preserves its inactive account decision", %{
+      scope: scope
+    } do
+      first = oauth_integration(scope)
+
+      assert {:ok, active} =
+               Integrations.oauth_succeeded(scope, first.id, 0, %{"access_token" => "first"})
+
+      second = oauth_integration(scope)
+
+      assert {:ok, _attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 second.id,
+                 second.credential_generation,
+                 %{"device_auth_id" => "second", "user_code" => "SECOND"},
+                 0
+               )
+
+      assert {:ok, {claim, _payload}} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 second.id,
+                 Ecto.UUID.generate()
+               )
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(scope, active.id, active.credential_generation)
+
+      assert {:ok, completed} =
+               Integrations.complete_device_authorization(
+                 scope,
+                 claim,
+                 %{
+                   "access_token" => "second-access",
+                   "refresh_token" => "second-refresh",
+                   "id_token" => "second-id",
+                   "account_id" => "second-account"
+                 },
+                 DateTime.add(DateTime.utc_now(), 3_600, :second)
+               )
+
+      refute completed.active
+    end
+
+    test "an inactive account does not become active merely because its sibling was disconnected",
+         %{
+           scope: scope
+         } do
+      first = oauth_integration(scope)
+
+      assert {:ok, active} =
+               Integrations.oauth_succeeded(scope, first.id, 0, %{"access_token" => "first"})
+
+      second = oauth_integration(scope)
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(scope, active.id, active.credential_generation)
+
+      assert {:ok, attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 second.id,
+                 second.credential_generation,
+                 %{"device_auth_id" => "second", "user_code" => "SECOND"},
+                 0
+               )
+
+      refute attempt.activate_on_completion
     end
 
     test "attempt operations suppress identifiers and ciphertext from query observability", %{
@@ -980,6 +1052,15 @@ defmodule Kodo.IntegrationsTest do
 
       assert {:error, :device_authorization_not_claimable} =
                Integrations.claim_device_authorization(scope, integration.id, second_owner)
+
+      assert {:error, :device_authorization_not_claimable} =
+               Integrations.claim_device_authorization(scope, integration.id, first_owner)
+
+      Repo.update!(
+        change(first_claim,
+          claim_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)
+        )
+      )
 
       assert {:ok, {replacement_claim, ^payload}} =
                Integrations.claim_device_authorization(scope, integration.id, first_owner)
@@ -1306,6 +1387,120 @@ defmodule Kodo.IntegrationsTest do
                )
 
       assert Repo.reload!(integration).connection_status == "disconnected"
+    end
+
+    test "completion accepts an exchange admitted before its lease expires", %{scope: scope} do
+      integration = oauth_integration(scope)
+
+      assert {:ok, _attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 0
+               )
+
+      assert {:ok, {claim, _payload}} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 integration.id,
+                 Ecto.UUID.generate()
+               )
+
+      assert {:ok, claim} =
+               Integrations.store_device_authorization_exchange(scope, claim, %{
+                 "authorization_code" => "code",
+                 "code_challenge" => "challenge",
+                 "code_verifier" => "verifier"
+               })
+
+      assert {:ok, {admission, _payload}} =
+               Integrations.admit_device_authorization_exchange(scope, claim)
+
+      Repo.update!(
+        change(admission, claim_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second))
+      )
+
+      credentials = %{
+        "access_token" => "access",
+        "refresh_token" => "refresh",
+        "id_token" => "identity",
+        "account_id" => "account"
+      }
+
+      assert {:ok, completed} =
+               Integrations.complete_device_authorization(
+                 scope,
+                 admission,
+                 credentials,
+                 DateTime.add(DateTime.utc_now(), 3_600, :second)
+               )
+
+      assert completed.connection_status == "connected"
+      assert Repo.reload!(admission).state == "completed"
+    end
+
+    test "device completion does not undo a later decision to leave no active account", %{
+      scope: scope
+    } do
+      integration = oauth_integration(scope)
+
+      assert {:ok, integration} =
+               Integrations.oauth_succeeded(scope, integration.id, 0, %{
+                 "access_token" => "old-access",
+                 "refresh_token" => "old-refresh",
+                 "account_id" => "old-account"
+               })
+
+      assert {:ok, _attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 integration.credential_generation,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 0
+               )
+
+      assert {:ok, {claim, _payload}} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 integration.id,
+                 Ecto.UUID.generate()
+               )
+
+      sibling = oauth_integration(scope)
+
+      assert {:ok, sibling} =
+               Integrations.oauth_succeeded(scope, sibling.id, 0, %{
+                 "access_token" => "sibling-access",
+                 "refresh_token" => "sibling-refresh",
+                 "account_id" => "sibling-account"
+               })
+
+      assert {:ok, sibling} =
+               Integrations.activate(scope, sibling.id, sibling.credential_generation)
+
+      assert {:ok, _disconnected} =
+               Integrations.disconnect(scope, sibling.id, sibling.credential_generation)
+
+      assert {:ok, completed} =
+               Integrations.complete_device_authorization(
+                 scope,
+                 Repo.reload!(claim),
+                 %{
+                   "access_token" => "new-access",
+                   "refresh_token" => "new-refresh",
+                   "id_token" => "new-identity",
+                   "account_id" => "old-account"
+                 },
+                 DateTime.add(DateTime.utc_now(), 3_600, :second)
+               )
+
+      refute completed.active
+
+      assert {:error, :integration_not_found} =
+               Integrations.get_active_integration_by_provider(scope, "openai_codex")
     end
 
     test "cancellation is owned and generation fenced and removes the one-time code", %{

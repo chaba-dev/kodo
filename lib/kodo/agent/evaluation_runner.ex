@@ -488,7 +488,7 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   defp generate(scope, adapter, role, messages, tools) do
     with {:ok, model, reference} <- LLM.resolve_integration(scope, role["model"]) do
-      LLM.generate(scope, model, reference, messages, tools,
+      LLM.generate_evaluation(scope, model, reference, messages, tools,
         adapter: adapter,
         timeout: @timeout,
         reasoning: role["reasoning"]
@@ -498,7 +498,7 @@ defmodule Kodo.Agent.EvaluationRunner do
 
   defp generate_object(scope, adapter, role, messages, schema) do
     with {:ok, model, reference} <- LLM.resolve_integration(scope, role["model"]) do
-      LLM.generate_object(scope, model, reference, messages, schema,
+      LLM.generate_object_evaluation(scope, model, reference, messages, schema,
         adapter: adapter,
         timeout: @timeout,
         reasoning: role["reasoning"]

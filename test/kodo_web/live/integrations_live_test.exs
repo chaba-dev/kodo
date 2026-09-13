@@ -163,7 +163,7 @@ defmodule KodoWeb.IntegrationsLiveTest do
     refute inspect(:sys.get_state(view.pid)) =~ "private-device"
 
     render_click(view, "cancel_device_authorization", %{
-      "attempt" => Ecto.UUID.generate(),
+      "device_authorization_attempt_id" => Ecto.UUID.generate(),
       "generation" => "1"
     })
 
@@ -254,6 +254,235 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert Repo.reload!(attempt).state == "expired"
   end
 
+  test "resumes an exchange-stage authorization after its worker lease expires", %{
+    conn: conn,
+    scope: scope
+  } do
+    owner = self()
+
+    blocking_exchange = fn :exchange, _payload ->
+      send(owner, {:exchange_resumed, self()})
+
+      receive do
+        :finish_exchange -> {:ok, device_tokens()}
+      end
+    end
+
+    _client = configure_device_client(exchange: [blocking_exchange])
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
+
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Recovering subscription"
+             )
+
+    assert {:ok, _attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "CODE"},
+               0
+             )
+
+    assert {:ok, {claim, _payload}} =
+             Integrations.claim_device_authorization(scope, integration.id, Ecto.UUID.generate())
+
+    assert {:ok, persisted} =
+             Integrations.store_device_authorization_exchange(scope, claim, %{
+               "authorization_code" => "authorization",
+               "code_challenge" => "challenge",
+               "code_verifier" => "verifier"
+             })
+
+    Repo.update!(
+      Ecto.Changeset.change(persisted,
+        claim_lease_expires_at: DateTime.add(DateTime.utc_now(), -1, :second)
+      )
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    assert_receive {:exchange_resumed, worker}
+
+    panel = "#integration-#{integration.id}-device-authorization"
+    assert has_element?(view, panel, "Completing OpenAI authorization")
+    assert has_element?(view, panel, "Securely exchanging credentials")
+    refute has_element?(view, "#integration-#{integration.id}-copy-device-code")
+
+    send(worker, :finish_exchange)
+    integration_id = integration.id
+    assert_receive message = {:integration_changed, ^integration_id, _generation}
+    send(view.pid, message)
+    _ = :sys.get_state(view.pid)
+
+    assert {:ok, connected} = Integrations.get_integration(scope, integration.id)
+    assert connected.connection_status == "connected"
+    refute has_element?(view, panel)
+  end
+
+  test "cancelling authorization removes its code from another open tab", %{
+    conn: conn,
+    scope: scope,
+    user: user
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Shared subscription"
+             )
+
+    assert {:ok, attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "SHARED"},
+               30_000
+             )
+
+    {:ok, first_view, _html} = live(conn, ~p"/integrations")
+    {:ok, second_view, _html} = live(log_in_user(build_conn(), user), ~p"/integrations")
+    panel = "#integration-#{integration.id}-device-authorization"
+    assert has_element?(first_view, panel, "SHARED")
+    assert has_element?(second_view, panel, "SHARED")
+
+    first_view
+    |> element("#integration-#{integration.id}-cancel-device-authorization")
+    |> render_click()
+
+    _ = :sys.get_state(second_view.pid)
+    refute has_element?(second_view, panel)
+    assert Repo.reload!(attempt).state == "cancelled"
+  end
+
+  test "stops remount retries when the exact authorization attempt becomes terminal", %{
+    conn: conn,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Contended subscription"
+             )
+
+    assert {:ok, attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "CONTENDED"},
+               30_000
+             )
+
+    assert {:ok, {_claim, _payload}} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    retry_key = {integration.id, attempt.attempt_generation}
+    assert Map.has_key?(live_assign(view, :device_authorization_retries), retry_key)
+
+    assert {:ok, _cancelled} =
+             Integrations.cancel_device_authorization(
+               scope,
+               attempt.id,
+               attempt.attempt_generation
+             )
+
+    _ = :sys.get_state(view.pid)
+    assert live_assign(view, :device_authorization_retries) == %{}
+
+    send(view.pid, {:retry_device_authorization, integration.id, attempt.attempt_generation})
+    _ = :sys.get_state(view.pid)
+    assert live_assign(view, :device_authorization_retries) == %{}
+  end
+
+  test "drops an old retry immediately when a new authorization supersedes it", %{
+    conn: conn,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Superseded subscription"
+             )
+
+    assert {:ok, first} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "first", "user_code" => "FIRST"},
+               30_000
+             )
+
+    assert {:ok, {_claim, _payload}} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    retry_key = {integration.id, first.attempt_generation}
+    assert Map.has_key?(live_assign(view, :device_authorization_retries), retry_key)
+
+    assert {:ok, second} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               first.expected_integration_generation,
+               %{"device_auth_id" => "second", "user_code" => "SECOND"},
+               30_000
+             )
+
+    _ = :sys.get_state(view.pid)
+    assert second.attempt_generation > first.attempt_generation
+    assert live_assign(view, :device_authorization_retries) == %{}
+  end
+
+  test "updates an open authorization panel when polling advances to exchange", %{
+    conn: conn,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Advancing subscription"
+             )
+
+    assert {:ok, _attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "device", "user_code" => "ADVANCE"},
+               30_000
+             )
+
+    assert {:ok, {claim, _payload}} =
+             Integrations.claim_device_authorization(
+               scope,
+               integration.id,
+               Ecto.UUID.generate()
+             )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    panel = "#integration-#{integration.id}-device-authorization"
+    assert has_element?(view, panel, "Waiting for OpenAI authorization")
+    assert has_element?(view, "#integration-#{integration.id}-copy-device-code")
+
+    assert {:ok, _exchange} =
+             Integrations.store_device_authorization_exchange(scope, claim, %{
+               "authorization_code" => "code",
+               "code_challenge" => "challenge",
+               "code_verifier" => "verifier"
+             })
+
+    _ = :sys.get_state(view.pid)
+    assert has_element?(view, panel, "Completing OpenAI authorization")
+    refute has_element?(view, "#integration-#{integration.id}-copy-device-code")
+  end
+
   test "shows completion and reauthorization after the device flow succeeds", %{
     conn: conn,
     scope: scope
@@ -310,6 +539,37 @@ defmodule KodoWeb.IntegrationsLiveTest do
     view |> element(check_button(integration)) |> render_click()
     finish_validation(view)
     assert has_element?(view, "#{status(integration)} dd.text-green-700", "Valid")
+  end
+
+  test "offers recovery and disconnect actions when ChatGPT authorization is required", %{
+    conn: conn,
+    scope: scope
+  } do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Expired subscription"
+             )
+
+    assert {:ok, connected} =
+             Integrations.oauth_succeeded(scope, integration.id, 0, %{
+               "access_token" => "access",
+               "refresh_token" => "refresh"
+             })
+
+    assert {:ok, required} =
+             Integrations.refresh_invalid_grant(
+               scope,
+               connected.id,
+               connected.credential_generation
+             )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    assert has_element?(view, "#integration-#{required.id}-reauthorize", "Reauthorize")
+    assert has_element?(view, "#integration-#{required.id}-disconnect", "Disconnect")
+    refute has_element?(view, "#integration-#{required.id}-reconnect")
+
+    view |> element("#integration-#{required.id}-reauthorize") |> render_click()
+    assert has_element?(view, "#device-authorization-form")
   end
 
   test "adds multiple accounts for one provider without exposing secrets", %{

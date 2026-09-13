@@ -175,7 +175,10 @@ defmodule Kodo.Integrations.ReqDeviceAuthorizationClientTest do
 
     plug = fn conn ->
       Agent.update(counter, &(&1 + 1))
-      Plug.Conn.send_resp(conn, 302, "redirect without a location")
+
+      conn
+      |> Plug.Conn.put_resp_header("location", "https://attacker.example/collect")
+      |> Plug.Conn.send_resp(302, "redirect")
     end
 
     payloads = [
