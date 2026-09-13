@@ -3,6 +3,8 @@ defmodule KodoWeb.IntegrationsLive do
 
   alias Kodo.Integrations
   alias Kodo.Integrations.APIKeyValidation
+  alias Kodo.Integrations.DeviceAuthorization
+  alias Kodo.Integrations.OAuthAccessValidation
 
   @provider_configs [
     %{
@@ -28,10 +30,19 @@ defmodule KodoWeb.IntegrationsLive do
       description: "Use an OpenRouter API key for models billed through OpenRouter.",
       key_label: "OpenRouter API key",
       revoke_url: "https://openrouter.ai/settings/keys"
+    },
+    %{
+      id: "openai_codex",
+      name: "ChatGPT Subscription",
+      badge: "Subscription billing · Beta",
+      description:
+        "Use an eligible ChatGPT subscription through OpenAI's device authorization flow.",
+      key_label: nil,
+      revoke_url: "https://chatgpt.com/#settings/Security"
     }
   ]
   @providers Enum.map(@provider_configs, & &1.id)
-  @actions ~w(connect replace disconnect)
+  @actions ~w(connect replace reauthorize disconnect)
   @max_api_key_bytes 4_096
 
   @impl true
@@ -40,18 +51,22 @@ defmodule KodoWeb.IntegrationsLive do
       Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{socket.assigns.current_scope.user.id}")
     end
 
-    {:ok,
-     socket
-     |> assign(:action, nil)
-     |> assign(:action_provider, nil)
-     |> assign(:action_target, nil)
-     |> assign(:modal_token, nil)
-     |> assign(:modal_error, nil)
-     |> assign(:provider_configs, @provider_configs)
-     |> assign(:max_api_key_bytes, @max_api_key_bytes)
-     |> assign(:api_key_form, empty_form())
-     |> assign(:validation_tasks, %{})
-     |> load_integrations()}
+    socket =
+      socket
+      |> assign(:action, nil)
+      |> assign(:action_provider, nil)
+      |> assign(:action_target, nil)
+      |> assign(:modal_token, nil)
+      |> assign(:modal_error, nil)
+      |> assign(:provider_configs, @provider_configs)
+      |> assign(:max_api_key_bytes, @max_api_key_bytes)
+      |> assign(:api_key_form, empty_form())
+      |> assign(:validation_tasks, %{})
+      |> assign(:device_authorization_tasks, %{})
+      |> load_integrations()
+
+    socket = if connected?(socket), do: resume_device_authorizations(socket), else: socket
+    {:ok, socket}
   end
 
   @impl true
@@ -197,6 +212,68 @@ defmodule KodoWeb.IntegrationsLive do
 
   def handle_event("check_access", _params, socket), do: stale_action(socket)
 
+  def handle_event("start_device_authorization", %{"integration" => params}, socket) do
+    with true <- socket.assigns.action in ~w(connect reauthorize),
+         true <- socket.assigns.action_provider == "openai_codex",
+         true <- modal_token_valid?(socket, params),
+         {:ok, integration} <- device_authorization_target(socket, params),
+         {:ok, started} <-
+           DeviceAuthorization.begin(
+             socket.assigns.current_scope,
+             integration.id,
+             integration.credential_generation
+           ) do
+      {:noreply,
+       socket
+       |> track_device_authorization_task(started.task, integration.id)
+       |> put_flash(:info, "Authorization started. Enter the one-time code with OpenAI.")
+       |> push_patch(to: ~p"/integrations")}
+    else
+      false ->
+        stale_action(socket)
+
+      {:error, %Ecto.Changeset{}} ->
+        {:noreply,
+         assign(socket, :modal_error, "Enter an account name between 1 and 80 characters.")}
+
+      {:error, :stale_credential_generation} ->
+        stale_action(socket)
+
+      {:error, _reason} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Authorization could not be started. Try again.")
+         |> push_patch(to: ~p"/integrations")}
+    end
+  end
+
+  def handle_event("start_device_authorization", _params, socket), do: stale_action(socket)
+
+  def handle_event(
+        "cancel_device_authorization",
+        %{"attempt" => attempt_id, "generation" => generation},
+        socket
+      ) do
+    with {attempt_generation, ""} <- Integer.parse(generation),
+         %{attempt_id: ^attempt_id, attempt_generation: ^attempt_generation} <-
+           find_device_authorization(socket.assigns.device_authorizations, attempt_id),
+         {:ok, _attempt} <-
+           Integrations.cancel_device_authorization(
+             socket.assigns.current_scope,
+             attempt_id,
+             attempt_generation
+           ) do
+      {:noreply,
+       socket
+       |> load_integrations()
+       |> put_flash(:info, "Authorization cancelled.")}
+    else
+      _reason -> stale_action(socket)
+    end
+  end
+
+  def handle_event("cancel_device_authorization", _params, socket), do: stale_action(socket)
+
   def handle_event("activate", %{"integration" => id, "generation" => generation}, socket) do
     socket = load_integrations(socket)
 
@@ -240,19 +317,30 @@ defmodule KodoWeb.IntegrationsLive do
 
   @impl true
   def handle_info({reference, _result}, socket) when is_reference(reference) do
-    if Map.has_key?(socket.assigns.validation_tasks, reference) do
-      Process.demonitor(reference, [:flush])
-      {:noreply, socket |> drop_validation_task(reference) |> load_integrations()}
-    else
-      {:noreply, socket}
+    cond do
+      Map.has_key?(socket.assigns.validation_tasks, reference) ->
+        Process.demonitor(reference, [:flush])
+        {:noreply, socket |> drop_validation_task(reference) |> load_integrations()}
+
+      Map.has_key?(socket.assigns.device_authorization_tasks, reference) ->
+        Process.demonitor(reference, [:flush])
+        {:noreply, socket |> drop_device_authorization_task(reference) |> load_integrations()}
+
+      true ->
+        {:noreply, socket}
     end
   end
 
   def handle_info({:DOWN, reference, :process, _pid, _reason}, socket) do
-    if Map.has_key?(socket.assigns.validation_tasks, reference) do
-      {:noreply, socket |> drop_validation_task(reference) |> load_integrations()}
-    else
-      {:noreply, socket}
+    cond do
+      Map.has_key?(socket.assigns.validation_tasks, reference) ->
+        {:noreply, socket |> drop_validation_task(reference) |> load_integrations()}
+
+      Map.has_key?(socket.assigns.device_authorization_tasks, reference) ->
+        {:noreply, socket |> drop_device_authorization_task(reference) |> load_integrations()}
+
+      true ->
+        {:noreply, socket}
     end
   end
 
@@ -339,7 +427,11 @@ defmodule KodoWeb.IntegrationsLive do
       |> Enum.filter(&(&1.provider in @providers))
       |> Enum.map(&integration_metadata/1)
 
-    assign(socket, :integrations, integrations)
+    device_authorizations = load_device_authorizations(socket.assigns.current_scope, integrations)
+
+    socket
+    |> assign(:integrations, integrations)
+    |> assign(:device_authorizations, device_authorizations)
   end
 
   # Browser-facing state needs lifecycle metadata only. In particular, keeping
@@ -348,6 +440,7 @@ defmodule KodoWeb.IntegrationsLive do
     Map.take(integration, [
       :id,
       :provider,
+      :authentication_type,
       :display_name,
       :active,
       :connection_status,
@@ -360,7 +453,11 @@ defmodule KodoWeb.IntegrationsLive do
   end
 
   defp start_validation(socket, integration) do
-    task = APIKeyValidation.start(socket.assigns.current_scope, integration)
+    task =
+      case integration.authentication_type do
+        "oauth" -> OAuthAccessValidation.start(socket.assigns.current_scope, integration)
+        "api_key" -> APIKeyValidation.start(socket.assigns.current_scope, integration)
+      end
 
     update(socket, :validation_tasks, fn tasks ->
       Map.put(tasks, task.ref, {integration.id, integration.credential_generation})
@@ -370,6 +467,69 @@ defmodule KodoWeb.IntegrationsLive do
   defp drop_validation_task(socket, reference) do
     update(socket, :validation_tasks, &Map.delete(&1, reference))
   end
+
+  defp track_device_authorization_task(socket, task, integration_id) do
+    update(socket, :device_authorization_tasks, fn tasks ->
+      Map.put(tasks, task.ref, integration_id)
+    end)
+  end
+
+  defp drop_device_authorization_task(socket, reference) do
+    update(socket, :device_authorization_tasks, &Map.delete(&1, reference))
+  end
+
+  defp resume_device_authorizations(socket) do
+    Enum.reduce(socket.assigns.device_authorizations, socket, fn {integration_id, _attempt},
+                                                                 acc ->
+      case DeviceAuthorization.resume(acc.assigns.current_scope, integration_id) do
+        {:ok, task} -> track_device_authorization_task(acc, task, integration_id)
+        {:error, _reason} -> acc
+      end
+    end)
+  end
+
+  defp load_device_authorizations(scope, integrations) do
+    integrations
+    |> Enum.filter(&(&1.provider == "openai_codex"))
+    |> Enum.reduce(%{}, fn integration, attempts ->
+      case Integrations.get_active_device_authorization(scope, integration.id) do
+        {:ok, {attempt, %{"user_code" => user_code}}} ->
+          Map.put(attempts, integration.id, %{
+            attempt_id: attempt.id,
+            attempt_generation: attempt.attempt_generation,
+            user_code: user_code,
+            provider_deadline: attempt.provider_deadline
+          })
+
+        _missing_or_exchanging ->
+          attempts
+      end
+    end)
+  end
+
+  defp find_device_authorization(authorizations, attempt_id) do
+    Enum.find_value(authorizations, fn {_integration_id, attempt} ->
+      if attempt.attempt_id == attempt_id, do: attempt
+    end)
+  end
+
+  defp device_authorization_target(
+         %{assigns: %{action_target: :new, current_scope: scope}},
+         params
+       ) do
+    Integrations.create_oauth_integration(scope, "openai_codex",
+      display_name: Map.get(params, "display_name", "")
+    )
+  end
+
+  defp device_authorization_target(
+         %{assigns: %{action_target: %{provider: "openai_codex"} = integration}},
+         _params
+       ),
+       do: {:ok, integration}
+
+  defp device_authorization_target(_socket, _params),
+    do: {:error, :stale_credential_generation}
 
   defp validate_api_key(api_key)
        when is_binary(api_key) and byte_size(api_key) > 0 and
@@ -395,15 +555,28 @@ defmodule KodoWeb.IntegrationsLive do
   defp action_target("connect", %{connection_status: "disconnected"} = integration),
     do: {:ok, target_metadata(integration)}
 
-  defp action_target(action, %{connection_status: "connected"} = integration)
-       when action in ~w(replace disconnect),
+  defp action_target(
+         "reauthorize",
+         %{provider: "openai_codex", connection_status: "connected"} = integration
+       ),
        do: {:ok, target_metadata(integration)}
+
+  defp action_target(
+         "replace",
+         %{authentication_type: "api_key", connection_status: "connected"} = integration
+       ),
+       do: {:ok, target_metadata(integration)}
+
+  defp action_target("disconnect", %{connection_status: "connected"} = integration),
+    do: {:ok, target_metadata(integration)}
 
   defp action_target(_action, _integration), do: :error
 
   defp target_metadata(integration) do
     Map.take(integration, [
       :id,
+      :provider,
+      :authentication_type,
       :display_name,
       :credential_generation,
       :connection_status,
@@ -640,6 +813,73 @@ defmodule KodoWeb.IntegrationsLive do
                   >
                     {validation_detail(integration)}
                   </p>
+                  <div
+                    :if={authorization = @device_authorizations[integration.id]}
+                    id={dom_id(integration, "device-authorization")}
+                    class="mt-4 max-w-xl rounded-2xl border border-sky-200 bg-sky-50/80 p-4 dark:border-sky-900 dark:bg-sky-950/30"
+                  >
+                    <p class="text-xs font-bold uppercase tracking-wider text-sky-800 dark:text-sky-300">
+                      Waiting for OpenAI authorization
+                    </p>
+                    <div class="mt-3 space-y-3">
+                      <div>
+                        <p class="text-xs font-medium text-zinc-500">Open this verification page</p>
+                        <.link
+                          id={dom_id(integration, "device-verification-link")}
+                          href="https://auth.openai.com/codex/device"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="mt-1 block break-all text-sm font-semibold text-sky-800 underline decoration-sky-300 underline-offset-2 hover:text-sky-950 dark:text-sky-300 dark:hover:text-sky-200"
+                        >
+                          https://auth.openai.com/codex/device
+                          <span class="sr-only">(opens in a new tab)</span>
+                        </.link>
+                      </div>
+                      <div>
+                        <p class="text-xs font-medium text-zinc-500">One-time code</p>
+                        <div class="mt-1 flex items-center gap-2">
+                          <code class="select-all text-lg font-bold tracking-wider text-zinc-950 dark:text-white">
+                            {authorization.user_code}
+                          </code>
+                          <button
+                            id={dom_id(integration, "copy-device-code")}
+                            type="button"
+                            phx-hook=".CopyDeviceCode"
+                            phx-update="ignore"
+                            data-copy-text={authorization.user_code}
+                            aria-label="Copy one-time code"
+                            class="rounded-lg border border-sky-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-sky-800 transition hover:bg-sky-100 dark:border-sky-800 dark:bg-zinc-900 dark:text-sky-300"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+                      <p
+                        role="status"
+                        aria-live="polite"
+                        class="text-xs text-zinc-600 dark:text-zinc-400"
+                      >
+                        Keep this page open. This attempt expires at <time datetime={
+                          DateTime.to_iso8601(authorization.provider_deadline)
+                        }>
+                          {Calendar.strftime(authorization.provider_deadline, "%H:%M UTC")}
+                        </time>.
+                      </p>
+                      <button
+                        id={dom_id(integration, "cancel-device-authorization")}
+                        type="button"
+                        phx-click="cancel_device_authorization"
+                        phx-value-attempt={authorization.attempt_id}
+                        phx-value-generation={authorization.attempt_generation}
+                        phx-disable-with="Cancelling…"
+                        class="rounded-lg px-3 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100 disabled:opacity-60 dark:text-red-400 dark:hover:bg-red-950/40"
+                      >
+                        Cancel authorization
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -651,7 +891,7 @@ defmodule KodoWeb.IntegrationsLive do
                   phx-click={JS.push_focus()}
                   class="rounded-xl bg-zinc-950 px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200"
                 >
-                  Reconnect
+                  {if(integration.provider == "openai_codex", do: "Authorize", else: "Reconnect")}
                 </.link>
                 <button
                   :if={integration_connected?(integration) and !integration.active}
@@ -690,13 +930,25 @@ defmodule KodoWeb.IntegrationsLive do
                   )}
                 </button>
                 <.link
-                  :if={integration_connected?(integration)}
+                  :if={
+                    integration_connected?(integration) and
+                      integration.authentication_type == "api_key"
+                  }
                   id={dom_id(integration, "replace")}
                   patch={action_path(integration, "replace")}
                   phx-click={JS.push_focus()}
                   class="rounded-xl border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:text-zinc-950 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-white"
                 >
                   Replace key
+                </.link>
+                <.link
+                  :if={integration_connected?(integration) and integration.provider == "openai_codex"}
+                  id={dom_id(integration, "reauthorize")}
+                  patch={action_path(integration, "reauthorize")}
+                  phx-click={JS.push_focus()}
+                  class="rounded-xl border border-zinc-300 bg-white px-3.5 py-2 text-sm font-semibold text-zinc-700 transition hover:border-zinc-400 hover:text-zinc-950 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-white"
+                >
+                  Reauthorize
                 </.link>
                 <.link
                   :if={integration_connected?(integration)}
@@ -750,7 +1002,10 @@ defmodule KodoWeb.IntegrationsLive do
               </.link>
             </div>
 
-            <div :if={@action in ~w(connect replace)} class="p-5 sm:p-6">
+            <div
+              :if={@action in ~w(connect replace) and @action_provider != "openai_codex"}
+              class="p-5 sm:p-6"
+            >
               <p class="text-sm leading-6 text-zinc-600 dark:text-zinc-400">
                 The key is encrypted immediately and is never shown again.
               </p>
@@ -812,6 +1067,61 @@ defmodule KodoWeb.IntegrationsLive do
               </.form>
             </div>
 
+            <div
+              :if={@action_provider == "openai_codex" and @action in ~w(connect reauthorize)}
+              class="p-5 sm:p-6"
+            >
+              <p class="text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+                Kodo will show a one-time code for OpenAI's fixed verification page. Approval connects this account using your ChatGPT subscription billing path.
+              </p>
+              <p
+                :if={@modal_error}
+                id="integration-modal-error"
+                role="alert"
+                class="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm font-medium text-red-800 dark:bg-red-950/30 dark:text-red-300"
+              >
+                {@modal_error}
+              </p>
+              <.form
+                for={@api_key_form}
+                id="device-authorization-form"
+                phx-submit="start_device_authorization"
+                class="mt-4 space-y-4"
+              >
+                <input
+                  type="hidden"
+                  name={@api_key_form[:modal_token].name}
+                  value={@api_key_form[:modal_token].value}
+                />
+                <.input
+                  :if={@action_target == :new}
+                  id={modal_dom_id(@action_provider, @action, @action_target) <> "-name"}
+                  field={@api_key_form[:display_name]}
+                  type="text"
+                  label="Account name"
+                  maxlength="80"
+                  aria-describedby={@modal_error && "integration-modal-error"}
+                  required
+                />
+                <div class="flex flex-wrap justify-end gap-2 pt-1">
+                  <.link
+                    patch={~p"/integrations"}
+                    class="rounded-xl px-4 py-2.5 text-sm font-semibold text-zinc-600 transition hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                  >
+                    Cancel
+                  </.link>
+                  <button
+                    id="start-device-authorization"
+                    type="submit"
+                    phx-disable-with="Starting…"
+                    class="rounded-xl bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-wait disabled:opacity-60 dark:bg-white dark:text-zinc-950"
+                  >
+                    Continue with OpenAI
+                  </button>
+                </div>
+              </.form>
+            </div>
+
             <div :if={@action == "disconnect"} id="disconnect-confirmation" class="p-5 sm:p-6">
               <% provider = provider_config(@action_provider) %>
               <p class="text-sm leading-6 text-zinc-700 dark:text-zinc-300">
@@ -823,7 +1133,7 @@ defmodule KodoWeb.IntegrationsLive do
                   rel="noopener noreferrer"
                   class="font-semibold text-red-800 underline decoration-red-300 underline-offset-2 hover:text-red-950 dark:text-red-300 dark:hover:text-red-200"
                 >
-                  Revoke the key in {provider.name}<span class="sr-only">(opens in a new tab)</span>
+                  {revoke_action_label(@action_target)} in {provider.name}<span class="sr-only">(opens in a new tab)</span>
                 </.link>
                 if it must stop outside Kodo.
               </p>
@@ -852,6 +1162,17 @@ defmodule KodoWeb.IntegrationsLive do
           </.focus_wrap>
         </div>
       </Layouts.settings_shell>
+      <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyDeviceCode">
+        export default {
+          mounted() {
+            this.el.addEventListener("click", async () => {
+              await navigator.clipboard.writeText(this.el.dataset.copyText)
+              this.el.textContent = "Copied"
+              window.setTimeout(() => { this.el.textContent = "Copy" }, 1500)
+            })
+          }
+        }
+      </script>
     </Layouts.app>
     """
   end
@@ -859,5 +1180,9 @@ defmodule KodoWeb.IntegrationsLive do
   defp modal_title("connect", :new), do: "Add provider account"
   defp modal_title("connect", target), do: "Reconnect #{target.display_name}"
   defp modal_title("replace", target), do: "Replace key for #{target.display_name}"
+  defp modal_title("reauthorize", target), do: "Reauthorize #{target.display_name}"
   defp modal_title("disconnect", target), do: "Disconnect #{target.display_name}?"
+
+  defp revoke_action_label(%{authentication_type: "oauth"}), do: "Revoke account access"
+  defp revoke_action_label(_target), do: "Revoke the key"
 end

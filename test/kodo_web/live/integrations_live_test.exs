@@ -4,9 +4,13 @@ defmodule KodoWeb.IntegrationsLiveTest do
   import Kodo.AccountsFixtures
   import Phoenix.LiveViewTest
 
+  alias Kodo.Cluster.InstanceManager
   alias Kodo.Integrations
   alias Kodo.Integrations.CredentialEncryption
+  alias Kodo.Integrations.DeviceAuthorizationAttempt
   alias Kodo.Repo
+  alias Kodo.Test.FakeDeviceAuthorizationClient
+  alias Kodo.Test.FakeRefreshClient
 
   setup %{conn: conn} do
     user = user_fixture()
@@ -24,7 +28,12 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert has_element?(view, "#add-integration-menu")
 
     for {provider, name} <-
-          [{"openai", "OpenAI API"}, {"anthropic", "Anthropic"}, {"openrouter", "OpenRouter"}] do
+          [
+            {"openai", "OpenAI API"},
+            {"anthropic", "Anthropic"},
+            {"openrouter", "OpenRouter"},
+            {"openai_codex", "ChatGPT Subscription"}
+          ] do
       assert has_element?(view, "#add-#{provider}", name)
     end
   end
@@ -87,20 +96,220 @@ defmodule KodoWeb.IntegrationsLiveTest do
     assert error =~ "changed in another session"
   end
 
-  test "stored providers without settings support do not crash the page", %{
+  test "renders stored ChatGPT subscription accounts", %{
     conn: conn,
     scope: scope
   } do
-    %Kodo.Integrations.Integration{user_id: scope.user.id}
-    |> Kodo.Integrations.Integration.create_changeset(%{
-      provider: "openai_codex",
-      authentication_type: "oauth"
-    })
-    |> Kodo.Repo.insert!()
+    {:ok, integration} =
+      Integrations.create_oauth_integration(scope, "openai_codex",
+        display_name: "Personal subscription"
+      )
 
     assert {:ok, view, _html} = live(conn, ~p"/integrations")
     assert has_element?(view, "#settings-shell")
-    assert has_element?(view, "#integrations-empty")
+    assert has_element?(view, card(integration), "Personal subscription")
+    assert has_element?(view, "#integration-#{integration.id}-reconnect", "Authorize")
+  end
+
+  test "starts, renders, copies, and cancels ChatGPT device authorization", %{
+    conn: conn,
+    scope: scope
+  } do
+    owner = self()
+
+    blocking_poll = fn :poll, _payload ->
+      send(owner, {:live_device_poll_started, self()})
+
+      receive do
+        :finish_poll -> :pending
+      end
+    end
+
+    _client =
+      configure_device_client(
+        create: [
+          {:ok,
+           %{
+             payload: %{"device_auth_id" => "private-device", "user_code" => "ABCD-EFGH"},
+             polling_interval_ms: 0,
+             verification_url: "https://auth.openai.com/codex/device"
+           }}
+        ],
+        poll: [blocking_poll]
+      )
+
+    {:ok, view, _html} = live(conn, new_path("openai_codex"))
+    assert has_element?(view, "#device-authorization-form")
+    refute has_element?(view, "#device-authorization-form input[type='password']")
+
+    view
+    |> form("#device-authorization-form", %{
+      "integration" => %{"display_name" => "Personal subscription"}
+    })
+    |> render_submit()
+
+    assert_receive {:live_device_poll_started, poller}
+    [integration] = Integrations.list_integrations(scope)
+    panel = "#integration-#{integration.id}-device-authorization"
+
+    assert has_element?(view, panel, "https://auth.openai.com/codex/device")
+    assert has_element?(view, panel, "ABCD-EFGH")
+
+    assert has_element?(
+             view,
+             "#integration-#{integration.id}-copy-device-code[data-copy-text='ABCD-EFGH'][aria-label='Copy one-time code']"
+           )
+
+    refute inspect(:sys.get_state(view.pid)) =~ "private-device"
+
+    render_click(view, "cancel_device_authorization", %{
+      "attempt" => Ecto.UUID.generate(),
+      "generation" => "1"
+    })
+
+    assert Repo.one!(DeviceAuthorizationAttempt).state == "active"
+    assert render(view) =~ "changed in another session"
+
+    view
+    |> element("#integration-#{integration.id}-cancel-device-authorization")
+    |> render_click()
+
+    refute has_element?(view, panel)
+    assert Repo.one!(DeviceAuthorizationAttempt).state == "cancelled"
+
+    monitor = Process.monitor(poller)
+    send(poller, :finish_poll)
+    assert_receive {:DOWN, ^monitor, :process, ^poller, :normal}
+  end
+
+  test "device authorization uses the normal aged authenticated boundary", %{
+    scope: scope,
+    user: user
+  } do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
+
+    _client =
+      configure_device_client(
+        create: [
+          {:ok,
+           %{
+             payload: %{"device_auth_id" => "device", "user_code" => "CODE"},
+             polling_interval_ms: 0,
+             verification_url: "https://auth.openai.com/codex/device"
+           }}
+        ],
+        poll: [
+          {:ok,
+           %{
+             "authorization_code" => "authorization",
+             "code_challenge" => "challenge",
+             "code_verifier" => "verifier"
+           }}
+        ],
+        exchange: [{:ok, device_tokens()}]
+      )
+
+    conn =
+      build_conn()
+      |> log_in_user(user,
+        token_authenticated_at: DateTime.add(DateTime.utc_now(:second), -11, :minute)
+      )
+
+    {:ok, view, _html} = live(conn, new_path("openai_codex"))
+
+    view
+    |> form("#device-authorization-form", %{
+      "integration" => %{"display_name" => "Aged session"}
+    })
+    |> render_submit()
+
+    assert_receive {:integration_changed, integration_id, _generation}
+    assert {:ok, integration} = Integrations.get_integration(scope, integration_id)
+    assert integration.connection_status == "connected"
+  end
+
+  test "removes an expired one-time code when the page loads", %{conn: conn, scope: scope} do
+    assert {:ok, integration} =
+             Integrations.create_oauth_integration(scope, "openai_codex",
+               display_name: "Expired attempt"
+             )
+
+    assert {:ok, attempt} =
+             Integrations.begin_device_authorization(
+               scope,
+               integration.id,
+               integration.credential_generation,
+               %{"device_auth_id" => "expired-device", "user_code" => "EXPIRED"},
+               0
+             )
+
+    Repo.update!(
+      Ecto.Changeset.change(attempt,
+        provider_deadline: DateTime.add(DateTime.utc_now(), -1, :second)
+      )
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/integrations")
+    refute has_element?(view, "#integration-#{integration.id}-device-authorization")
+    assert Repo.reload!(attempt).state == "expired"
+  end
+
+  test "shows completion and reauthorization after the device flow succeeds", %{
+    conn: conn,
+    scope: scope
+  } do
+    Phoenix.PubSub.subscribe(Kodo.PubSub, "integration:#{scope.user.id}")
+
+    _client =
+      configure_device_client(
+        create: [
+          {:ok,
+           %{
+             payload: %{"device_auth_id" => "device", "user_code" => "CODE"},
+             polling_interval_ms: 0,
+             verification_url: "https://auth.openai.com/codex/device"
+           }}
+        ],
+        poll: [
+          {:ok,
+           %{
+             "authorization_code" => "authorization",
+             "code_challenge" => "challenge",
+             "code_verifier" => "verifier"
+           }}
+        ],
+        exchange: [{:ok, device_tokens()}]
+      )
+
+    {:ok, view, _html} = live(conn, new_path("openai_codex"))
+
+    view
+    |> form("#device-authorization-form", %{
+      "integration" => %{"display_name" => "Completed subscription"}
+    })
+    |> render_submit()
+
+    assert_receive {:integration_changed, integration_id, _generation}
+    _ = :sys.get_state(view.pid)
+    assert {:ok, integration} = Integrations.get_integration(scope, integration_id)
+    assert integration.connection_status == "connected"
+    assert has_element?(view, card(integration), "Completed subscription")
+    assert has_element?(view, check_button(integration), "Check access")
+    assert has_element?(view, "#integration-#{integration.id}-reauthorize", "Reauthorize")
+    refute has_element?(view, "#integration-#{integration.id}-device-authorization")
+
+    view
+    |> element("#integration-#{integration.id}-reauthorize")
+    |> render_click()
+
+    assert has_element?(view, "#device-authorization-form")
+    assert has_element?(view, "#integration-modal-title", "Reauthorize Completed subscription")
+
+    render_patch(view, ~p"/integrations")
+    _refresh_client = configure_refresh_client([{:ok, device_tokens()}])
+    view |> element(check_button(integration)) |> render_click()
+    finish_validation(view)
+    assert has_element?(view, "#{status(integration)} dd.text-green-700", "Valid")
   end
 
   test "adds multiple accounts for one provider without exposing secrets", %{
@@ -486,6 +695,71 @@ defmodule KodoWeb.IntegrationsLiveTest do
   defp active_badge(integration), do: "#integration-#{integration.id}-active-badge"
   defp activate_button(integration), do: "#integration-#{integration.id}-activate"
   defp check_button(integration), do: "#integration-#{integration.id}-check-access"
+
+  defp configure_device_client(responses) do
+    start_supervised!(
+      {InstanceManager,
+       enabled: true, boot_id: Ecto.UUID.generate(), heartbeat_interval: :infinity}
+    )
+
+    agent =
+      start_supervised!(
+        {Agent,
+         fn ->
+           %{
+             responses:
+               %{create: [], poll: [], exchange: []}
+               |> Map.merge(Map.new(responses)),
+             calls: []
+           }
+         end}
+      )
+
+    Application.put_env(:kodo, :device_authorization_client, FakeDeviceAuthorizationClient)
+    Application.put_env(:kodo, :fake_device_authorization_client_agent, agent)
+
+    on_exit(fn ->
+      Application.delete_env(:kodo, :device_authorization_client)
+      Application.delete_env(:kodo, :fake_device_authorization_client_agent)
+    end)
+
+    agent
+  end
+
+  defp device_tokens do
+    %{
+      "access_token" =>
+        jwt(%{"exp" => DateTime.utc_now() |> DateTime.to_unix() |> Kernel.+(3_600)}),
+      "refresh_token" => "refresh-secret",
+      "id_token" =>
+        jwt(%{
+          "https://api.openai.com/auth" => %{"chatgpt_account_id" => "account-secret"}
+        })
+    }
+  end
+
+  defp configure_refresh_client(responses) do
+    agent =
+      start_supervised!(
+        {Agent, fn -> %{responses: responses, refresh_tokens: []} end},
+        id: {:live_refresh_client, System.unique_integer([:positive])}
+      )
+
+    Application.put_env(:kodo, :oauth_refresh_client, FakeRefreshClient)
+    Application.put_env(:kodo, :fake_refresh_client_agent, agent)
+
+    on_exit(fn ->
+      Application.delete_env(:kodo, :oauth_refresh_client)
+      Application.delete_env(:kodo, :fake_refresh_client_agent)
+    end)
+
+    agent
+  end
+
+  defp jwt(claims) do
+    encoded = claims |> Jason.encode!() |> Base.url_encode64(padding: false)
+    "header.#{encoded}.signature"
+  end
 
   defp live_assign(view, name) do
     :sys.get_state(view.pid).socket.assigns[name]

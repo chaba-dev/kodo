@@ -193,6 +193,63 @@ defmodule Kodo.IntegrationsConcurrencyTest do
     end
   end
 
+  test "device authorization failure and cancellation use one lock order without deadlocks", %{
+    scope: scope,
+    supervisor: supervisor
+  } do
+    for iteration <- 1..10 do
+      integration =
+        %Integration{user_id: scope.user.id}
+        |> Integration.create_changeset(%{
+          provider: "openai_codex",
+          authentication_type: "oauth",
+          display_name: "Failure race #{iteration}"
+        })
+        |> Repo.insert!()
+
+      assert {:ok, attempt} =
+               Integrations.begin_device_authorization(
+                 scope,
+                 integration.id,
+                 0,
+                 %{"device_auth_id" => "device", "user_code" => "CODE"},
+                 0
+               )
+
+      assert {:ok, {claim, _payload}} =
+               Integrations.claim_device_authorization(
+                 scope,
+                 integration.id,
+                 Ecto.UUID.generate()
+               )
+
+      cancel =
+        contended_task(supervisor, fn ->
+          Integrations.cancel_device_authorization(
+            scope,
+            attempt.id,
+            attempt.attempt_generation
+          )
+        end)
+
+      fail =
+        contended_task(supervisor, fn ->
+          Integrations.fail_device_authorization(scope, claim, "provider_rejected")
+        end)
+
+      results = [cancel, fail] |> release_contenders() |> Task.await_many()
+
+      assert Enum.count(results, &match?({:ok, %DeviceAuthorizationAttempt{}}, &1)) == 1
+
+      assert Enum.any?(results, fn result ->
+               result in [
+                 {:error, :stale_device_authorization},
+                 {:error, :stale_device_authorization_claim}
+               ]
+             end)
+    end
+  end
+
   defp connect(scope, name) do
     Integrations.connect(scope, "openai", "api_key", %{"api_key" => "#{name}-secret"},
       display_name: name

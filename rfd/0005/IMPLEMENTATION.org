@@ -321,66 +321,66 @@ manufactured after that no-go decision.
   binding attempt ID, integration ID, user ID, provider, immutable attempt
   generation, and payload-format version; fail closed on swaps, tampering,
   unknown formats, and unavailable keys.
-- [ ] Implement device-code creation, interval-aware asynchronous polling,
+- [X] Implement device-code creation, interval-aware asynchronous polling,
   cancellation, expiry, terminal errors, and authorization-code exchange using
   Req rather than embedded browser scripts.
-- [ ] Render the fixed allowlisted HTTPS verification destination and one-time
+- [X] Render the fixed allowlisted HTTPS verification destination and one-time
   code separately, reject a provider-returned verification URL that does not
   match the exact allowlist, and never automatically navigate to that URL.
-- [ ] Trigger claims only from attempt creation or LiveView mount/remount, use
+- [X] Trigger claims only from attempt creation or LiveView mount/remount, use
   one conditional update against the exact attempt row that increments and
   returns its claim epoch, and run a successful claim as a finite task under
   ~Kodo.ControlPlaneTaskSupervisor~ that survives the originating LiveView
   closing.
-- [ ] Conditionally renew the claim lease before expiry and verify active state,
+- [X] Conditionally renew the claim lease before expiry and verify active state,
   current claim epoch, and lease ownership before admitting every poll or token
   exchange. Make its duration exceed the hard HTTP timeout plus a safety margin.
   Stop future work immediately on ownership loss; fence completion by claim
   epoch plus attempt and expected integration generations, while allowing an
   already admitted network operation to finish without persisting stale results.
-- [ ] Do not run a device-polling sweeper on every replica; expire attempts
+- [X] Do not run a device-polling sweeper on every replica; expire attempts
   lazily and delete terminal rows in bounded batches, using one database-elected
   cleanup owner only if periodic cleanup becomes necessary.
-- [ ] Make a new attempt atomically supersede the prior attempt and fence
+- [X] Make a new attempt atomically supersede the prior attempt and fence
   cancellation, expiry, completion, replacement, and disconnection by attempt
   generation. Starting reauthorization advances the integration generation and
   the new attempt captures that post-advance value; install OAuth credentials
   only when both attempt and expected integration generations still match.
-- [ ] Store access tokens, refresh tokens, account identifiers, expiries, and
+- [X] Store access tokens, refresh tokens, account identifiers, expiries, and
   credential generations in the encrypted integration payload without logging
   device or token material.
-- [ ] Test user deletion with OAuth credentials, an active authorization
+- [X] Test user deletion with OAuth credentials, an active authorization
   attempt, a held claim, and in-flight refresh; all rows cascade and every late
   completion becomes a no-op.
-- [ ] Run just-in-time refreshes as bounded tasks under
+- [X] Run just-in-time refreshes as bounded tasks under
   ~Kodo.ControlPlaneTaskSupervisor~; coordinate callers directly through the
   database rather than adding a refresh coordinator ~GenServer~, long-lived
   supervised process, or in-memory refresh timer per integration.
-- [ ] Implement database-time refresh leases whose duration exceeds the hard
+- [X] Implement database-time refresh leases whose duration exceeds the hard
   HTTP timeout plus a safety margin, bounded waiter behavior, lease takeover,
   and credential-generation compare-and-update protection for every success
   and failure-derived state change.
-- [ ] Let the first generation-matching successful response atomically persist
+- [X] Let the first generation-matching successful response atomically persist
   rotated tokens even after lease expiry. Record ~invalid_grant~ as provisional
   ~reauthorization_required~ without advancing the source generation, so a
   success already produced from that generation may replace it after any pause;
   fence it permanently when user replacement, starting or completing
   reauthorization, or disconnection advances the generation.
-- [ ] Require every refresh success to contain an access token and valid expiry;
+- [X] Require every refresh success to contain an access token and valid expiry;
   retain the prior refresh token and account ID when omitted, persist a rotated
   refresh token when present, and reject an account-ID change as requiring
   reauthorization without changing billing identity.
-- [ ] Treat bounded waiting after takeover ~invalid_grant~ only as a UI-churn
+- [X] Treat bounded waiting after takeover ~invalid_grant~ only as a UI-churn
   optimization, not an outcome-selection boundary.
-- [ ] Add the "ChatGPT Subscription (Beta)" connection flow, billing
+- [X] Add the "ChatGPT Subscription (Beta)" connection flow, billing
   explanation, progress state, cancellation, disconnect, and reauthorization to
   the authenticated integrations page; show subscription quota errors only on
   the affected session or turn with retry and billing guidance.
-- [ ] Use the normal authenticated-user boundary to start authorization or
+- [X] Use the normal authenticated-user boundary to start authorization or
   reauthorization and to cancel an owned attempt; do not require renewed sudo
   mode. Permit the same active generation-fenced attempt to complete while its
   ownership and generation checks continue to succeed.
-- [ ] Add LiveView selector tests for device-flow start, verification code,
+- [X] Add LiveView selector tests for device-flow start, verification code,
   progress, expiry, completion, cancellation, and reauthorization states, plus
   completion from aged authenticated sessions, ownership-checked cancellation,
   stale sockets, and representative responsive browser checks. Verify the
@@ -388,7 +388,7 @@ manufactured after that no-go decision.
   has an accessible Copy action, is retained only while needed to present the
   active attempt, and disappears after every terminal state without entering
   logs or telemetry.
-- [ ] Extend onboarding and missing-provider feedback for ChatGPT Subscription,
+- [X] Extend onboarding and missing-provider feedback for ChatGPT Subscription,
   and emit credential-free audit events for authorization start/completion and
   cancellation, refresh outcomes, reauthorization, and disconnection.
 - [ ] Add an explicit per-session execution-route change between OpenAI

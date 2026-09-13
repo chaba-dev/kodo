@@ -1,6 +1,6 @@
-defmodule Kodo.Integrations.DeviceAuthorizationReqAdapter do
+defmodule Kodo.Integrations.CredentialReqAdapter do
   @moduledoc """
-  Req adapter for credential-bearing device authorization requests.
+  Req adapter for credential-bearing OAuth requests.
 
   It deliberately uses Mint directly: Finch telemetry includes request and
   response values, which are secrets throughout this protocol.
@@ -10,7 +10,7 @@ defmodule Kodo.Integrations.DeviceAuthorizationReqAdapter do
   @max_response_bytes 64 * 1024
 
   def run(%Req.Request{} = request) do
-    timeout = request.options[:device_authorization_timeout] || @default_timeout
+    timeout = request.options[:credential_request_timeout] || @default_timeout
     started_at = System.monotonic_time(:millisecond)
 
     task = Task.async(fn -> safe_perform(request, started_at, timeout) end)
@@ -30,7 +30,7 @@ defmodule Kodo.Integrations.DeviceAuthorizationReqAdapter do
   end
 
   defp perform(
-         %Req.Request{options: %{device_authorization_transport: transport}} = request,
+         %Req.Request{options: %{credential_request_transport: transport}} = request,
          started_at,
          timeout
        )

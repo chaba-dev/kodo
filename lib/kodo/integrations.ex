@@ -24,7 +24,16 @@ defmodule Kodo.Integrations do
   )
   @device_authorization_lifetime_seconds 15 * 60
   @device_authorization_secret_max_bytes 1_024
+  @device_authorization_token_max_bytes 8_192
   @device_authorization_cleanup_age_seconds 24 * 60 * 60
+  @device_authorization_claim_lease_ms 30_000
+  @refresh_claim_lease_ms 30_000
+  @device_authorization_terminal_errors ~w(
+    provider_unavailable
+    provider_rejected
+    response_invalid
+    redirect
+  )
   @secret_repo_options [log: false, telemetry_event: nil]
 
   def list_integrations(%Scope{user: user}) do
@@ -130,6 +139,112 @@ defmodule Kodo.Integrations do
     end
   end
 
+  def claim_device_authorization(%Scope{user: user}, integration_id, claim_owner_id) do
+    with {:ok, integration_id} <- cast_uuid(integration_id),
+         {:ok, claim_owner_id} <- cast_uuid(claim_owner_id) do
+      result =
+        Repo.transaction(fn ->
+          expire_device_authorization(user.id, integration_id)
+          claim_device_authorization_locked(user.id, integration_id, claim_owner_id)
+        end)
+
+      case result do
+        {:ok, {:error, reason}} -> {:error, reason}
+        other -> other
+      end
+    end
+  end
+
+  def renew_device_authorization_claim(
+        %Scope{user: user},
+        attempt_id,
+        attempt_generation,
+        claim_owner_id,
+        claim_epoch
+      )
+      when is_integer(attempt_generation) and attempt_generation > 0 and
+             is_integer(claim_epoch) and claim_epoch > 0 do
+    with {:ok, attempt_id} <- cast_uuid(attempt_id),
+         {:ok, claim_owner_id} <- cast_uuid(claim_owner_id) do
+      Repo.transaction(fn ->
+        renew_device_authorization_claim_locked(
+          user.id,
+          attempt_id,
+          attempt_generation,
+          claim_owner_id,
+          claim_epoch
+        )
+      end)
+    end
+  end
+
+  def renew_device_authorization_claim(%Scope{}, _attempt_id, _generation, _owner, _epoch),
+    do: {:error, :stale_device_authorization_claim}
+
+  def admit_device_authorization_poll(%Scope{user: user}, %DeviceAuthorizationAttempt{} = claim) do
+    Repo.transaction(fn -> admit_device_authorization_poll_locked(user.id, claim) end)
+  end
+
+  def store_device_authorization_exchange(
+        %Scope{user: user},
+        %DeviceAuthorizationAttempt{} = claim,
+        payload
+      ) do
+    with :ok <- validate_device_authorization_exchange_payload(payload),
+         {:ok, encrypted} <- DeviceAuthorizationEncryption.encrypt(claim, payload) do
+      Repo.transaction(fn ->
+        update_claimed_device_authorization_payload(user.id, claim, encrypted)
+      end)
+    end
+  end
+
+  def admit_device_authorization_exchange(
+        %Scope{user: user},
+        %DeviceAuthorizationAttempt{} = claim
+      ) do
+    Repo.transaction(fn -> admit_device_authorization_exchange_locked(user.id, claim) end)
+  end
+
+  def complete_device_authorization(
+        %Scope{user: user},
+        %DeviceAuthorizationAttempt{} = claim,
+        credentials,
+        %DateTime{} = expires_at
+      ) do
+    with :ok <- validate_device_authorization_credentials(credentials) do
+      Repo.transaction(fn ->
+        complete_device_authorization_locked(user.id, claim, credentials, expires_at)
+      end)
+      |> notify_integration_change()
+    end
+  end
+
+  def complete_device_authorization(
+        %Scope{},
+        %DeviceAuthorizationAttempt{},
+        _credentials,
+        _expiry
+      ),
+      do: {:error, :device_authorization_response_invalid}
+
+  def fail_device_authorization(
+        %Scope{user: user},
+        %DeviceAuthorizationAttempt{} = claim,
+        error_code
+      )
+      when error_code in @device_authorization_terminal_errors do
+    Repo.transaction(fn ->
+      lock_user!(user.id)
+      integration = lock_owned_integration!(user.id, claim.integration_id)
+      attempt = terminalize_claimed_device_authorization(user.id, claim, "failed", error_code)
+      audit!(user.id, integration, "device_authorization_failed")
+      attempt
+    end)
+  end
+
+  def fail_device_authorization(%Scope{}, %DeviceAuthorizationAttempt{}, _error_code),
+    do: {:error, :unsafe_device_authorization_error}
+
   def cancel_device_authorization(%Scope{user: user}, attempt_id, attempt_generation)
       when is_integer(attempt_generation) and attempt_generation > 0 do
     with {:ok, attempt_id} <- cast_uuid(attempt_id) do
@@ -164,6 +279,36 @@ defmodule Kodo.Integrations do
   end
 
   def cleanup_device_authorizations(_limit), do: {:error, :cleanup_limit_invalid}
+
+  def create_oauth_integration(scope, provider, opts \\ [])
+
+  def create_oauth_integration(%Scope{user: user}, "openai_codex", opts) do
+    changeset =
+      %Integration{user_id: user.id}
+      |> Integration.create_changeset(%{
+        provider: "openai_codex",
+        authentication_type: "oauth",
+        display_name: opts[:display_name]
+      })
+
+    if changeset.valid? do
+      Repo.transaction(fn -> insert_oauth_integration(user.id, changeset) end)
+    else
+      {:error, changeset}
+    end
+  end
+
+  def create_oauth_integration(%Scope{}, _provider, _opts),
+    do: {:error, :authentication_type_mismatch}
+
+  defp insert_oauth_integration(user_id, changeset) do
+    lock_provider_identity(user_id, "openai_codex")
+
+    case Repo.insert(changeset) do
+      {:ok, integration} -> integration
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
 
   def connect(scope, provider, authentication_type, credentials, opts \\ [])
 
@@ -251,6 +396,116 @@ defmodule Kodo.Integrations do
     )
   end
 
+  @doc "Claims one generation of an OAuth integration for a bounded refresh operation."
+  # The boolean terms below are one atomic database fence, not control-flow branches.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  def claim_refresh(%Scope{user: user}, id, generation, claim_owner_id)
+      when is_integer(generation) and generation >= 0 do
+    with {:ok, id} <- cast_uuid(id),
+         {:ok, claim_owner_id} <- cast_uuid(claim_owner_id) do
+      lease_expires_at =
+        DateTime.add(database_now(), @refresh_claim_lease_ms, :millisecond)
+
+      query =
+        from integration in Integration,
+          where:
+            integration.id == ^id and integration.user_id == ^user.id and
+              integration.provider == "openai_codex" and
+              integration.authentication_type == "oauth" and
+              integration.connection_status == "connected" and
+              integration.credential_generation == ^generation and
+              (is_nil(integration.refresh_claim_owner_id) or
+                 integration.refresh_lease_expires_at <= fragment("clock_timestamp()"))
+
+      updates = [
+        set: [
+          refresh_claim_owner_id: claim_owner_id,
+          refresh_claim_generation: generation,
+          refresh_lease_expires_at: lease_expires_at,
+          updated_at: now()
+        ],
+        inc: [refresh_claim_epoch: 1]
+      ]
+
+      case Repo.update_all(query, updates) do
+        {1, nil} -> {:ok, Repo.get_by!(Integration, id: id, user_id: user.id)}
+        {0, nil} -> refresh_claim_conflict(user.id, id, generation)
+      end
+    end
+  end
+
+  def claim_refresh(%Scope{}, _id, _generation, _claim_owner_id),
+    do: {:error, :stale_credential_generation}
+
+  @doc "Releases only the exact refresh claim represented by the supplied snapshot."
+  def release_refresh_claim(%Scope{user: user}, %Integration{} = claim) do
+    query = exact_refresh_claim_query(user.id, claim)
+
+    case Repo.update_all(query,
+           set: [
+             refresh_claim_owner_id: nil,
+             refresh_claim_generation: nil,
+             refresh_lease_expires_at: nil,
+             updated_at: now()
+           ]
+         ) do
+      {1, nil} -> :ok
+      {0, nil} -> {:error, :stale_refresh_claim}
+    end
+  end
+
+  def require_refresh_reauthorization(%Scope{user: user}, %Integration{} = claim, error_code)
+      when error_code in ~w(refresh_invalid_grant refresh_account_identity_mismatch) do
+    Repo.transaction(fn ->
+      changes = [
+        connection_status: "reauthorization_required",
+        active: false,
+        validation_status: "unverified",
+        validated_at: nil,
+        validation_error_code: error_code,
+        refresh_claim_owner_id: nil,
+        refresh_claim_generation: nil,
+        refresh_lease_expires_at: nil,
+        updated_at: now()
+      ]
+
+      case Repo.update_all(exact_refresh_claim_query(user.id, claim), set: changes) do
+        {1, nil} ->
+          integration = Repo.get_by!(Integration, id: claim.id, user_id: user.id)
+          audit!(user.id, integration, "refresh_reauthorization_required")
+          integration
+
+        {0, nil} ->
+          Repo.rollback(:stale_refresh_claim)
+      end
+    end)
+    |> notify_integration_change()
+  end
+
+  def require_refresh_reauthorization(%Scope{}, %Integration{}, _error_code),
+    do: {:error, :unsafe_refresh_error}
+
+  def fail_refresh(%Scope{user: user}, %Integration{} = claim) do
+    Repo.transaction(fn ->
+      case Repo.update_all(exact_refresh_claim_query(user.id, claim),
+             set: [
+               refresh_claim_owner_id: nil,
+               refresh_claim_generation: nil,
+               refresh_lease_expires_at: nil,
+               updated_at: now()
+             ]
+           ) do
+        {1, nil} ->
+          integration = Repo.get_by!(Integration, id: claim.id, user_id: user.id)
+          audit!(user.id, integration, "refresh_failed")
+          integration
+
+        {0, nil} ->
+          Repo.rollback(:stale_refresh_claim)
+      end
+    end)
+  end
+
   def validation_succeeded(%Scope{} = scope, id, generation) do
     update_fenced(scope, id, generation, ["connected"], "validation_succeeded", %{
       validation_status: "valid",
@@ -313,7 +568,10 @@ defmodule Kodo.Integrations do
         expires_at: nil,
         validated_at: nil,
         refreshed_at: nil,
-        validation_error_code: nil
+        validation_error_code: nil,
+        refresh_claim_owner_id: nil,
+        refresh_claim_generation: nil,
+        refresh_lease_expires_at: nil
       }
     )
     |> notify_integration_change()
@@ -417,6 +675,279 @@ defmodule Kodo.Integrations do
     end
   end
 
+  defp claim_device_authorization_locked(user_id, integration_id, claim_owner_id) do
+    timestamp = database_now()
+    lease_expires_at = DateTime.add(timestamp, @device_authorization_claim_lease_ms, :millisecond)
+
+    query =
+      claimable_device_authorization_query(user_id, integration_id, claim_owner_id, timestamp)
+      |> select([attempt, _integration], attempt)
+
+    case Repo.update_all(
+           query,
+           [
+             set: [
+               claim_owner_id: claim_owner_id,
+               claim_lease_expires_at: lease_expires_at,
+               updated_at: timestamp
+             ],
+             inc: [claim_epoch: 1]
+           ],
+           @secret_repo_options
+         ) do
+      {1, [attempt]} -> decrypt_device_authorization(attempt)
+      {0, []} -> {:error, :device_authorization_not_claimable}
+    end
+  end
+
+  defp claimable_device_authorization_query(user_id, integration_id, claim_owner_id, timestamp) do
+    from attempt in DeviceAuthorizationAttempt,
+      join: integration in Integration,
+      on: integration.id == attempt.integration_id and integration.user_id == attempt.user_id,
+      where:
+        attempt.user_id == ^user_id and attempt.integration_id == ^integration_id and
+          attempt.state == "active" and attempt.provider_deadline > ^timestamp and
+          integration.credential_generation == attempt.expected_integration_generation and
+          (is_nil(attempt.claim_owner_id) or attempt.claim_lease_expires_at <= ^timestamp or
+             attempt.claim_owner_id == ^claim_owner_id)
+  end
+
+  # The boolean terms below are one atomic database fence, not control-flow branches.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp renew_device_authorization_claim_locked(
+         user_id,
+         attempt_id,
+         attempt_generation,
+         claim_owner_id,
+         claim_epoch
+       ) do
+    timestamp = database_now()
+    lease_expires_at = DateTime.add(timestamp, @device_authorization_claim_lease_ms, :millisecond)
+
+    query =
+      from attempt in DeviceAuthorizationAttempt,
+        join: integration in Integration,
+        on: integration.id == attempt.integration_id and integration.user_id == attempt.user_id,
+        where:
+          attempt.id == ^attempt_id and attempt.user_id == ^user_id and
+            attempt.attempt_generation == ^attempt_generation and attempt.state == "active" and
+            attempt.claim_owner_id == ^claim_owner_id and attempt.claim_epoch == ^claim_epoch and
+            attempt.claim_lease_expires_at > ^timestamp and attempt.provider_deadline > ^timestamp and
+            integration.credential_generation == attempt.expected_integration_generation,
+        select: attempt
+
+    case Repo.update_all(
+           query,
+           [set: [claim_lease_expires_at: lease_expires_at, updated_at: timestamp]],
+           @secret_repo_options
+         ) do
+      {1, [attempt]} -> decrypt_device_authorization(attempt)
+      {0, []} -> Repo.rollback(:stale_device_authorization_claim)
+    end
+  end
+
+  defp admit_device_authorization_poll_locked(user_id, claim) do
+    timestamp = database_now()
+    lease_expires_at = DateTime.add(timestamp, @device_authorization_claim_lease_ms, :millisecond)
+
+    query =
+      claimed_device_authorization_query(user_id, claim, timestamp)
+      |> where([attempt, _integration], attempt.next_poll_at <= ^timestamp)
+      |> update(
+        [attempt, _integration],
+        set: [
+          next_poll_at:
+            fragment(
+              "CAST(? AS timestamp) + (? * interval '1 millisecond')",
+              ^timestamp,
+              attempt.polling_interval_ms
+            ),
+          claim_lease_expires_at: ^lease_expires_at,
+          updated_at: ^timestamp
+        ]
+      )
+      |> select([attempt, _integration], attempt)
+
+    case Repo.update_all(query, [], @secret_repo_options) do
+      {1, [attempt]} ->
+        decrypt_device_authorization(attempt)
+
+      {0, []} ->
+        if claimed_device_authorization?(user_id, claim, timestamp),
+          do: Repo.rollback(:device_authorization_poll_not_due),
+          else: Repo.rollback(:stale_device_authorization_claim)
+    end
+  end
+
+  defp claimed_device_authorization?(user_id, claim, timestamp) do
+    claim
+    |> then(&claimed_device_authorization_query(user_id, &1, timestamp))
+    |> Repo.exists?(@secret_repo_options)
+  end
+
+  defp update_claimed_device_authorization_payload(user_id, claim, encrypted) do
+    timestamp = database_now()
+
+    query =
+      claimed_device_authorization_query(user_id, claim, timestamp)
+      |> select([attempt, _integration], attempt)
+
+    changes =
+      encrypted
+      |> Map.put(:updated_at, timestamp)
+      |> Map.to_list()
+
+    case Repo.update_all(query, [set: changes], @secret_repo_options) do
+      {1, [attempt]} -> attempt
+      {0, []} -> Repo.rollback(:stale_device_authorization_claim)
+    end
+  end
+
+  defp admit_device_authorization_exchange_locked(user_id, claim) do
+    timestamp = database_now()
+    lease_expires_at = DateTime.add(timestamp, @device_authorization_claim_lease_ms, :millisecond)
+
+    query =
+      claimed_device_authorization_query(user_id, claim, timestamp)
+      |> select([attempt, _integration], attempt)
+
+    case Repo.update_all(
+           query,
+           [set: [claim_lease_expires_at: lease_expires_at, updated_at: timestamp]],
+           @secret_repo_options
+         ) do
+      {1, [attempt]} ->
+        {attempt, payload} = decrypt_device_authorization(attempt)
+
+        case validate_device_authorization_exchange_payload(payload) do
+          :ok -> {attempt, payload}
+          {:error, reason} -> Repo.rollback(reason)
+        end
+
+      {0, []} ->
+        Repo.rollback(:stale_device_authorization_claim)
+    end
+  end
+
+  defp complete_device_authorization_locked(user_id, claim, credentials, expires_at) do
+    timestamp = database_now()
+    lock_user!(user_id)
+    provider = owned_integration_provider!(user_id, claim.integration_id)
+    lock_provider_identity(user_id, provider)
+    integration = lock_owned_integration!(user_id, claim.integration_id)
+
+    if !DateTime.after?(expires_at, timestamp),
+      do: Repo.rollback(:device_authorization_response_invalid)
+
+    attempt = lock_claimed_device_authorization!(user_id, integration, claim, timestamp)
+
+    case CredentialEncryption.encrypt(integration, credentials) do
+      {:ok, encrypted} ->
+        integration =
+          integration
+          |> change(
+            Map.merge(encrypted, %{
+              connection_status: "connected",
+              validation_status: "unverified",
+              credential_generation: integration.credential_generation + 1,
+              expires_at: expires_at,
+              validated_at: nil,
+              refreshed_at: timestamp,
+              validation_error_code: nil,
+              updated_at: timestamp
+            })
+          )
+          |> Repo.update!()
+          |> maybe_activate_completed_oauth(user_id)
+
+        attempt
+        |> change(terminal_attempt_changes("completed", nil, timestamp))
+        |> Repo.update!(@secret_repo_options)
+
+        audit!(user_id, integration, "device_authorization_completed")
+        integration
+
+      {:error, reason} ->
+        Repo.rollback(reason)
+    end
+  end
+
+  defp owned_integration_provider!(user_id, integration_id) do
+    case Integration
+         |> where(
+           [integration],
+           integration.id == ^integration_id and integration.user_id == ^user_id
+         )
+         |> select([integration], integration.provider)
+         |> Repo.one() do
+      nil -> Repo.rollback(:integration_not_found)
+      provider -> provider
+    end
+  end
+
+  # The boolean terms below are one atomic database fence, not control-flow branches.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp lock_claimed_device_authorization!(user_id, integration, claim, timestamp) do
+    query =
+      DeviceAuthorizationAttempt
+      |> where(
+        [attempt],
+        attempt.id == ^claim.id and attempt.user_id == ^user_id and
+          attempt.integration_id == ^integration.id and
+          attempt.attempt_generation == ^claim.attempt_generation and attempt.state == "active" and
+          attempt.claim_owner_id == ^claim.claim_owner_id and
+          attempt.claim_epoch == ^claim.claim_epoch and
+          attempt.claim_lease_expires_at > ^timestamp and
+          attempt.provider_deadline > ^timestamp and
+          attempt.expected_integration_generation == ^integration.credential_generation
+      )
+      |> lock("FOR UPDATE")
+
+    case Repo.one(query, @secret_repo_options) do
+      %DeviceAuthorizationAttempt{} = attempt -> attempt
+      nil -> Repo.rollback(:stale_device_authorization_claim)
+    end
+  end
+
+  defp maybe_activate_completed_oauth(integration, user_id) do
+    if integration.active or active_provider_account_exists?(user_id, integration.provider) do
+      integration
+    else
+      integration |> change(active: true, updated_at: now()) |> Repo.update!()
+    end
+  end
+
+  defp terminalize_claimed_device_authorization(user_id, claim, state, error_code) do
+    timestamp = database_now()
+
+    query = claimed_device_authorization_query(user_id, claim, timestamp)
+
+    case Repo.update_all(
+           query,
+           [set: terminal_attempt_changes(state, error_code, timestamp)],
+           @secret_repo_options
+         ) do
+      {1, nil} -> Repo.get!(DeviceAuthorizationAttempt, claim.id, @secret_repo_options)
+      {0, nil} -> Repo.rollback(:stale_device_authorization_claim)
+    end
+  end
+
+  # The boolean terms below are one atomic database fence, not control-flow branches.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp claimed_device_authorization_query(user_id, claim, timestamp) do
+    from attempt in DeviceAuthorizationAttempt,
+      join: integration in Integration,
+      on: integration.id == attempt.integration_id and integration.user_id == attempt.user_id,
+      where:
+        attempt.id == ^claim.id and attempt.user_id == ^user_id and
+          attempt.attempt_generation == ^claim.attempt_generation and attempt.state == "active" and
+          attempt.claim_owner_id == ^claim.claim_owner_id and
+          attempt.claim_epoch == ^claim.claim_epoch and
+          attempt.claim_lease_expires_at > ^timestamp and
+          attempt.provider_deadline > ^timestamp and
+          integration.credential_generation == attempt.expected_integration_generation
+  end
+
   defp cancel_device_authorization_locked(user_id, attempt_id, attempt_generation) do
     integration_id =
       DeviceAuthorizationAttempt
@@ -504,7 +1035,13 @@ defmodule Kodo.Integrations do
   end
 
   defp device_authorization_integration_changes(%Integration{}, generation, timestamp) do
-    [credential_generation: generation, updated_at: timestamp]
+    [
+      credential_generation: generation,
+      refresh_claim_owner_id: nil,
+      refresh_claim_generation: nil,
+      refresh_lease_expires_at: nil,
+      updated_at: timestamp
+    ]
   end
 
   defp supersede_active_device_authorization(integration_id, timestamp) do
@@ -560,10 +1097,52 @@ defmodule Kodo.Integrations do
   defp validate_device_authorization_payload(_payload),
     do: {:error, :device_authorization_invalid}
 
-  defp bounded_secret?(value) do
-    is_binary(value) and byte_size(value) > 0 and
-      byte_size(value) <= @device_authorization_secret_max_bytes
+  defp validate_device_authorization_exchange_payload(
+         %{
+           "authorization_code" => authorization_code,
+           "code_challenge" => code_challenge,
+           "code_verifier" => code_verifier
+         } = payload
+       )
+       when map_size(payload) == 3 do
+    if Enum.all?([authorization_code, code_challenge, code_verifier], fn value ->
+         bounded_secret?(value, @device_authorization_token_max_bytes)
+       end),
+       do: :ok,
+       else: {:error, :device_authorization_response_invalid}
   end
+
+  defp validate_device_authorization_exchange_payload(_payload),
+    do: {:error, :device_authorization_response_invalid}
+
+  defp validate_device_authorization_credentials(
+         %{
+           "access_token" => access_token,
+           "refresh_token" => refresh_token,
+           "id_token" => id_token,
+           "account_id" => account_id
+         } = credentials
+       )
+       when map_size(credentials) == 4 do
+    valid_tokens? =
+      Enum.all?([access_token, refresh_token, id_token], fn value ->
+        bounded_secret?(value, @device_authorization_token_max_bytes)
+      end)
+
+    if valid_tokens? and bounded_secret?(account_id),
+      do: :ok,
+      else: {:error, :device_authorization_response_invalid}
+  end
+
+  defp validate_device_authorization_credentials(_credentials),
+    do: {:error, :device_authorization_response_invalid}
+
+  defp bounded_secret?(value) do
+    bounded_secret?(value, @device_authorization_secret_max_bytes)
+  end
+
+  defp bounded_secret?(value, max_bytes),
+    do: is_binary(value) and byte_size(value) > 0 and byte_size(value) <= max_bytes
 
   defp require_device_authorization_integration(%Integration{
          provider: "openai_codex",
@@ -634,7 +1213,10 @@ defmodule Kodo.Integrations do
           expires_at: opts[:expires_at],
           validated_at: nil,
           refreshed_at: opts[:refreshed_at],
-          validation_error_code: nil
+          validation_error_code: nil,
+          refresh_claim_owner_id: nil,
+          refresh_claim_generation: nil,
+          refresh_lease_expires_at: nil
         })
 
       update_fenced(scope, id, generation, allowed_connections, audit_event_type, changes)
@@ -653,6 +1235,29 @@ defmodule Kodo.Integrations do
 
   defp require_connected(%Integration{connection_status: "connected"}), do: :ok
   defp require_connected(%Integration{}), do: {:error, :integration_not_connected}
+
+  defp refresh_claim_conflict(user_id, id, generation) do
+    case Repo.get_by(Integration, id: id, user_id: user_id) do
+      %Integration{credential_generation: ^generation, refresh_claim_owner_id: owner}
+      when not is_nil(owner) ->
+        {:error, :refresh_in_progress}
+
+      %Integration{} ->
+        {:error, :stale_credential_generation}
+
+      nil ->
+        {:error, :integration_not_found}
+    end
+  end
+
+  defp exact_refresh_claim_query(user_id, %Integration{} = claim) do
+    from integration in Integration,
+      where:
+        integration.id == ^claim.id and integration.user_id == ^user_id and
+          integration.credential_generation == ^claim.refresh_claim_generation and
+          integration.refresh_claim_owner_id == ^claim.refresh_claim_owner_id and
+          integration.refresh_claim_epoch == ^claim.refresh_claim_epoch
+  end
 
   defp lock_provider_integrations(user_id, integration_id) do
     provider =
