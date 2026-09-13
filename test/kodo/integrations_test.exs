@@ -136,7 +136,7 @@ defmodule Kodo.IntegrationsTest do
     test "returns a bounded error when connection races account deletion", %{scope: scope} do
       Repo.delete!(scope.user)
 
-      assert {:error, :integration_owner_not_found} = connect(scope)
+      assert {:error, :integration_not_found} = connect(scope)
     end
 
     test "replaces credentials with a new nonce and advances the generation", %{scope: scope} do
@@ -655,7 +655,7 @@ defmodule Kodo.IntegrationsTest do
       Repo.delete!(scope.user)
       send(task.pid, {:continue_json_encoding, ref})
 
-      assert {:error, :stale_credential_generation} = Task.await(task)
+      assert {:error, :integration_not_found} = Task.await(task)
 
       refute Repo.get(Integration, integration.id)
     end
@@ -1503,6 +1503,141 @@ defmodule Kodo.IntegrationsTest do
                Integrations.get_active_integration_by_provider(scope, "openai_codex")
     end
 
+    test "disconnect does not invert integration and device-attempt lock order" do
+      parent = self()
+
+      {scope, integration, attempt} =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            scope = AccountsFixtures.user_scope_fixture()
+            integration = oauth_integration(scope)
+
+            {:ok, attempt} =
+              Integrations.begin_device_authorization(
+                scope,
+                integration.id,
+                integration.credential_generation,
+                %{"device_auth_id" => "device", "user_code" => "CODE"},
+                30_000
+              )
+
+            {scope, Repo.reload!(integration), attempt}
+          end)
+        end)
+        |> Task.await()
+
+      on_exit(fn ->
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn -> Repo.delete(scope.user) end)
+        end)
+        |> Task.await()
+      end)
+
+      integration_holder =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            Repo.transaction(fn ->
+              Ecto.Adapters.SQL.query!(
+                Repo,
+                "SELECT id FROM provider_integrations WHERE id = $1 FOR UPDATE",
+                [Ecto.UUID.dump!(integration.id)]
+              )
+
+              send(parent, {:integration_locked, self()})
+
+              receive do
+                :lock_attempt ->
+                  Ecto.Adapters.SQL.query!(
+                    Repo,
+                    "SELECT id FROM device_authorization_attempts WHERE id = $1 FOR UPDATE",
+                    [Ecto.UUID.dump!(attempt.id)]
+                  )
+              end
+            end)
+          end)
+        end)
+
+      assert_receive {:integration_locked, holder}
+
+      disconnect =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            Repo.transaction(fn ->
+              %{rows: [[backend_pid]]} = Ecto.Adapters.SQL.query!(Repo, "SELECT pg_backend_pid()")
+              send(parent, {:disconnect_backend, backend_pid})
+
+              Integrations.disconnect(
+                scope,
+                integration.id,
+                integration.credential_generation
+              )
+            end)
+          end)
+        end)
+
+      assert_receive {:disconnect_backend, backend_pid}
+      assert_query_blocked!(backend_pid)
+      send(holder, :lock_attempt)
+
+      assert {:ok, {:ok, _integration}} = Task.await(disconnect)
+      assert {:ok, _result} = Task.await(integration_holder)
+    end
+
+    test "audited lifecycle transitions lock the user before integrations" do
+      parent = self()
+
+      {scope, integration} =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            scope = AccountsFixtures.user_scope_fixture()
+            {:ok, integration} = connect(scope, "lifecycle-key")
+            {scope, integration}
+          end)
+        end)
+        |> Task.await()
+
+      user_holder =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            Repo.transaction(fn ->
+              Ecto.Adapters.SQL.query!(Repo, "SELECT id FROM users WHERE id = $1 FOR UPDATE", [
+                scope.user.id
+              ])
+
+              send(parent, {:user_locked, self()})
+
+              receive do
+                :delete_user -> Repo.delete!(scope.user)
+              end
+            end)
+          end)
+        end)
+
+      assert_receive {:user_locked, holder}
+
+      disconnect =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            %{rows: [[backend_pid]]} = Ecto.Adapters.SQL.query!(Repo, "SELECT pg_backend_pid()")
+            send(parent, {:lifecycle_backend, backend_pid})
+
+            Integrations.disconnect(
+              scope,
+              integration.id,
+              integration.credential_generation
+            )
+          end)
+        end)
+
+      assert_receive {:lifecycle_backend, backend_pid}
+      assert_query_blocked!(backend_pid)
+      send(holder, :delete_user)
+
+      assert {:ok, _deleted} = Task.await(user_holder)
+      assert {:error, :integration_not_found} = Task.await(disconnect)
+      assert is_nil(Repo.get(Integration, integration.id))
+    end
+
     test "cancellation is owned and generation fenced and removes the one-time code", %{
       scope: scope
     } do
@@ -1638,6 +1773,21 @@ defmodule Kodo.IntegrationsTest do
     task = Task.Supervisor.async_nolink(supervisor, operation)
     Ecto.Adapters.SQL.Sandbox.allow(Repo, self(), task.pid)
     task
+  end
+
+  defp assert_query_blocked!(backend_pid, attempts \\ 100)
+
+  defp assert_query_blocked!(_backend_pid, 0), do: flunk("query did not block")
+
+  defp assert_query_blocked!(backend_pid, attempts) do
+    %{rows: [[blocked?]]} =
+      Ecto.Adapters.SQL.query!(
+        Repo,
+        "SELECT cardinality(pg_blocking_pids($1)) > 0",
+        [backend_pid]
+      )
+
+    if blocked?, do: :ok, else: assert_query_blocked!(backend_pid, attempts - 1)
   end
 
   defp blocking_value(owner, ref, value) do

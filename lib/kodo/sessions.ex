@@ -588,13 +588,14 @@ defmodule Kodo.Sessions do
   end
 
   defp preflight_turn(scope, session_id) do
-    mapping =
-      session_id
-      |> get_session!()
-      |> turn_route_snapshot()
-      |> Map.fetch!("model_mapping")
+    case get_session(scope, session_id) do
+      %Session{} = session ->
+        mapping = session |> turn_route_snapshot() |> Map.fetch!("model_mapping")
+        preflight_mapping(scope, mapping)
 
-    preflight_mapping(scope, mapping)
+      nil ->
+        {:error, :session_not_found}
+    end
   end
 
   defp preflight_mapping(scope, mapping) do
@@ -643,7 +644,7 @@ defmodule Kodo.Sessions do
   end
 
   defp append_admitted_model_event_locked(session_id, type, payload, model, credential, opts) do
-    session = lock_session!(session_id, opts)
+    session = lock_session_after_owner!(session_id, opts)
     integration = admit_model_credential!(session, credential)
     billing_path = IntegrationRef.from_integration(integration).billing_path
 
@@ -732,8 +733,17 @@ defmodule Kodo.Sessions do
   end
 
   defp reconcile_cancel({:error, reason}, scope, session_id)
-       when reason in [:not_running, :already_finished, :coordinator_unavailable] do
-    if get_session(scope, session_id).status == "cancelled", do: :ok, else: {:error, reason}
+       when reason in [
+              :not_running,
+              :already_finished,
+              :coordinator_unavailable,
+              :session_not_found
+            ] do
+    case get_session(scope, session_id) do
+      %Session{status: "cancelled"} -> :ok
+      %Session{} -> {:error, reason}
+      nil -> {:error, :not_found}
+    end
   end
 
   defp reconcile_cancel(result, _scope, _session_id), do: result
@@ -1090,7 +1100,7 @@ defmodule Kodo.Sessions do
   end
 
   defp begin_turn_locked(session_id, content, client_request_id, opts) do
-    session = lock_session!(session_id, opts)
+    session = lock_session_after_owner!(session_id, opts)
 
     if turn_request_recorded?(session_id, client_request_id) do
       []
@@ -1149,6 +1159,7 @@ defmodule Kodo.Sessions do
   end
 
   defp change_execution_route_locked(scope, session_id, destination) do
+    lock_scope_user!(scope)
     session = lock_user_session!(scope, session_id)
     projection = session.id |> events_after() |> Projection.from_events()
 
@@ -1498,14 +1509,52 @@ defmodule Kodo.Sessions do
       Session
       |> where([session], session.id == ^session_id)
       |> lock("FOR UPDATE")
-      |> Repo.one!()
+      |> Repo.one()
 
     ownership = Keyword.get(opts, :ownership)
 
     cond do
+      is_nil(session) -> Repo.rollback(:session_not_found)
       Keyword.get(opts, :allow_unowned, false) -> session
       ownership_matches?(session, ownership) and owner_alive?(ownership) -> session
       true -> Repo.rollback(:stale_ownership)
+    end
+  end
+
+  defp lock_session_after_owner!(session_id, opts) do
+    owner =
+      Session
+      |> where([session], session.id == ^session_id)
+      |> select([session], {session.id, session.user_id})
+      |> Repo.one()
+
+    case owner do
+      {^session_id, user_id} when is_integer(user_id) ->
+        lock_user!(user_id)
+        session = lock_session!(session_id, opts)
+
+        if session.user_id == user_id,
+          do: session,
+          else: Repo.rollback(:session_not_found)
+
+      {^session_id, nil} ->
+        lock_session!(session_id, opts)
+
+      nil ->
+        Repo.rollback(:session_not_found)
+    end
+  end
+
+  defp lock_scope_user!(%Scope{user: user}), do: lock_user!(user.id)
+
+  defp lock_user!(user_id) do
+    case User
+         |> where([user], user.id == ^user_id)
+         |> select([user], user.id)
+         |> lock("FOR KEY SHARE")
+         |> Repo.one() do
+      ^user_id -> :ok
+      nil -> Repo.rollback(:session_not_found)
     end
   end
 
@@ -1583,11 +1632,13 @@ defmodule Kodo.Sessions do
           from session in Session, where: session.id == ^event.session_id, select: session.user_id
         )
 
-      Phoenix.PubSub.broadcast(
-        Kodo.PubSub,
-        session_index_topic(user_id),
-        {:session_index_changed, event.session_id}
-      )
+      if user_id do
+        Phoenix.PubSub.broadcast(
+          Kodo.PubSub,
+          session_index_topic(user_id),
+          {:session_index_changed, event.session_id}
+        )
+      end
     end
   end
 

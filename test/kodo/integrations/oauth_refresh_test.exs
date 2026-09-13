@@ -35,7 +35,8 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
   end
 
   test "refreshes shortly before expiry and persists rotated token state", context do
-    client = fake_client([{:ok, rotated_tokens("account")}])
+    rotated = rotated_tokens("account")
+    client = fake_client([{:ok, rotated}])
 
     assert {:ok, refreshed} = refresh(context, client)
     assert refreshed.credential_generation == context.integration.credential_generation + 1
@@ -45,7 +46,7 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
     assert is_nil(refreshed.refresh_claim_owner_id)
 
     assert {:ok, credentials} = CredentialEncryption.decrypt(refreshed)
-    assert credentials["access_token"] == rotated_tokens("account")["access_token"]
+    assert credentials["access_token"] == rotated["access_token"]
     assert credentials["refresh_token"] == "rotated-refresh"
     assert credentials["account_id"] == "account"
     assert Agent.get(client, &Enum.reverse(&1.refresh_tokens)) == ["old-refresh"]
@@ -317,7 +318,7 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
     assert credentials["refresh_token"] == "usable-refresh"
   end
 
-  test "bounds automatic recovery when refreshed access is already expired", context do
+  test "does not start another refresh after expired-success recovery is exhausted", context do
     admitted_at = DateTime.add(DateTime.utc_now(), -10, :second)
 
     expired =
@@ -327,7 +328,7 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
         jwt(%{"exp" => DateTime.utc_now() |> DateTime.to_unix() |> Kernel.-(1)})
       )
 
-    client = fake_client([{:ok, expired}, {:ok, expired}])
+    client = fake_client([{:ok, expired}, {:ok, rotated_tokens("account", "unused")}])
 
     assert {:error, :provider_unavailable} =
              OAuthRefresh.ensure_fresh(context.scope, context.integration,
@@ -336,11 +337,15 @@ defmodule Kodo.Integrations.OAuthRefreshTest do
                client: FakeRefreshClient,
                client_options: [agent: client],
                supervisor: context.supervisor,
-               claim_owner_id: Ecto.UUID.generate()
+               claim_owner_id: Ecto.UUID.generate(),
+               expired_success_retries: 0
              )
 
     _ = :sys.get_state(client)
-    assert length(Agent.get(client, & &1.refresh_tokens)) == 2
+    assert Agent.get(client, &Enum.reverse(&1.refresh_tokens)) == ["old-refresh"]
+
+    persisted = Repo.reload!(context.integration)
+    assert persisted.credential_generation == context.integration.credential_generation + 1
   end
 
   test "persists a rotated response after its caller stops waiting", context do

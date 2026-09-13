@@ -159,10 +159,10 @@ defmodule Kodo.Agent.Loop do
     review = ModelMapping.role!(context.mapping, :review)
     review_model = ModelMapping.request_model(review)
     contract = Roles.fetch!(:review, review["role_contract"])
+    review_invocation_id = Ecto.UUID.generate()
 
     with {:ok, capability_validation} <-
            context.adapter.validate_model(review_model, review, contract),
-         {:ok, request} <- resolve_request(context.session_id, review),
          :ok <-
            Phoenix.PubSub.subscribe(
              Kodo.PubSub,
@@ -170,17 +170,6 @@ defmodule Kodo.Agent.Loop do
            ),
          :ok <- Phoenix.PubSub.subscribe(Kodo.PubSub, "session:#{context.session_id}"),
          :ok <- Runners.subscribe_lifecycle(),
-         {:ok, {review_invocation_id, admission}} <-
-           start_review_invocation(
-             context.session_id,
-             primary_invocation_id,
-             context.mapping,
-             review,
-             contract,
-             capability_validation,
-             request,
-             context.ownership
-           ),
          {:ok, diff} <-
            execute_tool(
              context.session_id,
@@ -192,6 +181,17 @@ defmodule Kodo.Agent.Loop do
              context.ownership
            ),
          :ok <- rehoming_boundary(),
+         {:ok, request} <- resolve_request(context.session_id, review),
+         {:ok, admission} <-
+           start_review_invocation(
+             context,
+             primary_invocation_id,
+             review_invocation_id,
+             review,
+             contract,
+             capability_validation,
+             request
+           ),
          {:ok, generated} <-
            Sessions.dispatch_if_owner(context.ownership, fn ->
              task = original_task(context.events)
@@ -237,19 +237,16 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp start_review_invocation(
-         session_id,
+         context,
          primary_invocation_id,
-         mapping,
+         invocation_id,
          review,
          contract,
          capability_validation,
-         request,
-         ownership
+         request
        ) do
-    invocation_id = Ecto.UUID.generate()
-
     case Sessions.append_admitted_model_event(
-           session_id,
+           context.session_id,
            "review_invocation_started",
            %{
              "invocation_id" => invocation_id,
@@ -264,15 +261,15 @@ defmodule Kodo.Agent.Loop do
              "role_contract" => contract.id,
              "toolset_version" => contract.toolset_version,
              "capability_validation" => capability_validation,
-             "model_mapping" => mapping
+             "model_mapping" => context.mapping
            },
            request.model,
            request.credential,
            version: 2,
            parent_id: primary_invocation_id,
-           ownership: ownership
+           ownership: context.ownership
          ) do
-      {:ok, {_event, admission}} -> {:ok, {invocation_id, admission}}
+      {:ok, {_event, admission}} -> {:ok, admission}
       error -> normalize_admission_error(error, request)
     end
   end

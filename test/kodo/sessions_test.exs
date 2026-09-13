@@ -1,11 +1,14 @@
 defmodule Kodo.SessionsTest do
   use Kodo.DataCase
 
+  alias Kodo.Accounts.User
   alias Kodo.Agent.ExecutionRouteChange
   alias Kodo.Agent.ModelMapping
   alias Kodo.Agent.ModelSettings
   alias Kodo.Cluster.Instances
   alias Kodo.Integrations
+  alias Kodo.Integrations.CredentialEncryption
+  alias Kodo.Integrations.Integration
   alias Kodo.LLM
   alias Kodo.LLM.ProviderError
   alias Kodo.Runners
@@ -365,6 +368,29 @@ defmodule Kodo.SessionsTest do
     assert Enum.count(Sessions.events_after(session.id), &(&1.type == "user_message")) == 1
   end
 
+  test "accepts alternate provider-qualified model syntax into a canonical snapshot", %{
+    runner: runner,
+    scope: scope
+  } do
+    assert {:ok, _integration} =
+             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "alternate-key"})
+
+    assert {:ok, session} =
+             Sessions.create_session(scope, %{
+               runner_id: runner.id,
+               title: "Alternate model syntax",
+               model: "gpt-4o-mini@openai"
+             })
+
+    assert {:ok, [snapshot, _message, _status]} =
+             Sessions.begin_turn(session.id, "Accept supported syntax")
+
+    primary = snapshot.payload["model_mapping"]["roles"]["primary"]
+    assert primary["model"] == "openai:gpt-4o-mini"
+    assert primary["model_selector"] == "gpt-4o-mini"
+    assert primary["execution_route"] == "openai"
+  end
+
   test "rejects a turn before acceptance when any configured role lacks access", %{
     runner: runner,
     scope: scope
@@ -421,12 +447,30 @@ defmodule Kodo.SessionsTest do
     assert Enum.map(Sessions.events_after(session.id), & &1.type) == ["session_created"]
   end
 
-  test "holds provider selection locks through turn acceptance", %{
+  test "holds the provider selection lock acquired by turn acceptance", %{
     runner: runner,
     scope: scope
   } do
-    assert {:ok, _integration} =
-             Integrations.connect(scope, "openai", "api_key", %{"api_key" => "locked-key"})
+    integration = %Integration{
+      id: Ecto.UUID.generate(),
+      user_id: scope.user.id,
+      provider: "openai",
+      authentication_type: "api_key"
+    }
+
+    assert {:ok, encrypted} =
+             CredentialEncryption.encrypt(integration, %{"api_key" => "locked-key"})
+
+    integration
+    |> change(
+      Map.merge(encrypted, %{
+        display_name: "Lock fixture",
+        active: true,
+        connection_status: "connected",
+        validation_status: "unverified"
+      })
+    )
+    |> Repo.insert!()
 
     assert {:ok, session} =
              Sessions.create_session(scope, %{
@@ -455,6 +499,75 @@ defmodule Kodo.SessionsTest do
       |> Task.await()
 
     refute lock_available?
+  end
+
+  test "admission locks the owning user before session and integration rows" do
+    for operation <- [:begin_turn, :append_invocation] do
+      parent = self()
+
+      {scope, integration, session, model, credential} =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn -> admission_fixture() end)
+        end)
+        |> Task.await()
+
+      on_exit(fn -> delete_external_user(scope.user.id) end)
+
+      deletion =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            Repo.transaction(fn ->
+              Ecto.Adapters.SQL.query!(Repo, "SELECT id FROM users WHERE id = $1 FOR UPDATE", [
+                scope.user.id
+              ])
+
+              Ecto.Adapters.SQL.query!(
+                Repo,
+                "SELECT id FROM provider_integrations WHERE id = $1 FOR UPDATE",
+                [Ecto.UUID.dump!(integration.id)]
+              )
+
+              send(parent, {:admission_delete_ready, self()})
+
+              receive do
+                :delete_user -> Repo.delete!(scope.user)
+              end
+            end)
+          end)
+        end)
+
+      assert_receive {:admission_delete_ready, deletion_holder}
+
+      admission =
+        Task.async(fn ->
+          Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+            %{rows: [[backend_pid]]} = Ecto.Adapters.SQL.query!(Repo, "SELECT pg_backend_pid()")
+            send(parent, {:admission_backend, backend_pid})
+
+            case operation do
+              :begin_turn ->
+                Sessions.begin_turn(session.id, "Race account deletion")
+
+              :append_invocation ->
+                Sessions.append_admitted_model_event(
+                  session.id,
+                  "model_invocation_started",
+                  %{"invocation_id" => Ecto.UUID.generate()},
+                  model,
+                  credential
+                )
+            end
+          end)
+        end)
+
+      assert_receive {:admission_backend, backend_pid}
+      assert_query_blocked!(backend_pid)
+      send(deletion_holder, :delete_user)
+
+      assert {:ok, _deleted} = Task.await(deletion)
+      assert {:error, :session_not_found} = Task.await(admission)
+      assert is_nil(Repo.get(Session, session.id))
+    end
   end
 
   test "atomically records invocation admission for the exact active credential generation", %{
@@ -928,5 +1041,60 @@ defmodule Kodo.SessionsTest do
         "session-rehoming-v1"
       ]
     }
+  end
+
+  defp admission_fixture do
+    scope = user_scope_fixture()
+
+    {:ok, runner} =
+      Runners.register(scope, %{
+        workspace_root: "/work/#{Ecto.UUID.generate()}",
+        platform: "linux",
+        architecture: "x86_64",
+        runner_version: "0.1.0",
+        protocol_version: 5,
+        capabilities: []
+      })
+
+    {:ok, integration} =
+      Integrations.connect(scope, "openai", "api_key", %{"api_key" => "admission-lock-key"})
+
+    {:ok, model, reference} = LLM.resolve_integration(scope, "openai:gpt-4o-mini")
+    {:ok, credential} = LLM.admit_credential(scope, model, reference)
+
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Admission deletion lock order",
+        model: "openai:gpt-4o-mini"
+      })
+
+    {scope, integration, session, model, credential}
+  end
+
+  defp delete_external_user(user_id) do
+    Task.async(fn ->
+      Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn -> delete_user_if_present(user_id) end)
+    end)
+    |> Task.await()
+  end
+
+  defp delete_user_if_present(user_id) do
+    if user = Repo.get(User, user_id), do: Repo.delete!(user)
+  end
+
+  defp assert_query_blocked!(backend_pid, attempts \\ 100)
+
+  defp assert_query_blocked!(_backend_pid, 0), do: flunk("query did not block")
+
+  defp assert_query_blocked!(backend_pid, attempts) do
+    %{rows: [[blocked?]]} =
+      Ecto.Adapters.SQL.query!(
+        Repo,
+        "SELECT cardinality(pg_blocking_pids($1)) > 0",
+        [backend_pid]
+      )
+
+    if blocked?, do: :ok, else: assert_query_blocked!(backend_pid, attempts - 1)
   end
 end

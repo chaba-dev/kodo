@@ -327,7 +327,8 @@ manufactured after that no-go decision.
 - [X] Render the fixed allowlisted HTTPS verification destination and one-time
   code separately, reject a provider-returned verification URL that does not
   match the exact allowlist, and never automatically navigate to that URL.
-- [X] Trigger claims only from attempt creation or LiveView mount/remount, use
+- [X] Trigger claims from connection-driven attempt creation, LiveView
+  mount/remount, generation-specific retry, and task-completion recovery; use
   one conditional update against the exact attempt row that increments and
   returns its claim epoch, and run a successful claim as a finite task under
   ~Kodo.ControlPlaneTaskSupervisor~ that survives the originating LiveView
@@ -346,9 +347,9 @@ manufactured after that no-go decision.
   generation. Starting reauthorization advances the integration generation and
   the new attempt captures that post-advance value; install OAuth credentials
   only when both attempt and expected integration generations still match.
-- [X] Store access tokens, refresh tokens, account identifiers, expiries, and
-  credential generations in the encrypted integration payload without logging
-  device or token material.
+- [X] Store access tokens, refresh tokens, and account identifiers in the
+  encrypted integration payload. Keep expiries and credential generations as
+  queryable lifecycle metadata, without logging device or token material.
 - [X] Test user deletion with OAuth credentials, an active authorization
   attempt, a held claim, and in-flight refresh; all rows cascade and every late
   completion becomes a no-op.
@@ -388,8 +389,10 @@ manufactured after that no-go decision.
   has an accessible Copy action, is retained only while needed to present the
   active attempt, and disappears after every terminal state without entering
   logs or telemetry.
-- [X] Extend onboarding and missing-provider feedback for ChatGPT Subscription,
-  and emit credential-free audit events for authorization start/completion and
+- [ ] Extend onboarding for ChatGPT Subscription. The baseline onboarding and
+  confirmed model-preset interaction remain Phase 1B and Phase 2 work.
+- [X] Extend missing-provider feedback for ChatGPT Subscription and emit
+  credential-free audit events for authorization start/completion and
   cancellation, refresh outcomes, reauthorization, and disconnection.
 - [ ] Add an explicit per-session execution-route change between OpenAI
   Platform and ChatGPT Subscription only when the destination supports every
@@ -411,6 +414,25 @@ manufactured after that no-go decision.
 - [X] Route requests whose persisted turn snapshot selects ~openai_codex~ only
   through the user's ChatGPT integration and prohibit silent fallback to OpenAI
   API billing.
+
+Production generation entry points consume a ~Kodo.LLM.InvocationAdmission~
+returned by the session transaction that records invocation start and canonical
+billing provenance. Scoped credential resolution and decryption precede that
+transaction; the transaction rechecks session ownership, integration state, and
+credential generation before permitting inference. The admission struct makes
+that internal boundary explicit, but is not an unforgeable bearer capability
+because BEAM modules can construct structs. The separately named evaluation
+entry points are out-of-band harness operations and do not represent production
+session admission. Turn acceptance holds deterministic provider-selection and
+active-row locks while validating the complete role set; those locks end at
+commit and are never held across inference.
+
+Device and refresh recovery also preserve already-admitted provider results
+while bounding automatic expired-token recovery. Explicit activation or
+disconnection invalidates older selection-restoration intent, expired device
+attempts cannot poison refresh admission, and open LiveViews reconcile polling,
+exchange, terminal, and superseded attempt state from durable storage.
+
 - [ ] Test authorization ownership and expiry, polling backoff, two-node refresh
   contention, multi-node and concurrent-tab device claims, claim epoch takeover
   and conditional renewal, stale claimant polling and completion, pauses before

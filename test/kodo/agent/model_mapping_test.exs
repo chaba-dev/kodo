@@ -71,6 +71,42 @@ defmodule Kodo.Agent.ModelMappingTest do
              ModelMapping.validate_snapshot(malformed)
   end
 
+  test "canonicalizes every supported string model specification in snapshots" do
+    specifications = [
+      {"openai:gpt-4o-mini", "openai", "gpt-4o-mini"},
+      {"gpt-4o-mini@openai", "openai", "gpt-4o-mini"},
+      {"openrouter:nvidia/nemotron-3-super-120b-a12b:free", "openrouter",
+       "nvidia/nemotron-3-super-120b-a12b:free"},
+      {"nvidia/nemotron-3-super-120b-a12b:free@openrouter", "openrouter",
+       "nvidia/nemotron-3-super-120b-a12b:free"}
+    ]
+
+    for {specification, route, selector} <- specifications do
+      mapping = ModelMapping.balanced([{"session", %{primary: %{model: specification}}}])
+      snapshot = ModelMapping.snapshot(mapping)
+      primary = snapshot["roles"]["primary"]
+
+      assert primary["model"] == "#{route}:#{selector}"
+      assert primary["execution_route"] == route
+      assert primary["model_selector"] == selector
+      assert {:ok, ^snapshot} = ModelMapping.validate_snapshot(snapshot)
+    end
+  end
+
+  test "canonicalizes application-defined execution route spellings idempotently" do
+    for specification <- ["openai_codex:gpt-5.4", "openai-codex:gpt-5.4"] do
+      mapping = ModelMapping.balanced([{"session", %{primary: %{model: specification}}}])
+
+      snapshot = ModelMapping.snapshot(mapping)
+      primary = snapshot["roles"]["primary"]
+
+      assert primary["model"] == "openai_codex:gpt-5.4"
+      assert primary["model_selector"] == "gpt-5.4"
+      assert ModelMapping.snapshot(snapshot) == snapshot
+      assert {:ok, ^snapshot} = ModelMapping.validate_snapshot(snapshot)
+    end
+  end
+
   test "rejects malformed capability requirements instead of accepting a partial envelope" do
     snapshot = ModelMapping.snapshot(ModelMapping.balanced())
 
