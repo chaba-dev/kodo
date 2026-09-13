@@ -90,6 +90,45 @@ defmodule Kodo.Integrations do
     end
   end
 
+  @doc false
+  def admit_execution_route_change(%Scope{user: user}, provider) do
+    integration =
+      Integration
+      |> where(
+        [integration],
+        integration.user_id == ^user.id and integration.provider == ^provider and
+          integration.active
+      )
+      |> lock("FOR UPDATE")
+      |> Repo.one()
+
+    case integration do
+      %Integration{
+        connection_status: "connected",
+        validation_status: status,
+        encrypted_credentials: encrypted
+      }
+      when status != "invalid" and not is_nil(encrypted) ->
+        {:ok, integration}
+
+      %Integration{} ->
+        {:error, :destination_integration_unavailable}
+
+      nil ->
+        {:error, :destination_integration_required}
+    end
+  end
+
+  @doc false
+  def audit_execution_route_change(
+        %Scope{user: user},
+        %Integration{user_id: user_id} = integration
+      )
+      when user.id == user_id do
+    audit!(user.id, integration, "execution_route_changed")
+    :ok
+  end
+
   def list_audit_events(%Scope{user: user}) do
     AuditEvent
     |> where([event], event.actor_user_id == ^user.id)

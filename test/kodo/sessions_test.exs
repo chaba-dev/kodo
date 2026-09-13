@@ -1,7 +1,9 @@
 defmodule Kodo.SessionsTest do
   use Kodo.DataCase
 
+  alias Kodo.Agent.ExecutionRouteChange
   alias Kodo.Cluster.Instances
+  alias Kodo.Integrations
   alias Kodo.Runners
   alias Kodo.Sessions
   alias Kodo.Sessions.Session
@@ -317,8 +319,36 @@ defmodule Kodo.SessionsTest do
       })
 
     request_id = Ecto.UUID.generate()
-    assert {:ok, [message, status]} = Sessions.begin_turn(session.id, "Fix it", request_id)
+
+    assert {:ok, [snapshot, message, status]} =
+             Sessions.begin_turn(session.id, "Fix it", request_id)
+
+    assert snapshot.type == "turn_route_snapshot"
+    assert snapshot.source == "system"
+    assert snapshot.payload["route_revision"] == 1
+
+    assert snapshot.payload["model_mapping"]["roles"]["primary"]["model"] ==
+             "openai:gpt-4o-mini"
+
+    assert snapshot.payload["model_mapping"]["roles"]["primary"]["execution_route"] ==
+             "openai"
+
+    assert snapshot.payload["model_mapping"]["roles"]["primary"]["model_selector"] ==
+             "gpt-4o-mini"
+
+    assert snapshot.payload["model_mapping"]["roles"]["primary"]["capability_contract"] == %{
+             "id" => "alpha-v1",
+             "toolset_version" => "workspace-v5",
+             "requirements" => %{
+               "tools" => true,
+               "structured_output" => false,
+               "min_context" => 100_000,
+               "input_modalities" => ["text"]
+             }
+           }
+
     assert message.type == "user_message"
+    assert message.sequence == snapshot.sequence + 1
     assert status.type == "session_status_changed"
     assert status.sequence == message.sequence + 1
     assert Sessions.get_session!(session.id).status == "running"
@@ -326,6 +356,115 @@ defmodule Kodo.SessionsTest do
 
     assert {:error, :turn_in_progress} = Sessions.begin_turn(session.id, "Duplicate")
     assert Enum.count(Sessions.events_after(session.id), &(&1.type == "user_message")) == 1
+  end
+
+  test "rejects route changes without approved exact-identity evidence", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "No compatible route",
+        model: "openai:gpt-5.4"
+      })
+
+    assert {:error, {:incompatible_execution_route, ["primary", "review", "search"]}} =
+             Sessions.change_execution_route(scope, session.id, "openai_codex")
+
+    refute Enum.any?(
+             Sessions.events_after(session.id),
+             &(&1.type == "execution_route_changed")
+           )
+
+    assert Integrations.list_audit_events(scope) == []
+  end
+
+  test "does not reveal another user's session through route changes", %{
+    runner: runner,
+    scope: scope
+  } do
+    other_scope = user_scope_fixture()
+
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Private route",
+        model: "openai:gpt-5.4"
+      })
+
+    assert {:error, :session_not_found} =
+             Sessions.change_execution_route(other_scope, session.id, "openai_codex")
+
+    refute Enum.any?(
+             Sessions.events_after(session.id),
+             &(&1.type == "execution_route_changed")
+           )
+  end
+
+  test "applies a persisted route revision only to subsequently accepted turns", %{
+    runner: runner,
+    scope: scope
+  } do
+    {:ok, session} =
+      Sessions.create_session(scope, %{
+        runner_id: runner.id,
+        title: "Pending route",
+        model: "openai_codex:gpt-5.4"
+      })
+
+    {:ok, [first_snapshot, _message, _status]} = Sessions.begin_turn(session.id, "First")
+
+    records = [
+      %{
+        role: "primary",
+        source: "openai_codex",
+        destination: "openai",
+        selector: "gpt-5.4",
+        role_contract: "alpha-v1",
+        status: :approved
+      }
+    ]
+
+    [created | _events] = Sessions.events_after(session.id)
+
+    assert {:ok, changed_mapping} =
+             ExecutionRouteChange.change(
+               created.payload["model_mapping"],
+               "openai",
+               records
+             )
+
+    assert {:ok, route_event} =
+             Sessions.append_event(
+               session.id,
+               "execution_route_changed",
+               %{
+                 "route_revision" => 2,
+                 "destination" => "openai",
+                 "model_mapping" => changed_mapping
+               },
+               source: "user"
+             )
+
+    assert first_snapshot.payload["route_revision"] == 1
+
+    assert get_in(first_snapshot.payload, ["model_mapping", "roles", "primary", "execution_route"]) ==
+             "openai_codex"
+
+    assert route_event.payload["route_revision"] == 2
+    assert route_event.source == "user"
+
+    assert {:ok, {_session, _event}} = Sessions.set_status(session.id, "idle")
+    assert {:ok, [second_snapshot, _message, _status]} = Sessions.begin_turn(session.id, "Second")
+    assert second_snapshot.payload["route_revision"] == 2
+
+    assert get_in(second_snapshot.payload, [
+             "model_mapping",
+             "roles",
+             "primary",
+             "execution_route"
+           ]) == "openai"
   end
 
   test "advances ownership epochs and fences every stale state mutation", %{

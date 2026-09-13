@@ -53,6 +53,11 @@ defmodule Kodo.Test.FakeLLM do
       send(test_pid, {:llm_request, model, hd(messages), tools, opts})
     end
 
+    if last["content"] == "capture route replay" do
+      test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
+      send(test_pid, {:llm_messages, messages})
+    end
+
     cond do
       last["content"] == "retry provider transcript" ->
         test_pid = Application.fetch_env!(:kodo, :fake_llm_test_pid)
@@ -106,6 +111,7 @@ defmodule Kodo.Test.FakeLLM do
   end
 
   defp initial(%{"content" => "capture contract"}), do: final("The fix is complete.")
+  defp initial(%{"content" => "capture route replay"}), do: final("The fix is complete.")
   defp initial(%{"content" => "final answer"}), do: final("Ready for review.")
 
   defp initial(%{"content" => "force final turn"}) do

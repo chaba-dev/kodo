@@ -11,6 +11,9 @@ defmodule Kodo.Sessions.Projection do
     :runner_id,
     :model,
     :model_mapping,
+    route_revision: 1,
+    turn_route_revision: nil,
+    turn_model_mapping: nil,
     approval_policy: "standard",
     status: "idle",
     pending_approval_id: nil,
@@ -70,8 +73,25 @@ defmodule Kodo.Sessions.Projection do
         runner_id: payload["runner_id"],
         model: payload["model"],
         model_mapping: normalize_model_mapping(payload["model_mapping"]),
+        route_revision: payload["route_revision"] || 1,
         approval_policy: payload["approval_policy"] || "standard",
         status: payload["status"]
+    }
+  end
+
+  defp reduce(projection, "execution_route_changed", payload) do
+    %{
+      projection
+      | model_mapping: normalize_model_mapping(payload["model_mapping"]),
+        route_revision: payload["route_revision"]
+    }
+  end
+
+  defp reduce(projection, "turn_route_snapshot", payload) do
+    %{
+      projection
+      | turn_model_mapping: normalize_model_mapping(payload["model_mapping"]),
+        turn_route_revision: payload["route_revision"]
     }
   end
 

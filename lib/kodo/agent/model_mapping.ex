@@ -60,6 +60,53 @@ defmodule Kodo.Agent.ModelMapping do
 
   def normalize(_mapping), do: balanced()
 
+  @doc "Freezes explicit route and selector identity into every role for durable turn replay."
+  def snapshot(mapping) do
+    mapping = normalize(mapping)
+
+    roles =
+      Map.new(mapping["roles"], fn {role, role_mapping} ->
+        contract = Roles.fetch!(role_atom(role), role_mapping["role_contract"])
+
+        {role,
+         role_mapping
+         |> Map.put("execution_route", role_mapping["provider"])
+         |> Map.put("model_selector", model_selector(role_mapping["model"]))
+         |> Map.put("capability_contract", capability_contract(contract))}
+      end)
+
+    %{mapping | "roles" => roles}
+  end
+
+  @doc "Builds the provider-specific request model from an immutable route snapshot."
+  def request_model(%{"execution_route" => route, "model_selector" => selector})
+      when is_binary(route) and route != "" and is_binary(selector) and selector != "" do
+    "#{route}:#{selector}"
+  end
+
+  def request_model(%{"model" => model}), do: model
+
+  defp capability_contract(contract) do
+    %{
+      "id" => contract.id,
+      "toolset_version" => contract.toolset_version,
+      "requirements" => %{
+        "tools" => contract.capabilities.tools,
+        "structured_output" => stringify(contract.capabilities.structured_output),
+        "min_context" => contract.capabilities.min_context,
+        "input_modalities" => Enum.map(contract.capabilities.input_modalities, &to_string/1)
+      }
+    }
+  end
+
+  defp role_atom("primary"), do: :primary
+  defp role_atom("search"), do: :search
+  defp role_atom("review"), do: :review
+
+  defp stringify(value) when is_boolean(value), do: value
+  defp stringify(value) when is_atom(value), do: Atom.to_string(value)
+  defp stringify(value), do: value
+
   defp normalize_role(current, persisted) do
     normalized =
       Enum.reduce(["model", "reasoning"], current, fn field, mapping ->
@@ -122,6 +169,13 @@ defmodule Kodo.Agent.ModelMapping do
     case ReqLLM.model(model) do
       {:ok, %LLMDB.Model{provider: provider}} -> Atom.to_string(provider)
       {:error, _reason} -> nil
+    end
+  end
+
+  defp model_selector(model) do
+    case String.split(model, ":", parts: 2) do
+      [_provider, selector] -> selector
+      [selector] -> selector
     end
   end
 end

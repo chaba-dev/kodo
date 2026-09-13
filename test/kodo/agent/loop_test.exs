@@ -92,6 +92,125 @@ defmodule Kodo.Agent.LoopTest do
     refute Enum.any?(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
   end
 
+  test "never falls back to Platform billing for a ChatGPT turn snapshot", %{
+    session: session,
+    ownership: ownership
+  } do
+    [created] = Sessions.events_after(session.id)
+
+    mapping =
+      update_in(created.payload["model_mapping"], ["roles"], fn roles ->
+        Map.new(roles, fn {role, role_mapping} ->
+          {role,
+           role_mapping
+           |> Map.put("execution_route", "openai_codex")
+           |> Map.put("model_selector", "gpt-5.4")}
+        end)
+      end)
+
+    {:ok, _snapshot} =
+      Sessions.append_event(
+        session.id,
+        "turn_route_snapshot",
+        %{"route_revision" => 2, "model_mapping" => mapping},
+        source: "system",
+        ownership: ownership
+      )
+
+    {:ok, _message} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "final answer"},
+        ownership: ownership
+      )
+
+    assert {:error, %Kodo.LLM.ProviderError{} = error} =
+             Loop.run(session.id,
+               adapter: Kodo.Test.FakeLLM,
+               budgets: budgets([]),
+               ownership: ownership
+             )
+
+    assert error.kind == :integration_required
+    assert error.provider == "openai_codex"
+
+    refute Enum.any?(Sessions.events_after(session.id), &(&1.type == "model_invocation_started"))
+  end
+
+  test "drops provider-private assistant state when replay crosses execution routes", %{
+    runner: runner,
+    session: session,
+    ownership: ownership
+  } do
+    previous_test_pid = Application.get_env(:kodo, :fake_llm_test_pid)
+    Application.put_env(:kodo, :fake_llm_test_pid, self())
+    on_exit(fn -> restore_env(:fake_llm_test_pid, previous_test_pid) end)
+    {:ok, _registration} = Registry.register(Kodo.RunnerRegistry, runner.id, nil)
+    old_invocation_id = Ecto.UUID.generate()
+
+    {:ok, _invocation} =
+      Sessions.append_event(
+        session.id,
+        "model_invocation_started",
+        %{"invocation_id" => old_invocation_id, "provider" => "openai_codex"},
+        ownership: ownership
+      )
+
+    {:ok, _response} =
+      Sessions.append_event(
+        session.id,
+        "model_response",
+        %{
+          "invocation_id" => old_invocation_id,
+          "text" => "Visible prior answer",
+          "tool_calls" => [],
+          "assistant" => %{
+            "reasoning_signature" => "provider-private-signature",
+            "cache_state" => "provider-private-cache"
+          }
+        },
+        ownership: ownership
+      )
+
+    {:ok, _message} =
+      Sessions.append_event(
+        session.id,
+        "user_message",
+        %{"role" => "user", "content" => "capture route replay"},
+        ownership: ownership
+      )
+
+    loop =
+      Task.async(fn ->
+        Loop.run(session.id,
+          adapter: Kodo.Test.FakeLLM,
+          budgets: budgets([]),
+          ownership: ownership
+        )
+      end)
+
+    assert_receive {:llm_messages, messages}
+
+    assert %{
+             "role" => "assistant",
+             "content" => "Visible prior answer",
+             "tool_calls" => []
+           } in messages
+
+    refute inspect(messages) =~ "provider-private"
+
+    assert_receive {:tool_request, review_request}
+
+    broadcast_success(runner, review_request, %{
+      "result" => "output",
+      "content" => "clean diff",
+      "truncated" => false
+    })
+
+    assert {:ok, "The fix is complete."} = Task.await(loop)
+  end
+
   test "records the resolved role and model mapping for an invocation", %{
     session: session,
     ownership: ownership

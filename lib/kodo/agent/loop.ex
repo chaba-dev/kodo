@@ -89,7 +89,7 @@ defmodule Kodo.Agent.Loop do
            response,
            calls,
            adapter,
-           projection.model_mapping || legacy_mapping(projection.model),
+           turn_mapping(projection),
            budgets,
            ownership
          ) do
@@ -125,8 +125,7 @@ defmodule Kodo.Agent.Loop do
   end
 
   defp review_final_answer(text, response, context) do
-    mapping =
-      context.projection.model_mapping || legacy_mapping(context.projection.model)
+    mapping = turn_mapping(context.projection)
 
     primary_invocation_id = response.payload["invocation_id"]
 
@@ -165,10 +164,11 @@ defmodule Kodo.Agent.Loop do
 
   defp run_final_review(text, primary_invocation_id, context) do
     review = ModelMapping.role!(context.mapping, :review)
+    review_model = ModelMapping.request_model(review)
     contract = Roles.fetch!(:review, review["role_contract"])
 
     with {:ok, capability_validation} <-
-           context.adapter.validate_model(review["model"], review, contract),
+           context.adapter.validate_model(review_model, review, contract),
          {:ok, request} <- resolve_request(context.session_id, review),
          :ok <-
            Phoenix.PubSub.subscribe(
@@ -458,9 +458,14 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
+  defp turn_mapping(projection) do
+    projection.turn_model_mapping || projection.model_mapping || legacy_mapping(projection.model)
+  end
+
   defp infer(session_id, projection, events, adapter, budgets, invocation, ownership) do
-    mapping = projection.model_mapping || legacy_mapping(projection.model)
+    mapping = turn_mapping(projection)
     primary = ModelMapping.role!(mapping, :primary)
+    primary_model = ModelMapping.request_model(primary)
     contract = Roles.fetch!(:primary, primary["role_contract"])
 
     tools =
@@ -472,7 +477,7 @@ defmodule Kodo.Agent.Loop do
 
     with :ok <- within_budget(invocation, usage(current_turn(events)), budgets),
          {:ok, capability_validation} <-
-           adapter.validate_model(primary["model"], primary, contract),
+           adapter.validate_model(primary_model, primary, contract),
          {:ok, request} <- resolve_request(session_id, primary),
          {:ok, invocation_id} <-
            start_invocation(
@@ -487,7 +492,11 @@ defmodule Kodo.Agent.Loop do
          :ok <- rehoming_boundary(),
          {:ok, response} <-
            Sessions.dispatch_if_owner(ownership, fn ->
-             generate(adapter, request, transcript(events, contract), tools,
+             generate(
+               adapter,
+               request,
+               transcript(events, contract, primary["execution_route"] || primary["provider"]),
+               tools,
                timeout: budgets[:model_timeout],
                reasoning: primary["reasoning"]
              )
@@ -506,7 +515,7 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp transcript(events, contract) do
+  defp transcript(events, contract, current_route) do
     system = %{"role" => "system", "content" => contract.prompt}
 
     primary_invocations =
@@ -514,24 +523,54 @@ defmodule Kodo.Agent.Loop do
       |> Enum.filter(&(&1.type == "model_invocation_started"))
       |> MapSet.new(& &1.payload["invocation_id"])
 
+    invocation_routes =
+      events
+      |> Enum.filter(&(&1.type == "model_invocation_started"))
+      |> Map.new(&{&1.payload["invocation_id"], &1.payload["provider"]})
+
     Enum.reduce(events, [system], fn event, messages ->
-      case transcript_message(event, primary_invocations) do
+      case transcript_message(event, primary_invocations, invocation_routes, current_route) do
         nil -> messages
         message -> messages ++ [message]
       end
     end)
   end
 
-  defp transcript_message(%{type: "user_message", payload: payload}, _primary_invocations),
-    do: %{"role" => "user", "content" => payload["content"]}
+  defp transcript_message(
+         %{type: "user_message", payload: payload},
+         _primary_invocations,
+         _invocation_routes,
+         _current_route
+       ),
+       do: %{"role" => "user", "content" => payload["content"]}
 
-  defp transcript_message(%{type: "model_response", payload: payload}, _primary_invocations),
-    do: assistant_message(payload)
+  defp transcript_message(
+         %{type: "model_response", payload: payload},
+         _primary_invocations,
+         invocation_routes,
+         current_route
+       ) do
+    if invocation_routes[payload["invocation_id"]] == current_route do
+      assistant_message(payload)
+    else
+      visible_assistant_message(payload)
+    end
+  end
 
-  defp transcript_message(%{type: "review_feedback", payload: payload}, _primary_invocations),
-    do: %{"role" => "user", "content" => payload["content"]}
+  defp transcript_message(
+         %{type: "review_feedback", payload: payload},
+         _primary_invocations,
+         _invocation_routes,
+         _current_route
+       ),
+       do: %{"role" => "user", "content" => payload["content"]}
 
-  defp transcript_message(%{type: type, payload: payload}, primary_invocations)
+  defp transcript_message(
+         %{type: type, payload: payload},
+         primary_invocations,
+         _invocation_routes,
+         _current_route
+       )
        when type in ["tool_completed", "tool_failed"] do
     if MapSet.member?(primary_invocations, payload["invocation_id"]) do
       content =
@@ -546,18 +585,23 @@ defmodule Kodo.Agent.Loop do
     end
   end
 
-  defp transcript_message(_event, _primary_invocations), do: nil
+  defp transcript_message(_event, _primary_invocations, _invocation_routes, _current_route),
+    do: nil
 
   defp assistant_message(%{"assistant" => nil} = payload) do
+    visible_assistant_message(payload)
+  end
+
+  defp assistant_message(%{"assistant" => provider_state}),
+    do: %{"role" => "assistant", "provider_state" => provider_state}
+
+  defp visible_assistant_message(payload) do
     %{
       "role" => "assistant",
       "content" => payload["text"] || "",
       "tool_calls" => payload["tool_calls"] || []
     }
   end
-
-  defp assistant_message(%{"assistant" => provider_state}),
-    do: %{"role" => "assistant", "provider_state" => provider_state}
 
   defp start_invocation(
          session_id,
@@ -809,10 +853,11 @@ defmodule Kodo.Agent.Loop do
 
   defp run_search(question, parent_call, context) do
     search = ModelMapping.role!(context.mapping, :search)
+    search_model = ModelMapping.request_model(search)
     contract = Roles.fetch!(:search, search["role_contract"])
 
     with {:ok, capability_validation} <-
-           context.adapter.validate_model(search["model"], search, contract) do
+           context.adapter.validate_model(search_model, search, contract) do
       state = %{
         parent_call: parent_call,
         search: search,
@@ -1634,7 +1679,8 @@ defmodule Kodo.Agent.Loop do
 
   defp resolve_request(session_id, role) do
     with {:ok, scope} <- Sessions.owner_scope(session_id),
-         {:ok, model, reference} <- LLM.resolve_integration(scope, role["model"]) do
+         {:ok, model, reference} <-
+           LLM.resolve_integration(scope, ModelMapping.request_model(role)) do
       {:ok, %{scope: scope, model: model, reference: reference}}
     end
   end
