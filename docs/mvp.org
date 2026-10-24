@@ -76,6 +76,21 @@ The user can see each consequential action, stop an active turn, and inspect
 the resulting working-tree changes. Kodo reports what actually happened rather
 than relying on the model's description of its work.
 
+* Engineering principles
+
+These hold across Kodo's [[https://chaba-rfds.pages.dev/?project=kodo][RFDs]].
+
+- Session durability must not make recovery cost grow without bound.
+- Database work should be proportional to live replicas and active sessions,
+  not historical sessions, completed coordinators, total users, or unrelated
+  event traffic.
+- Ownership checks and recovery optimization must preserve fencing and the
+  documented failure-detection bound.
+- User-owned collections are scoped in the database query rather than fetched
+  and filtered afterward.
+- Protocol changes remain compatible across rolling control-plane and runner
+  upgrades unless an RFD explicitly defines a migration boundary.
+
 * System architecture
 
 #+begin_example
