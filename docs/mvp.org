@@ -122,7 +122,7 @@ replicated Phoenix deployment is supported.
 Kodo ships as one binary. The current transitional interface uses ~kodo start~
 and ~kodo resume~ to host the workspace runner and interact with a session.
 Running ~kodo --headless~ hosts the runner without an interactive client and
-reports which sessions send it work. RFD 4 proposes making the full-screen TUI
+reports which sessions send it work. [[https://chaba-rfds.pages.dev/rfd/0015/][RFD 15]] proposes making the full-screen TUI
 the default ~kodo~ behavior once it reaches parity with the transitional
 commands. There is no separate daemon or standard-input tool protocol.
 
@@ -760,7 +760,7 @@ Pareto tradeoff rather than simply selecting the highest raw quality score.
 ** DONE Milestone 6: Bound control-plane database load
 
 The design boundary and acceptance measurements are tracked in
-[[file:../rfd/0001/README.adoc][RFD 1: Bound control-plane database load]]. This milestone remains the MVP
+[[https://chaba-rfds.pages.dev/rfd/0007/][RFD 7: Bound control-plane database load]]. This milestone remains the MVP
 delivery checklist.
 
 - [X] Stop terminal session coordinators after finalization and lazily restart
